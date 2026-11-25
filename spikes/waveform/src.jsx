@@ -99,36 +99,73 @@ function frame() {
   return new Promise(resolve => requestAnimationFrame(() => resolve(performance.now())));
 }
 
+function frameStamp() {
+  return new Promise(resolve => requestAnimationFrame(stamp => resolve({ stamp, at: performance.now() })));
+}
+
 function Waveform() {
   const container = useRef(null);
   const status = useRef(null);
   useEffect(() => {
     const canvases = [...container.current.querySelectorAll('canvas')];
     const timeArea = canvases[0].parentElement;
-    const metrics = new URLSearchParams(location.search).has('measure')
-      ? (window.waveMeasurement = { frames: [] }) : null;
+    const params = new URLSearchParams(location.search);
+    const metrics = params.has('measure') ? (window.waveMeasurement = { frames: [] }) : null;
+    const mode = metrics ? params.get('draw') ?? 'direct' : 'direct';
+    const baseline = mode === 'baseline';
     let metadata;
     let range;
     let revision = 0;
     let previousX;
+    let accuratePlots;
+    let drawnAccurateRevision = 0;
     const pixels = () => Math.min(4096, Math.max(1, canvases[0].clientWidth - left - right));
     const report = error => { status.current.textContent = error.message; };
+    const focused = () => document.visibilityState === 'visible' && document.hasFocus();
+    const drawTimePlots = (plots, bounds) => plots.forEach((points, i) =>
+      draw(canvases[i], points, bounds, metadata.channels[channels[i]], metadata.channels[0], colors[i]));
 
     async function refresh(inputAt, kind) {
       const current = ++revision;
       const bounds = range;
       const requestAt = performance.now();
+      const inputFocused = metrics ? focused() : undefined;
       const request = { op: 'viewport', from: bounds[0], to: bounds[1], pixels: pixels(), channels };
-      const { result, timing } = await query(request);
-      const drawAt = await frame();
+      const response = query(request);
+      let preview;
+      if (!baseline && accuratePlots) {
+        const previewAt = performance.now();
+        drawTimePlots(accuratePlots, bounds);
+        if (metrics) {
+          const drawMs = performance.now() - previewAt;
+          preview = frameStamp().then(({ stamp, at }) => ({
+            stamp, drawMs, focused: focused(),
+            candidateMs: current === revision && drawnAccurateRevision !== current ? at - inputAt : null,
+          }));
+        }
+      }
+      const { result, timing } = await response;
+      const readyAt = performance.now();
+      const scheduled = mode !== 'direct' ? await frameStamp() : undefined;
       if (current !== revision) return;
-      result.plots.forEach((points, i) =>
-        draw(canvases[i], points, bounds, metadata.channels[channels[i]], metadata.channels[0], colors[i]));
-      const drawMs = performance.now() - drawAt;
-      // Draw in one animation callback, then sample the next rendering opportunity.
+      const drawAt = performance.now();
+      drawTimePlots(result.plots, bounds);
+      const drawnAt = performance.now();
+      accuratePlots = result.plots;
+      drawnAccurateRevision = current;
+      // Both paths use the first rAF callback after their Canvas draw.
       const presentedAt = await frame();
       if (metrics) {
-        metrics.frames.push({ kind, bounds, pixels: request.pixels, ...timing, drawMs,
+        const presentedFocused = focused();
+        const sampledPreview = await preview;
+        if (current !== revision) return;
+        metrics.frames.push({ kind, bounds, pixels: request.pixels, ...timing,
+          preview: sampledPreview && {
+            drawMs: sampledPreview.drawMs, focused: sampledPreview.focused,
+            endToFrameMs: sampledPreview.stamp === scheduled?.stamp ? null : sampledPreview.candidateMs,
+          },
+          inputFocused, presentedFocused,
+          drawMs: drawnAt - drawAt, preDrawWaitMs: drawAt - readyAt, postDrawWaitMs: presentedAt - drawnAt,
           startDelayMs: requestAt - inputAt, endToFrameMs: presentedAt - inputAt });
         if (kind === 'first') metrics.firstPlots = result.plots;
       }
@@ -159,7 +196,7 @@ function Waveform() {
 
     function wheel(event) {
       if (!range) return;
-      event.preventDefault();
+      if (baseline) event.preventDefault();
       const fraction = (event.clientX - timeArea.getBoundingClientRect().left - left) / pixels();
       const anchor = range[0] + fraction * (range[1] - range[0]);
       const scale = event.deltaY < 0 ? 0.8 : 1.25;
@@ -180,7 +217,7 @@ function Waveform() {
       refresh(event.timeStamp, 'pan').catch(report);
     }
     function endDrag() { previousX = undefined; }
-    timeArea.addEventListener('wheel', wheel, { passive: false });
+    timeArea.addEventListener('wheel', wheel, { passive: !baseline });
     timeArea.addEventListener('pointerdown', pointerdown);
     timeArea.addEventListener('pointermove', pointermove);
     timeArea.addEventListener('lostpointercapture', endDrag);

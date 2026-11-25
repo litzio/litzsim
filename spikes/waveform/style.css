@@ -1,6 +1,7 @@
 * { box-sizing: border-box; }
+html, body { overflow: hidden; overscroll-behavior: none; }
 body { margin: 0; background: #f0f2f5; color: #202631; font: 14px system-ui, sans-serif; }
-main { display: grid; grid-template-rows: 40px minmax(0, 4fr) minmax(0, 1fr); height: 100vh; min-height: 680px; }
+main { display: grid; grid-template-rows: 40px minmax(0, 4fr) minmax(0, 1fr); height: 100vh; }
 header { display: flex; align-items: center; gap: 16px; padding-inline: 24px; }
 h1 { margin: 0; font-size: 16px; }
 output { color: #505765; }

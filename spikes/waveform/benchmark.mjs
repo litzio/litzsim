@@ -13,6 +13,7 @@ const fixture = join(build, 'wave-spike');
 const cli = join(build, 'litzsim-cli.exe');
 const viewer = join(build, 'viewer-test.exe');
 const serverScript = fileURLToPath(new URL('server.mjs', import.meta.url));
+const foregroundScript = fileURLToPath(new URL('foreground.ps1', import.meta.url));
 const load = page => page.evaluate(() => window.waveMeasurement);
 const p95 = values => [...values].sort((a, b) => a - b)[Math.ceil(values.length * 0.95) - 1];
 
@@ -20,6 +21,21 @@ async function warm(file) {
   for await (const chunk of createReadStream(file, { highWaterMark: 1024 * 1024 })) {
     assert(chunk.length > 0);
   }
+}
+
+async function frameCadence(page) {
+  const intervals = await page.evaluate(async () => {
+    const next = () => new Promise(resolve => requestAnimationFrame(resolve));
+    const intervals = [];
+    let previous = await next();
+    for (let i = 0; i < 24; ++i) {
+      const current = await next();
+      intervals.push(current - previous);
+      previous = current;
+    }
+    return intervals;
+  });
+  return { medianMs: [...intervals].sort((a, b) => a - b)[11], p95Ms: p95(intervals) };
 }
 
 function verify(measurement, raw) {
@@ -60,21 +76,64 @@ function memory(processInfo, hostPid) {
   }));
 }
 
-async function trial(file, name, i) {
+function monitorWindow(browserPid) {
+  const child = spawn('powershell.exe', [
+    '-NoProfile', '-File', foregroundScript, String(browserPid),
+  ], { windowsHide: true });
+  const output = createInterface({ input: child.stdout });
+  const closed = once(child, 'close');
+  child.stderr.pipe(process.stderr, { end: false });
+  const ready = Promise.race([
+    once(output, 'line').then(([line]) => line),
+    closed.then(() => { throw new Error('Window monitor stopped before its first sample'); }),
+  ]);
+  let lastLine;
+  output.on('line', line => { lastLine = line; });
+  return {
+    ready,
+    async stop() {
+      child.stdin.end();
+      const [code] = await closed;
+      assert.equal(code, 0);
+      return JSON.parse(lastLine);
+    },
+  };
+}
+
+async function trial(file, name, i, drawMode = 'direct') {
   await warm(file);
   const host = spawn(process.execPath, [serverScript, cli, file, join(fixture, 'web')], { windowsHide: true });
   const closed = once(host, 'close');
   const output = createInterface({ input: host.stdout });
   host.stderr.pipe(process.stderr, { end: false });
   let browser;
+  let windowMonitor;
   try {
     const [port] = await Promise.race([
       once(output, 'line'),
       closed.then(() => { throw new Error('Local server closed during startup'); }),
     ]);
-    browser = await chromium.launch({ headless: false });
+    browser = await chromium.launch({
+      headless: false,
+      ignoreDefaultArgs: ['--disable-backgrounding-occluded-windows',
+        '--disable-background-timer-throttling', '--disable-renderer-backgrounding'],
+    });
+    const cdp = await browser.newBrowserCDPSession();
+    const activeProcess = await cdp.send('SystemInfo.getProcessInfo');
+    const browserPid = activeProcess.processInfo.find(item => item.type === 'browser').id;
     const page = await browser.newPage({ viewport: { width: 1280, height: 780 } });
-    await page.goto(`http://127.0.0.1:${port}/?measure`);
+    await page.bringToFront();
+    windowMonitor = monitorWindow(browserPid);
+    assert.equal(await windowMonitor.ready, 'sampling');
+    await page.addInitScript(() => {
+      let lostFocus = 0;
+      window.focusLosses = () => lostFocus;
+      addEventListener('blur', () => { ++lostFocus; });
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) ++lostFocus;
+      });
+    });
+    await page.goto(`http://127.0.0.1:${port}/?measure&draw=${drawMode}`);
     await page.waitForFunction(() => window.waveMeasurement?.xy);
     const plots = await page.locator('canvas').all();
     assert.equal(plots.length, 5);
@@ -90,7 +149,9 @@ async function trial(file, name, i) {
       });
       return response.json();
     });
-    if (i === 0) await page.screenshot({ path: join(fixture, `${name}-windows.png`) });
+    if (i === 0 && drawMode === 'direct')
+      await page.screenshot({ path: join(fixture, `${name}-direct-windows.png`) });
+    const cadenceBefore = await frameCadence(page);
     for (let j = 0; j < 50; ++j) {
       const direction = j % 4 < 2 ? 1 : -1;
       await page.mouse.move(640, 100);
@@ -104,9 +165,17 @@ async function trial(file, name, i) {
       await page.waitForFunction(count => window.waveMeasurement.frames.length === count, j + 2);
     }
     const measured = await load(page);
+    const cadenceAfter = await frameCadence(page);
+    const foreground = await windowMonitor.stop();
+    windowMonitor = undefined;
     verify(measured, raw);
+    const pageFocus = {
+      losses: await page.evaluate(() => window.focusLosses()),
+      unfocusedInputs: measured.frames.filter(frame => !frame.inputFocused).length,
+      unfocusedExactFrames: measured.frames.filter(frame => !frame.presentedFocused).length,
+      unfocusedPreviews: measured.frames.filter(frame => frame.preview && !frame.preview.focused).length,
+    };
     const dpr = await page.evaluate(() => window.devicePixelRatio);
-    const cdp = await browser.newBrowserCDPSession();
     const { processInfo } = await cdp.send('SystemInfo.getProcessInfo');
     const peaks = memory(processInfo, host.pid);
     assert(peaks.some(p => p.type === 'litzsim-cli'));
@@ -117,30 +186,56 @@ async function trial(file, name, i) {
       frame.frameWaitMs = frame.endToFrameMs - frame.startDelayMs - frame.fetchMs - frame.decodeMs - frame.drawMs;
     }
     const [first, ...interactions] = frames;
+    const previews = interactions.map(item => item.preview?.endToFrameMs).filter(Number.isFinite);
+    if (drawMode !== 'baseline') {
+      assert(previews.length > 0);
+    }
+    const previewP95Ms = previews.length ? p95(previews) : null;
     const summary = {
-      browser: browser.version(), dpr, open, first, xyTiming, interactions, peaks,
+      browser: browser.version(), dpr, drawMode, foreground, pageFocus, cadenceBefore, cadenceAfter,
+      open, first, xyTiming, interactions, peaks,
+      previewCount: previews.length, previewP95Ms,
       p95: Object.fromEntries(['endToFrameMs', 'queryMs', 'encodeMs', 'pipeOverheadMs', 'httpOverheadMs',
-        'decodeMs', 'drawMs', 'startDelayMs', 'frameWaitMs'].map(key => [key, p95(interactions.map(frame => frame[key]))])),
+        'decodeMs', 'drawMs', 'startDelayMs', 'frameWaitMs', 'preDrawWaitMs', 'postDrawWaitMs']
+        .map(key => [key, p95(interactions.map(frame => frame[key]))])),
       byInput: Object.fromEntries(['pan', 'zoom'].map(kind =>
         [kind, p95(interactions.filter(frame => frame.kind === kind).map(frame => frame.endToFrameMs))])),
       maxBytes: Math.max(...interactions.map(frame => frame.bytes)),
     };
-    console.log(name, i + 1, JSON.stringify({
-      firstMs: first.endToFrameMs, ...summary.p95, maxBytes: summary.maxBytes, peaks,
+    console.log(name, i + 1, drawMode, JSON.stringify({
+      firstMs: first.endToFrameMs, previewP95Ms, previewCount: previews.length,
+      ...summary.p95, maxBytes: summary.maxBytes, foreground, pageFocus, cadenceBefore, cadenceAfter,
     }));
     return summary;
   } finally {
-    await browser?.close();
-    host.stdin.end();
-    await closed;
+    try {
+      await windowMonitor?.stop();
+    } finally {
+      try {
+        await browser?.close();
+      } finally {
+        host.stdin.end();
+        await closed;
+      }
+    }
   }
 }
 
 const mode = process.argv[3] ?? 'all';
-assert(['web', 'qt', 'all'].includes(mode));
+assert(['web', 'qt', 'all', 'compare'].includes(mode));
 for (const [name, wave] of [['engine', 'native.wave'], ['csv', 'samples.wave']]) {
   const file = join(fixture, wave);
   const browserResults = join(fixture, `${name}-browser.json`);
+  if (mode === 'compare') {
+    const modes = ['baseline', 'scheduled', 'direct'];
+    const comparisons = [];
+    for (let i = 0; i < 3; ++i) {
+      for (let j = 0; j < modes.length; ++j)
+        comparisons.push(await trial(file, name, i, modes[(i + j) % modes.length]));
+    }
+    await writeFile(join(fixture, `${name}-comparison.json`), JSON.stringify(comparisons, null, 2));
+    continue;
+  }
   if (mode !== 'qt') {
     const web = [];
     for (let i = 0; i < 3; ++i) web.push(await trial(file, name, i));
