@@ -118,6 +118,12 @@ QStringList Circuit::missingPins() const {
         }
     return missing;
 }
+QString Circuit::gateSignal(const QString& terminal) const {
+    const auto gates=document["control"].toObject()["gateSignals"].toObject();
+    for(auto it=gates.begin();it!=gates.end();++it)
+        if(it.value().toString()==terminal) return it.key();
+    return {};
+}
 void Circuit::move(const QString& id, int x, int y) {
     require(document["parts"].toObject().contains(id), "unknown part: " + id);
     auto layout = document["layout"].toObject();

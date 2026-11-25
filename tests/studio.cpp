@@ -6,13 +6,145 @@
 #include <QJsonDocument>
 #include <QApplication>
 #include <QTemporaryDir>
-#include <QGraphicsSimpleTextItem>
+#include <QGraphicsItem>
+#include <algorithm>
+
+namespace {
+QPointF terminal(const Sheet& sheet,const QString& name) {
+    for(auto* item:sheet.scene()->items())
+        if(item->data(1).toString()==name) return item->scenePos();
+    throw std::runtime_error(("missing scene terminal: "+name).toStdString());
+}
+
+int partLabelSize(const Sheet& sheet,const QString& id,bool value=false) {
+    for(auto* item:sheet.scene()->items()) {
+        const auto* label=qgraphicsitem_cast<QGraphicsSimpleTextItem*>(item);
+        if(label && label->data(0).toString()==id && (label->text()!=id)==value)
+            return label->font().pixelSize();
+    }
+    throw std::runtime_error(("missing part label: "+id).toStdString());
+}
+
+void verifyMark(const Sheet& sheet,const QString& id,const QString& text,const QString& pin,
+                int minSize=22,int maxSize=22) {
+    int matches=0;
+    const auto target=terminal(sheet,id+"."+pin);
+    for(auto* item:sheet.scene()->items()) {
+        const auto* label=qgraphicsitem_cast<QGraphicsSimpleTextItem*>(item);
+        if(!label || label->data(0).toString()!=id || label->text()!=text) continue;
+        const int size=label->font().pixelSize();
+        if(minSize>0 && (size<minSize || size>maxSize))
+            throw std::runtime_error(("terminal mark outside size range: "+id+" "+text).toStdString());
+        const auto area=label->sceneBoundingRect();
+        const auto nearest=QPointF(std::clamp(target.x(),area.left(),area.right()),
+                                   std::clamp(target.y(),area.top(),area.bottom()));
+        // Single glyphs are anchored within one grid step. Signal names grow outward from their anchor.
+        const bool near=minSize>0 ? QLineF(area.center(),target).length()<32
+                                  : QLineF(nearest,target).length()<18;
+        if(near && label->brush().color()==Qt::black) ++matches;
+    }
+    if(matches!=1) throw std::runtime_error(("missing or misplaced mark: "+id+" "+text).toStdString());
+}
+
+void verifySymbol(const Sheet& sheet,const QString& id,const QStringList& pins,bool current=false) {
+    for(auto* item:sheet.scene()->items()) {
+        const auto* symbol=qgraphicsitem_cast<QGraphicsPathItem*>(item);
+        if(!symbol || symbol->data(0).toString()!=id) continue;
+        const auto path=symbol->path();
+        QList<QPointF> ends;
+        QList<QLineF> strokes;
+        QLineF shaft;
+        for(int i=0;i<path.elementCount();++i) {
+            const auto point=path.elementAt(i);
+            ends.append(symbol->mapToScene(point.x,point.y));
+            if(!current || !point.isLineTo() || i==0) continue;
+            const auto start=path.elementAt(i-1);
+            const QLineF stroke(ends[i-1],ends.last());
+            strokes.append(stroke);
+            if(start.x*point.x<0 && start.y==point.y && stroke.length()>15) shaft=stroke;
+        }
+        bool connected=true;
+        for(const auto& pin:pins)
+            if(!ends.contains(terminal(sheet,id+"."+pin))) connected=false;
+        if(!connected || symbol->pen().color()!=Qt::black) continue;
+        if(!current) return;
+        const auto direction=terminal(sheet,id+".n")-terminal(sheet,id+".p");
+        if(QPointF::dotProduct(direction,shaft.p2()-shaft.p1())<0)
+            shaft=QLineF(shaft.p2(),shaft.p1());
+        // Two angled strokes must meet at the tip on the n side of the shaft.
+        const auto wings=std::count_if(strokes.begin(),strokes.end(),[&](QLineF stroke){
+            if(stroke.p2()==shaft.p2()) stroke=QLineF(stroke.p2(),stroke.p1());
+            const auto wing=stroke.p2()-stroke.p1();
+            return stroke.p1()==shaft.p2() && QPointF::dotProduct(direction,wing)<0 &&
+                   (direction.x()*wing.y()-direction.y()*wing.x())!=0;
+        });
+        if(wings==2) return;
+    }
+    throw std::runtime_error(("symbol disagrees with its terminals: "+id).toStdString());
+}
+
+void verifySchematic(const QString& examples) {
+    for(const QString name:{"rc","buck","pfc"}) {
+        const auto path=examples+"/"+name+".litzsim";
+        Sheet sheet(path,Circuit::load(path),nullptr);
+        const QString probe=name=="pfc" ? "Vdc" : "VC";
+        verifyMark(sheet,probe,"+","p");
+        for(auto* item:sheet.scene()->items()) {
+            const auto* wire=qgraphicsitem_cast<QGraphicsLineItem*>(item);
+            const auto* junction=qgraphicsitem_cast<QGraphicsEllipseItem*>(item);
+            const auto* text=qgraphicsitem_cast<QGraphicsSimpleTextItem*>(item);
+            const auto* symbol=qgraphicsitem_cast<QGraphicsPathItem*>(item);
+            if((wire && wire->pen().color()!=Qt::black) ||
+               (junction && junction->brush().color()!=Qt::black) ||
+               (symbol && symbol->pen().color()!=Qt::black) ||
+               (text && text->brush().color()!=Qt::black))
+                throw std::runtime_error(("unexpected diagram color or routing warning: "+name).toStdString());
+        }
+        const auto gates=sheet.circuit.document["control"].toObject()["gateSignals"].toObject();
+        QStringList transistors;
+        for(auto it=gates.begin();it!=gates.end();++it) {
+            const auto pin=it.value().toString();
+            transistors.append(pin.section('.',0,0));
+            const auto end=terminal(sheet,pin);
+            for(auto* item:sheet.scene()->items()) {
+                const auto* wire=qgraphicsitem_cast<QGraphicsLineItem*>(item);
+                if(wire && (wire->line().p1()==end || wire->line().p2()==end))
+                    throw std::runtime_error("controller mapping drawn as a physical wire");
+            }
+        }
+        if(name=="buck") transistors.append("Q1");
+        const QStringList sensors=name=="pfc" ? QStringList{"IL1","IL2"} : QStringList{};
+        for(int turn=0;turn<4;++turn) {
+            verifySymbol(sheet,probe,{"p","n"});
+            verifyMark(sheet,probe,"+","p");
+            verifyMark(sheet,probe,"−","n");
+            for(const auto& id:sensors) verifySymbol(sheet,id,{"p","n"},true);
+            for(const auto& id:transistors) {
+                verifySymbol(sheet,id,{"d","g","s"});
+                const int valueSize=partLabelSize(sheet,"L1",true);
+                const int idSize=partLabelSize(sheet,id);
+                verifyMark(sheet,id,"D","d",valueSize,idSize);
+                verifyMark(sheet,id,"G","g",valueSize,idSize);
+                verifyMark(sheet,id,"S","s",valueSize,idSize);
+            }
+            for(auto it=gates.begin();it!=gates.end();++it)
+                verifyMark(sheet,it.value().toString().section('.',0,0),"제어 "+it.key(),"g",0);
+            sheet.circuit.rotate(probe);
+            for(const auto& id:sensors+transistors) sheet.circuit.rotate(id);
+            sheet.redraw();
+        }
+    }
+}
+}
+
 int main(int argc,char** argv) {
     QApplication app(argc,argv);
     if (argc!=2) return 2;
     QTemporaryDir dir;
     Studio studio(dir.path());
     QString examples=QString::fromLocal8Bit(argv[1]);
+    try {verifySchematic(examples);}
+    catch(const std::exception& error) {qWarning()<<error.what();return 8;}
     QString a=dir.filePath("a.litzsim"),b=dir.filePath("b.litzsim");
     Circuit::load(examples+"/rc.litzsim").save(a);
     Circuit::load(examples+"/buck.litzsim").save(b);

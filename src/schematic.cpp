@@ -34,41 +34,47 @@ QList<QPoint> offsets(const QString& type) {
 QPainterPath glyph(const QString& t) {
     QPainterPath p;
     auto line=[&](double x,double y,double a,double b){p.moveTo(x,y);p.lineTo(a,b);};
+    auto diode=[&](double x){
+        line(x-8,-7,x+8,-7);
+        p.moveTo(x-7,7);p.lineTo(x,-7);p.lineTo(x+7,7);p.closeSubpath();
+    };
     if (t=="resistor") {
         p.moveTo(-32,0);p.lineTo(-16,0);
         for (int k=0;k<6;++k) p.lineTo(-13+5*k,k%2 ? 5 : -5);
         p.lineTo(16,0);p.lineTo(32,0);
     } else if (t=="inductor") {
         p.moveTo(-32,0);p.lineTo(-26,0);
-        for (int k=0;k<4;++k) p.cubicTo(-26+13*k,-15,-13+13*k,-15,-13+13*k,0);
+        for (int k=0;k<4;++k) p.arcTo(-26+13*k,-9,13,18,180,-180);
         p.lineTo(32,0);
     } else if (t=="capacitor") {
         line(0,-32,0,-4);line(-15,-4,15,-4);line(-15,4,15,4);line(0,4,0,32);
     } else if (t=="ground") {
         line(0,-32,0,-4);line(-12,-4,12,-4);line(-8,1,8,1);line(-3,6,3,6);
     } else if (t=="diode") {
-        line(0,32,0,7);p.moveTo(-8,7);p.lineTo(0,-7);p.lineTo(8,7);p.closeSubpath();
-        line(-9,-7,9,-7);line(0,-7,0,-32);
+        line(0,32,0,7);diode(0);line(0,-7,0,-32);
     } else if (t=="nmos") {
-        line(-32,0,-18,0);line(-18,-19,-18,19);
-        line(-13,-19,-13,-8);line(-13,-5,-13,5);line(-13,8,-13,19);
-        line(0,-32,0,-14);line(0,14,0,32);
-        line(-13,-14,12,-14);line(-13,14,12,14);
-        line(-7,0,-3,0);line(-3,0,-3,14);
-        line(12,-14,12,-5);line(7,-5,17,-5);line(12,5,12,14);
-        p.moveTo(-12,0);p.lineTo(-6,-3);p.lineTo(-6,3);p.closeSubpath();
-        p.moveTo(12,-5);p.lineTo(6,5);p.lineTo(18,5);p.closeSubpath();
-        p.addEllipse(QPointF(0,-14),1.5,1.5);p.addEllipse(QPointF(0,14),1.5,1.5);
+        line(-32,0,-22,0);line(-22,-24,-22,24);
+        line(-16,-24,-16,-13);line(-16,-6,-16,6);line(-16,13,-16,24);
+        line(0,-32,0,-20);line(0,20,0,32);
+        line(-16,-20,13,-20);line(-16,20,13,20);
+        // The substrate is tied to S; the diode's cathode is at D.
+        line(-16,0,4,0);line(4,0,4,20);
+        p.moveTo(-16,0);p.lineTo(-8,-4);p.lineTo(-8,4);p.closeSubpath();
+        line(13,-20,13,-7);diode(13);line(13,7,13,20);
+        p.addEllipse(QPointF(0,-20),1.4,1.4);p.addEllipse(QPointF(0,20),1.4,1.4);
+        p.addEllipse(QPointF(4,20),1.4,1.4);
+    } else if (t=="dc") {
+        line(0,-32,0,-4);line(-15,-4,15,-4);
+        line(-8,4,8,4);line(0,4,0,32);
     } else if (t=="ammeter") {
-        p.addEllipse(QPointF{},16,16);line(-32,0,-16,0);line(16,0,32,0);
-        line(-10,0,9,0);line(9,0,3,-5);line(9,0,3,5);
+        p.addEllipse(QPointF{},20,20);line(-32,0,-20,0);line(20,0,32,0);
+        // Follow the core's positive current reference: p on the left, n on the right.
+        line(-11,8,10,8);line(10,8,5,4);line(10,8,5,12);
     } else {
         line(0,-32,0,-20);line(0,20,0,32);p.addEllipse(QPointF{},20,20);
-        if (t=="dc") {line(-4,-5,4,-5);line(0,-9,0,-1);line(-4,6,4,6);}
-        if (t=="pwm") {p.moveTo(-9,4);p.lineTo(-4,4);p.lineTo(-4,-5);p.lineTo(4,-5);p.lineTo(4,4);p.lineTo(9,4);}
+        if (t=="pwm") {p.moveTo(-13,6);p.lineTo(-7,6);p.lineTo(-7,-6);p.lineTo(7,-6);p.lineTo(7,6);p.lineTo(13,6);}
         if (t=="sine") {p.moveTo(-14,0);p.cubicTo(-10,-15,-5,-15,0,0);p.cubicTo(5,15,10,15,14,0);}
         if (t=="sink") {line(0,-11,0,10);line(0,10,-5,4);line(0,10,5,4);}
-        if (t=="voltmeter" || t=="ammeter") p.addText(-5,5,QApplication::font(),t=="voltmeter"?"V":"A");
     }
     return p;
 }
@@ -91,9 +97,10 @@ QString valueLabel(const QString& type,const QJsonObject& values) {
 }
 struct Caption {
     QString text;
-    QPoint offset;
+    QPointF offset;
     int size;
     bool bold;
+    bool reservesWireSpace=true;
     QFont font() const {
         auto f=QApplication::font(); f.setPixelSize(size); f.setBold(bold); return f;
     }
@@ -103,39 +110,71 @@ struct Caption {
     }
 };
 
-QList<Caption> captions(const QString& id,const QJsonObject& part,int angle) {
+QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObject& part,int angle) {
+    constexpr int valueLabelSize=13;
     const auto type=part["type"].toString();
     bool horizontal=type=="inductor" || type=="resistor" || type=="ammeter";
     if(angle%180) horizontal=!horizontal;
     QPoint name=horizontal ? QPoint(-16,-36) : QPoint(23,-16);
+    if(type=="ammeter" && horizontal) name.ry()-=4;
     QList<Caption> labels{{id,name,16,true}};
     const auto value=valueLabel(type,part["parameters"].toObject());
-    if(!value.isEmpty()) labels.append({value,horizontal ? QPoint(-24,6) : name+QPoint(0,20),13,false});
+    if(!value.isEmpty()) labels.append({value,horizontal ? QPoint(-24,6) : name+QPoint(0,20),valueLabelSize,false});
+    // Rotate terminal-relative anchors and keep the lettering upright.
+    // Preserve the router's existing ID and value reservations.
+    auto mark=[&](const QString& text,QPoint anchor,int size=14,bool bold=false,bool outsideGate=false) {
+        Caption caption{text,{},size,bold,false};
+        const auto rect=caption.bounds();
+        caption.offset=rotatePoint(anchor,angle)-rect.center();
+        if(outsideGate) {
+            const QPoint outward=rotatePoint(QPoint(-1,0),angle);
+            caption.offset+=QPointF(outward.x()*rect.width()/2,outward.y()*rect.height()/2);
+        }
+        labels.append(caption);
+    };
     if(type=="nmos") {
-        for(auto pin:QList<QPair<QString,QPoint>>{{"D",{3,-31}},{"G",{-33,-18}},{"S",{3,17}}})
-            labels.append({pin.first,rotatePoint(pin.second,angle),9,false});
+        const auto pins=offsets(type);
+        mark("D",pins[0]*pitch+QPoint(15,-13),valueLabelSize);
+        mark("G",pins[1]*pitch+QPoint(-2,17),valueLabelSize);
+        mark("S",pins[2]*pitch+QPoint(15,13),valueLabelSize);
+        const auto signal=circuit.gateSignal(id+".g");
+        if(!signal.isEmpty()) mark("제어 "+signal,{-46,14},14,false,true);
+        // On rotation the name follows the diode side, clear of the gate lead.
+        auto& label=labels.first();
+        const auto rect=label.bounds();
+        if(angle==0) label.offset.setX(27);
+        if(angle==90) label.offset={-rect.width()/2,27};
+        if(angle==180) label.offset={-27-rect.width(),-16};
+        if(angle==270) label.offset={-rect.width()/2,-27-rect.height()};
+    } else if(type=="voltmeter") {
+        const auto pins=offsets(type);
+        mark("V",{0,0});
+        mark("+",pins[0]*pitch+QPoint(-27,12),22,true);
+        mark("−",pins[1]*pitch+QPoint(-27,-12),22,true);
+    } else if(type=="ammeter") {
+        mark("A",{0,-8});
     }
     return labels;
 }
 
-QList<QRectF> footprint(const QString& id,const QJsonObject& part,int angle,QPoint center) {
+QList<QRectF> footprint(const Circuit& circuit,const QString& id,const QJsonObject& part,int angle,QPoint center) {
     QTransform turn;
     turn.rotate(angle);
     const QPoint origin=center*pitch;
     QList<QRectF> boxes{turn.mapRect(glyph(part["type"].toString()).boundingRect())
                              .translated(origin).adjusted(-3,-3,3,3)};
-    for(const auto& label:captions(id,part,angle))
+    for(const auto& label:captions(circuit,id,part,angle))
         boxes.append(label.bounds().translated(origin).adjusted(-2,-2,2,2));
     return boxes;
 }
 
 QString collision(const Circuit& c,const QString& id,QPoint at,int angle) {
     const auto parts=c.document["parts"].toObject(),layout=c.document["layout"].toObject();
-    const auto moving=footprint(id,parts[id].toObject(),angle,at);
+    const auto moving=footprint(c,id,parts[id].toObject(),angle,at);
     for(auto it=parts.begin();it!=parts.end();++it) {
         if(it.key()==id) continue;
         const auto pos=layout[it.key()].toObject();
-        const auto fixed=footprint(it.key(),it.value().toObject(),pos["rotation"].toInt(),position(pos));
+        const auto fixed=footprint(c,it.key(),it.value().toObject(),pos["rotation"].toInt(),position(pos));
         for(const auto& a:moving) for(const auto& b:fixed) if(a.intersects(b)) return it.key();
     }
     return {};
@@ -197,20 +236,20 @@ void Sheet::redraw() {
         auto pos=layout[id].toObject();
         auto center=position(pos);int angle=pos["rotation"].toInt();
         bounds=bounds.united(QRect(center,QSize(1,1)));blocked.insert(center);
-        QColor ink=id==selected || type=="ammeter" ? QColor("#007d72") : QColor("#223b47");
-        auto* symbol=scene()->addPath(glyph(type),QPen(ink,type=="nmos"?1.6:2,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin),
-            type=="nmos" ? QBrush(ink):QBrush(Qt::NoBrush));
+        const QColor ink=id==selected ? QColor("#007d72") : QColor(Qt::black);
+        auto* symbol=scene()->addPath(glyph(type),QPen(ink,2,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin),
+            type=="nmos" || type=="diode" ? QBrush(ink):QBrush(Qt::NoBrush));
         symbol->setData(0,id);symbol->setPos(center*pitch);symbol->setRotation(angle);symbol->setZValue(2);
         if (id==selected) {
             QPainterPath halo;halo.addRoundedRect(-40,-31,100,62,6,6);
             auto* h=scene()->addPath(halo,QPen(QColor("#259e92"),1,Qt::DashLine),QBrush("#def4ee"));
             h->setPos(center*pitch);h->setZValue(0);h->setData(0,id);
         }
-        for(const auto& caption:captions(id,it.value().toObject(),angle)) {
+        for(const auto& caption:captions(circuit,id,it.value().toObject(),angle)) {
             auto* label=scene()->addSimpleText(caption.text,caption.font());
-            label->setBrush(caption.bold ? ink : QColor("#536d79"));
+            label->setBrush(caption.reservesWireSpace && caption.bold ? ink : QColor(Qt::black));
             label->setPos(center*pitch+caption.offset);label->setData(0,id);label->setZValue(3);
-            if(caption.size>=13) reserveLabelEdges(label->sceneBoundingRect(),labelEdges);
+            if(caption.reservesWireSpace) reserveLabelEdges(label->sceneBoundingRect(),labelEdges);
         }
         const auto pins=library().value(type).pins;
         auto delta=offsets(type);
@@ -265,7 +304,7 @@ void Sheet::redraw() {
         auto edge=[&](QPoint a,QPoint b,const QString& pin){
             int axis=a.x()==b.x()?2:1;
             const bool active=activeNet==name;
-            auto* wire=scene()->addLine(QLineF(a*pitch,b*pitch),QPen(QColor(active?"#007d72":"#546e77"),active?3:1.8));
+            auto* wire=scene()->addLine(QLineF(a*pitch,b*pitch),QPen(active?QColor("#007d72"):QColor(Qt::black),active?3:1.8));
             wire->setData(2,pin);wire->setData(3,name);wire->setToolTip(name);wire->setZValue(-1);
             cached.segments.append({a,b,pin});
             tree.insert(a);tree.insert(b);directions[a]|=axis;directions[b]|=axis;
@@ -331,7 +370,7 @@ void Sheet::redraw() {
             occupied[p]|=directions.value(p);
             bool terminal=false;for(auto v:pins) if(pinPos[v.toString()]==p) terminal=true;
             if (degree.value(p)+int(terminal)>=3) {
-                auto* dot=scene()->addEllipse(-3,-3,6,6,Qt::NoPen,QBrush("#546e77"));dot->setPos(p*pitch);
+                auto* dot=scene()->addEllipse(-3,-3,6,6,Qt::NoPen,QBrush(Qt::black));dot->setPos(p*pitch);
             }
         }
         if(!complete) nextRoutes.remove(name);
@@ -340,12 +379,12 @@ void Sheet::redraw() {
     for(auto entry:circuit.document["annotations"].toArray()) {
         auto a=entry.toObject();QFont font=QApplication::font();font.setBold(true);font.setPixelSize(16);
         auto* label=scene()->addSimpleText(a["text"].toString(),font);
-        label->setBrush(QColor("#536d79"));label->setPos(position(a)*pitch);
+        label->setBrush(Qt::black);label->setPos(position(a)*pitch);
     }
     if(circuit.document["title"].isString()) {
         QFont font=QApplication::font();font.setPixelSize(25);font.setBold(true);
         auto* heading=scene()->addSimpleText(circuit.document["title"].toString(),font);
-        heading->setBrush(QColor("#233c48"));heading->setPos(0,-4*pitch);
+        heading->setBrush(Qt::black);heading->setPos(0,-4*pitch);
     }
     auto content=scene()->itemsBoundingRect();
     setSceneRect(content.isEmpty()?QRectF(-450,-300,900,600):content.adjusted(-80,-80,80,80));
