@@ -1,0 +1,7 @@
+{
+  "id": "local.litzsim",
+  "name": "LitzSim",
+  "icon": "ChartColumn",
+  "entry": "host.mjs",
+  "screen": "screen.jsx"
+}
