@@ -14,6 +14,9 @@
 
 namespace {
 using Vector = std::vector<double>;
+struct SingularSystem : std::runtime_error {
+    SingularSystem() : std::runtime_error("singular circuit system") {}
+};
 struct System {
     std::vector<Vector> a;
     Vector b;
@@ -26,7 +29,7 @@ struct System {
             int pivot=k;
             for (int i=k+1;i<n;++i)
                 if (std::abs(a[i][k]) > std::abs(a[pivot][k])) pivot=i;
-            if (a[pivot][k]==0) throw std::runtime_error("singular circuit system");
+            if (a[pivot][k]==0) throw SingularSystem();
             std::swap(a[pivot],a[k]); std::swap(b[pivot],b[k]);
             for (int i=k+1;i<n;++i) {
                 double factor=a[i][k]/a[k][k];
@@ -49,6 +52,7 @@ struct Device {
     double history;
     int gateDriver=-1;
     bool conducting=false;
+    bool driven=false;
 };
 double node(const Vector& x,int k) { return k<0 ? 0 : x.at(k); }
 bool pulseHigh(const Device& pulse,double t) {
@@ -123,6 +127,13 @@ void simulate(const Circuit& circuit,const Sample& emitSample) {
         // Integrate the interval using its interior switch state; end-point samples
         // report the left limit at discontinuities.
         const double interior=t-h/2;
+        bool turnOn=false;
+        for(auto& d:devices) {
+            if(d.gateDriver<0) continue;
+            const bool high=pulseHigh(devices[d.gateDriver],interior);
+            if(high && !d.driven) turnOn=true;
+            d.driven=high;
+        }
         Vector x;
         for (unsigned iteration=0;;++iteration) {
             if (iteration>32) throw std::runtime_error("ideal switch states did not converge");
@@ -142,8 +153,7 @@ void simulate(const Circuit& circuit,const Sample& emitSample) {
                 const int k=d.branch;
                 sys.add(d.p,k,1); sys.add(d.n,k,-1);
                 if (d.type=="diode" || d.type=="nmos") {
-                    const bool driven=d.gateDriver>=0 && pulseHigh(devices[d.gateDriver],interior);
-                    if (driven || d.conducting) {
+                    if (d.driven || d.conducting) {
                         sys.add(k,d.p,1); sys.add(k,d.n,-1);
                     } else sys.add(k,k,1);
                     continue;
@@ -163,11 +173,27 @@ void simulate(const Circuit& circuit,const Sample& emitSample) {
                 else if (d.type=="sine") sys.rhs(k,d.params["amplitude_V"].toDouble()*
                     std::sin(6.283185307179586*t*d.params["frequency_Hz"].toDouble()));
             }
-            x=sys.solve();
+            try {
+                x=sys.solve();
+            } catch(const SingularSystem&) {
+                // A newly driven MOSFET and the preceding interval's conducting diode
+                // can form an impossible voltage-source loop before current is solved.
+                // Retry this instant with the diodes blocking, then check their normal
+                // forward-voltage/current conditions before accepting any sample.
+                if(!turnOn || iteration!=0) throw;
+                bool released=false;
+                for(auto& d:devices) {
+                    if(!d.conducting) continue;
+                    d.conducting=false;
+                    released=true;
+                }
+                if(!released) throw;
+                continue;
+            }
             bool changed=false;
             for (auto& d:devices) {
                 if (d.type!="diode" && d.type!="nmos") continue;
-                if (d.gateDriver>=0 && pulseHigh(devices[d.gateDriver],interior)) {
+                if (d.driven) {
                     d.conducting=false;
                     continue;
                 }

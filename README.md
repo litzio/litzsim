@@ -6,7 +6,7 @@
 
 Qt 편집기에서 [RC](examples/rc.litzsim), [RLC](examples/rlc.litzsim), [벅](examples/buck.litzsim), [2상 토템폴 PFC](examples/pfc.litzsim) 예제를 열고 실행할 수 있습니다. 단자 이름은 `소자ID.핀` 형식이며 전압·전류 프로브의 기준 방향은 p에서 n입니다. 연결은 nets, 격자 위치는 layout, 적분 간격과 종료 시각은 simulation에서 관리합니다.
 
-Qt 6 Core·Widgets·Test와 SVG 아이콘 플러그인, C++17 컴파일러와 CMake로 빌드합니다. 아래는 Windows의 단일 구성 Release 빌드 예입니다. MSYS2 UCRT64 환경에서는 해당 환경의 bin 디렉터리가 PATH에 있어야 합니다.
+Qt 6 Core·Widgets·Test와 SVG 아이콘 플러그인, C++17 컴파일러와 CMake로 빌드합니다. 아래는 Windows의 단일 구성 Release 빌드 예입니다. MSYS2 UCRT64의 `bin`은 빌드할 때 PATH에 추가합니다. Windows MinGW 빌드는 실행 파일 옆에 Qt·컴파일러 DLL과 플랫폼 플러그인을 배치합니다. 빌드 후에는 탐색기에서 `build\litzsim.exe`를 더블클릭해 실행할 수 있습니다. 다른 폴더로 옮길 때는 `litzsim-cli.exe`, DLL과 플러그인 하위 폴더도 함께 옮깁니다.
 
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
