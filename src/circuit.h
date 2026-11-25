@@ -18,6 +18,7 @@ public:
     void validate() const;
     qint64 outputStride() const;
     QStringList missingPins() const;
+    QString gateSignal(const QString& terminal) const;
     void move(const QString& id, int gridX, int gridY);
     QString insert(const QString& type,int x,int y);
     void rotate(const QString& id);

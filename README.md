@@ -19,7 +19,9 @@ ctest --test-dir build --output-on-failure
 
 라이브러리에서 부품을 누르거나 캔버스에 놓고, 두 단자를 차례로 눌러 연결합니다. 소자를 끌어 이동하고 선택 후 R로 회전합니다. 값을 더블클릭해 수정하고 Ctrl+Z로 되돌립니다. F5는 현재 탭을 실행하고 Shift+F5는 중지합니다. 회로 옆 `runs` 폴더에 실행 시점의 회로·설정과 결과를 보관합니다. 결과 창에서 휠로 시간축을, Shift+휠로 세로축을 확대하고 끌어서 이동합니다. 빈 plot을 추가한 뒤 신호 겹치기에서 실행·X·Y·오른쪽 축을 선택할 수 있습니다.
 
-![2상 토템폴 PFC 실제 편집 화면](docs/reviews/assets/pfc-editor.png)
+회로도는 IEEE 315 계열 기호를 사용합니다. 기호와 배선은 기본 검정이며, 전압 프로브의 +/−는 p/n 단자에, 전류 프로브의 화살표는 p→n 기준 방향에 대응합니다. PFC의 제어기 구동 게이트에는 단자 옆에 신호 이름이 표시됩니다. [기호표와 예제별 전후 캡처](docs/spikes/2026-11-25-schematic-publication-audit.md#이슈-15-기호와-측정-표기)
+
+![2상 토템폴 PFC 실제 편집 화면](docs/spikes/assets/schematic-ieee-pfc.png)
 
 해석 설정에서 결과 저장 간격을 time-step의 정수 배로 지정할 수 있습니다. 예를 들어 time-step이 1 µs이고 저장 간격이 7 µs이면 0, 7, 14 µs 순으로 기록하며 종료 시각의 표본도 보관합니다. JSON 필드는 `simulation.outputStep_s`입니다. 비워 두면 기존 파일처럼 해석기가 내보내는 모든 표본을 저장합니다.
 
