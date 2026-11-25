@@ -1,6 +1,12 @@
 #include "studio.h"
 #include <QCloseEvent>
 #include <QDir>
+#include <QApplication>
+#include <QJsonDocument>
+#include <QSaveFile>
+#include <QUuid>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGraphicsScene>
@@ -62,6 +68,35 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
     action("저장",QKeySequence::Save,[this]{if (current()) current()->save();});
     action("실행 취소",QKeySequence::Undo,[this]{if (current()) current()->history.undo();});
     action("다시 실행",QKeySequence::Redo,[this]{if (current()) current()->history.redo();});
+    runner=new QProcess(this);
+    connect(runner,&QProcess::finished,this,[this](int code,QProcess::ExitStatus status){
+        QString state=runState=="stopping" ? "canceled" : (status==QProcess::NormalExit && code==0 ? "completed" : "failed");
+        QString detail=QString::fromUtf8(runner->readAllStandardError()).trimmed();
+        recordRun(state,detail);
+        if (state=="completed" && showResult) showResult(runDirectory+"/result.wave");
+    });
+    connect(runner,&QProcess::errorOccurred,this,[this](QProcess::ProcessError e){
+        if (e==QProcess::FailedToStart) recordRun("failed",runner->errorString());
+    });
+    bar->addSeparator();
+    action("해석 설정",{},[this]{
+        auto* sheet=current();if (!sheet) return;
+        auto cfg=sheet->circuit.document["simulation"].toObject();
+        QDialog dialog(this);dialog.setWindowTitle("해석 설정");
+        QFormLayout form(&dialog);
+        QLineEdit step(QString::number(cfg["timeStep_s"].toDouble(),'g',16));
+        QLineEdit stop(QString::number(cfg["stopTime_s"].toDouble(),'g',16));
+        form.addRow("Time-step [s]",&step);form.addRow("종료 시각 [s]",&stop);
+        QDialogButtonBox buttons(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);
+        form.addRow(&buttons);
+        connect(&buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+        connect(&buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+        if (dialog.exec()!=QDialog::Accepted) return;
+        cfg["timeStep_s"]=step.text().toDouble();cfg["stopTime_s"]=stop.text().toDouble();
+        sheet->edit([&](Circuit& c){c.document["simulation"]=cfg;});
+    });
+    action("▶ 실행",Qt::Key_F5,[this]{startRun();});
+    action("■ 중지",Qt::SHIFT|Qt::Key_F5,[this]{stopRun();});
 
     auto* frame=new QWidget;
     auto* row=new QHBoxLayout(frame); row->setSpacing(0); row->setContentsMargins(0,0,0,0);
@@ -138,7 +173,32 @@ bool Studio::confirmClose(Sheet* sheet) {
 }
 void Studio::closeEvent(QCloseEvent* e) {
     for (int i=0;i<tabs->count();++i) if (!confirmClose(static_cast<Sheet*>(tabs->widget(i)))) { e->ignore(); return; }
+    if (runner->state()!=QProcess::NotRunning) {stopRun();runner->waitForFinished(3000);}
     e->accept();
+}
+void Studio::recordRun(const QString& state,const QString& detail) {
+    runState=state;
+    QSaveFile file(runDirectory+"/status.json");
+    const auto bytes=QJsonDocument(QJsonObject{{"state",state},{"message",detail},
+        {"circuit","circuit.litzsim"},{"result","result.wave"}}).toJson();
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes)!=bytes.size() || !file.commit()) {
+        statusBar()->showMessage("실행 상태 기록 실패 · "+runDirectory);return;
+    }
+    statusBar()->showMessage(state+" · "+(detail.isEmpty() ? runDirectory : detail));
+}
+void Studio::startRun() {
+    if (!current() || runner->state()!=QProcess::NotRunning) return;
+    auto* sheet=current();
+    runDirectory=QFileInfo(sheet->path).dir().filePath("runs/"+QUuid::createUuid().toString(QUuid::WithoutBraces));
+    if (!QDir().mkpath(runDirectory)) throw std::runtime_error("cannot create run directory");
+    sheet->circuit.save(runDirectory+"/circuit.litzsim");
+    recordRun("running");
+    runner->start(QCoreApplication::applicationDirPath()+"/litzsim-cli.exe",
+        {"run",runDirectory+"/circuit.litzsim",runDirectory+"/result.wave"});
+}
+void Studio::stopRun() {
+    if (runner->state()==QProcess::NotRunning) return;
+    recordRun("stopping");runner->kill();
 }
 void Studio::fileAction(const QString& op) {
     const auto index=tree->currentIndex();

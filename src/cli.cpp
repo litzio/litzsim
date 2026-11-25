@@ -16,7 +16,9 @@ int main(int argc, char** argv) {
         if (args.size() == 4 && args[1] == "run") {
             if (QFileInfo(args[2]) == QFileInfo(args[3]))
                 throw std::runtime_error("result path must differ from input circuit");
-            simulateCsv(Circuit::load(args[2]), args[3]);
+            auto circuit=Circuit::load(args[2]);
+            if (args[3].endsWith(".wave",Qt::CaseInsensitive)) simulateWave(circuit,args[3]);
+            else simulateCsv(circuit,args[3]);
             return 0;
         }
         if (args.size() == 4 && args[1] == "copy") {
