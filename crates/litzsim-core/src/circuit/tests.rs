@@ -109,7 +109,7 @@ fn mirrors_across_sheet_axes_at_every_rotation_and_restores_on_undo() {
                 .unwrap()
                 .document;
             assert_eq!(pins(&turned), expected_flip.map(|[x, y]| [10 - y, x - 6]));
-            let undone = undo(&reopened, &result.receipt.after_revision, &rotated).unwrap();
+            let undone = undo(&reopened, &result.receipt.after_revision, &rev, &rotated).unwrap();
             assert_eq!(undone.document.to_bytes(), rotated.to_bytes());
             let toggled = apply(&reopened, &reopened.revision(), &[mirror(axis)]).unwrap();
             assert_eq!(toggled.document.to_bytes(), rotated.to_bytes());
@@ -120,12 +120,42 @@ fn mirrors_across_sheet_axes_at_every_rotation_and_restores_on_undo() {
             &[mirror(MirrorAxis::Horizontal), mirror(MirrorAxis::Vertical)],
         )
         .unwrap();
-        assert_eq!(json!(combined.document)["layout"]["Q1"]["mirror"], "both");
+        assert!(
+            json!(combined.document)["layout"]["Q1"]
+                .get("mirror")
+                .is_none()
+        );
         assert_eq!(
             pins(&combined.document),
             expected.map(|[x, y]| [16 - x, 4 - y])
         );
         rotated = next_rotation;
+    }
+}
+
+#[test]
+fn canonical_orientation_elides_zero_and_folds_double_reflection() {
+    let original = Document::from_bytes(BUCK).unwrap();
+    let revision = original.revision();
+    let rotate = || Operation::Rotate { id: "Q1".into() };
+    let ops = [rotate(), rotate(), rotate(), rotate()];
+    let cycled = apply(&original, &revision, &ops).unwrap();
+    assert_eq!(cycled.document.to_bytes(), original.to_bytes());
+    assert_eq!(cycled.receipt.after_revision, revision);
+    assert!(cycled.receipt.modified.is_empty());
+
+    let mut input = json!(original);
+    input["layout"]["Q1"]["rotation"] = json!(0);
+    let explicit_zero = Document::from_bytes(&serde_json::to_vec(&input).unwrap()).unwrap();
+    assert_eq!(explicit_zero.to_bytes(), original.to_bytes());
+
+    for turns in 0..4 {
+        input["layout"]["Q1"]["rotation"] = json!(turns * 90);
+        input["layout"]["Q1"]["mirror"] = json!("both");
+        let mirrored = Document::from_bytes(&serde_json::to_vec(&input).unwrap()).unwrap();
+        let equivalent = apply(&original, &revision, &ops[..(turns + 2) % 4]).unwrap();
+        assert_eq!(mirrored.revision(), equivalent.receipt.after_revision);
+        assert_eq!(mirrored.to_bytes(), equivalent.document.to_bytes());
     }
 }
 
@@ -310,12 +340,18 @@ fn batch_is_atomic_and_receipt_tracks_net_merges_deletes_and_undo() {
     );
 
     assert_eq!(
-        undo(&edited.document, &revision, &document)
+        undo(&edited.document, &revision, &revision, &document)
             .unwrap_err()
             .code,
         "revisionConflict"
     );
-    let undone = undo(&edited.document, &edited.receipt.after_revision, &document).unwrap();
+    let undone = undo(
+        &edited.document,
+        &edited.receipt.after_revision,
+        &revision,
+        &document,
+    )
+    .unwrap();
     assert_eq!(undone.document.to_bytes(), document.to_bytes());
     assert_eq!(undone.receipt.created, ["Q1"]);
     assert_eq!(undone.receipt.after_revision, revision);
@@ -339,6 +375,14 @@ fn save_guards_raw_bytes_and_serializes_competing_writers() {
     let path = directory.join("test.litzsim");
     let document = Document::from_bytes(RC).unwrap();
     let initial = save(&path, &document, SaveMode::New).unwrap();
+    let only_circuit = || {
+        let names: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["test.litzsim"]);
+    };
+    only_circuit();
     assert_eq!(initial, open(&path).unwrap().disk_revision);
     assert_eq!(
         save(&path, &Document::new(), SaveMode::New)
@@ -346,6 +390,7 @@ fn save_guards_raw_bytes_and_serializes_competing_writers() {
             .code,
         "fileExists"
     );
+    only_circuit();
     assert_eq!(fs::read(&path).unwrap(), document.to_bytes());
 
     // Similar canonical content, different raw bytes.
@@ -405,4 +450,5 @@ fn save_guards_raw_bytes_and_serializes_competing_writers() {
         .unwrap();
     assert_eq!(error.code, "diskRevisionConflict");
     assert_eq!(error.actual, Some(json!(actual)));
+    only_circuit();
 }

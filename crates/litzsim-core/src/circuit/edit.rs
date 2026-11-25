@@ -92,9 +92,21 @@ pub fn apply(
 pub fn undo(
     current: &Document,
     expected_after: &str,
+    expected_before: &str,
     previous: &Document,
 ) -> Result<EditResult, Error> {
     let before = check_revision(current, expected_after)?;
+    let previous_revision = previous.revision();
+    if previous_revision != expected_before {
+        let mut error = Error::conflict(
+            "previousMismatch",
+            Some(expected_before),
+            Some(&previous_revision),
+        );
+        error.target_id = Some("previous".into());
+        error.message = "Previous snapshot does not match the receipt's before revision".into();
+        return Err(error);
+    }
     Ok(EditResult {
         document: previous.clone(),
         receipt: receipt(current, previous, before),
@@ -158,21 +170,23 @@ impl CircuitV1 {
                     Some(Mirror::Vertical) => Some(Mirror::Horizontal),
                     other => other,
                 };
+                position.normalize_orientation();
             }
             Operation::Mirror { id, axis } => {
                 self.require_part(id)?;
                 let position = self.layout.entry(id.clone()).or_default();
                 use MirrorAxis::{Horizontal, Vertical};
-                position.mirror = match (position.mirror, axis) {
-                    (None, Horizontal) | (Some(Mirror::Both), Vertical) => Some(Mirror::Horizontal),
-                    (None, Vertical) | (Some(Mirror::Both), Horizontal) => Some(Mirror::Vertical),
-                    (Some(Mirror::Horizontal), Vertical) | (Some(Mirror::Vertical), Horizontal) => {
-                        Some(Mirror::Both)
-                    }
-                    (Some(Mirror::Horizontal), Horizontal) | (Some(Mirror::Vertical), Vertical) => {
-                        None
-                    }
-                };
+                position.mirror =
+                    match (position.mirror, axis) {
+                        (None, Horizontal) => Some(Mirror::Horizontal),
+                        (None, Vertical) => Some(Mirror::Vertical),
+                        (Some(Mirror::Horizontal), Vertical)
+                        | (Some(Mirror::Vertical), Horizontal) => Some(Mirror::Both),
+                        (Some(Mirror::Horizontal), Horizontal)
+                        | (Some(Mirror::Vertical), Vertical) => None,
+                        (Some(Mirror::Both), _) => unreachable!("normalized mirror"),
+                    };
+                position.normalize_orientation();
             }
             Operation::SetParameter { id, key, value } => {
                 self.require_part(id)?;

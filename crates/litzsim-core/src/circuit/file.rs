@@ -30,18 +30,25 @@ pub fn open(path: &Path) -> Result<Opened, Error> {
 }
 
 /// Serialize cooperating saves across processes. Release the OS lock even
-/// when a process exits without finishing. The sidecar must keep its identity.
+/// when a process exits without finishing. Keep the lock file in the system
+/// temporary directory so waiting processes keep the same file identity.
 pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<String, Error> {
     let path = save_path(path)?;
     if path.file_name().is_none() {
         return Err(Error::new("ioError", "Expected a circuit file path"));
     }
+    if matches!(mode, SaveMode::New) {
+        check_destination(&path, &mode)?;
+    }
+    let lock_directory = std::env::temp_dir().join("litzsim-locks");
+    fs::create_dir_all(&lock_directory).map_err(io_error)?;
+    let lock_key = revision(path.as_os_str().as_encoded_bytes());
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(sibling(&path, ".lock"))
+        .open(lock_directory.join(format!("{lock_key}.lock")))
         .map_err(io_error)?;
     lock.lock().map_err(io_error)?;
 

@@ -134,6 +134,15 @@ enum Mirror {
 }
 
 impl Placement {
+    fn normalize_orientation(&mut self) {
+        let mut rotation = self.rotation.unwrap_or_default();
+        if self.mirror == Some(Mirror::Both) {
+            self.mirror = None;
+            rotation = (rotation + 180) % 360;
+        }
+        self.rotation = (rotation != 0).then_some(rotation);
+    }
+
     fn pin_position(self, [x, y]: [i32; 2]) -> [i64; 2] {
         let [mut x, mut y] = match self.rotation.unwrap_or_default() {
             0 => [x, y],
@@ -142,10 +151,10 @@ impl Placement {
             270 => [y, -x],
             _ => unreachable!("validated rotation"),
         };
-        if matches!(self.mirror, Some(Mirror::Horizontal | Mirror::Both)) {
+        if self.mirror == Some(Mirror::Horizontal) {
             x = -x;
         }
-        if matches!(self.mirror, Some(Mirror::Vertical | Mirror::Both)) {
+        if self.mirror == Some(Mirror::Vertical) {
             y = -y;
         }
         [
@@ -218,6 +227,9 @@ impl Document {
         let mut circuit: CircuitV1 = serde_json::from_slice(bytes)
             .map_err(|error| Error::new("invalidCircuit", error.to_string()))?;
         circuit.validate()?;
+        for position in circuit.layout.values_mut() {
+            position.normalize_orientation();
+        }
         for part in circuit.parts.values_mut() {
             for value in part.parameters.values_mut() {
                 *value = value.as_f64().expect("validated parameter").into();

@@ -11,6 +11,18 @@ impl TestDirectory {
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
+
+    fn run(&self, args: &[&str], ok: bool) -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_litzsim"))
+            .args(args)
+            .current_dir(&self.0)
+            .output()
+            .unwrap();
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.success(), ok, "{response}");
+        assert_eq!(response["ok"], ok);
+        response
+    }
 }
 
 impl Drop for TestDirectory {
@@ -32,7 +44,14 @@ fn serves_json_lines_until_stdin_closes() {
     let pong = json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") });
     for (request, expected) in [
         (r#"{"op":"ping"}"#, pong.clone()),
-        ("{", json!({ "ok": false, "error": "Invalid JSON" })),
+        (
+            "{",
+            json!({ "ok": false, "error": { "code": "invalidJson", "message": "Invalid JSON" } }),
+        ),
+        (
+            r#"{"op":"unknown"}"#,
+            json!({ "ok": false, "error": { "code": "unknownOperation", "message": "Unknown operation" } }),
+        ),
         (r#"{"op":"ping"}"#, pong),
     ] {
         writeln!(input, "{request}").unwrap();
@@ -44,9 +63,7 @@ fn serves_json_lines_until_stdin_closes() {
         writeln!(input, "{request}").unwrap();
         let mut line = String::new();
         output.read_line(&mut line).unwrap();
-        let response: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(response["ok"], true, "{response}");
-        response
+        serde_json::from_str(&line).unwrap()
     };
     let blank = request(json!({ "op": "new" }));
     let edited = request(json!({
@@ -66,12 +83,20 @@ fn serves_json_lines_until_stdin_closes() {
         inspection["missingPins"],
         json!(["ammeter1.n", "ammeter1.p"])
     );
-    let undone = request(json!({
+    let mut undo = json!({
         "op": "undo", "document": edited["document"], "expectedAfter": inspection["revision"],
+        "expectedBefore": edited["receipt"]["beforeRevision"],
         "previous": blank["document"]
-    }));
+    });
+    let undone = request(undo.clone());
     assert_eq!(undone["document"], blank["document"]);
     assert_eq!(undone["receipt"]["afterRevision"], blank["revision"]);
+    undo["previous"] = edited["document"].clone();
+    let rejected = request(undo);
+    assert_eq!(rejected["ok"], false);
+    assert_eq!(rejected["error"]["code"], "previousMismatch");
+    assert_eq!(rejected["error"]["targetId"], "previous");
+    assert_eq!(rejected["error"]["actual"], inspection["revision"]);
 
     let directory = TestDirectory::new("serve");
     let file = directory.0.join("circuit.litzsim");
@@ -100,17 +125,7 @@ fn file_commands_round_trip_and_reject_failed_batches() {
     std::fs::write(directory.join("buck.litzsim"), BUCK).unwrap();
     std::fs::write(directory.join("snapshot.litzsim"), BUCK).unwrap();
     std::fs::write(directory.join("pfc.litzsim"), PFC).unwrap();
-    let run = |args: &[&str], ok| {
-        let output = Command::new(env!("CARGO_BIN_EXE_litzsim"))
-            .args(args)
-            .current_dir(directory)
-            .output()
-            .unwrap();
-        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(output.status.success(), ok, "{response}");
-        assert_eq!(response["ok"], ok);
-        response
-    };
+    let run = |args: &[&str], ok| cleanup.run(args, ok);
     let original = run(&["inspect", "buck.litzsim", "--json"], true);
     let before = original["revision"].as_str().unwrap();
     assert_ne!(original["diskRevision"], original["revision"]);
@@ -172,6 +187,8 @@ fn file_commands_round_trip_and_reject_failed_batches() {
             "buck.litzsim",
             "--expect",
             after,
+            "--before",
+            before,
             "--previous",
             "snapshot.litzsim",
         ],
@@ -201,4 +218,54 @@ fn file_commands_round_trip_and_reject_failed_batches() {
             .contains("control")
     );
     assert_eq!(std::fs::read(directory.join("pfc.litzsim")).unwrap(), PFC);
+}
+
+#[test]
+fn undo_rejects_a_buck_snapshot_for_edited_rc() {
+    const RC: &[u8] = include_bytes!("../../../examples/rc.litzsim");
+    const BUCK: &[u8] = include_bytes!("../../../examples/buck.litzsim");
+    let directory = TestDirectory::new("previous-mismatch");
+    let rc = directory.0.join("u.litzsim");
+    std::fs::write(&rc, RC).unwrap();
+    std::fs::write(directory.0.join("buck.litzsim"), BUCK).unwrap();
+    std::fs::write(
+        directory.0.join("sp.json"),
+        r#"[{"op":"setParameter","id":"R1","key":"resistance_ohm","value":2200}]"#,
+    )
+    .unwrap();
+
+    let initial = directory.run(&["inspect", "u.litzsim", "--json"], true);
+    let edited = directory.run(
+        &[
+            "apply",
+            "u.litzsim",
+            "--expect",
+            initial["revision"].as_str().unwrap(),
+            "--ops",
+            "sp.json",
+        ],
+        true,
+    );
+    let current = directory.run(&["inspect", "u.litzsim", "--json"], true);
+    let edited_bytes = std::fs::read(&rc).unwrap();
+    let rejected = directory.run(
+        &[
+            "undo",
+            "u.litzsim",
+            "--expect",
+            current["revision"].as_str().unwrap(),
+            "--before",
+            edited["receipt"]["beforeRevision"].as_str().unwrap(),
+            "--previous",
+            "buck.litzsim",
+        ],
+        false,
+    );
+
+    let buck = directory.run(&["inspect", "buck.litzsim", "--json"], true);
+    assert_eq!(rejected["error"]["code"], "previousMismatch");
+    assert_eq!(rejected["error"]["targetId"], "previous");
+    assert_eq!(rejected["error"]["expected"], initial["revision"]);
+    assert_eq!(rejected["error"]["actual"], buck["revision"]);
+    assert_eq!(std::fs::read(&rc).unwrap(), edited_bytes);
 }

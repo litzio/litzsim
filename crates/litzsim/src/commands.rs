@@ -6,44 +6,70 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
-    match args {
-        [cmd, file, flag] if cmd == "inspect" && flag == "--json" => inspect_file(Path::new(file)),
-        [cmd, file, expect, revision, option, input] if expect == "--expect" => {
+    let (path, opened, result) = match args {
+        [cmd, file, flag] if cmd == "inspect" && flag == "--json" => {
+            return inspect_file(Path::new(file));
+        }
+        [cmd, file, expect, revision, option, input]
+            if cmd == "apply" && expect == "--expect" && option == "--ops" =>
+        {
             let path = Path::new(file);
-            let edit = match (cmd.to_str(), option.to_str()) {
-                (Some("apply"), Some("--ops")) => {
-                    let bytes = read_input(input)?;
-                    let ops = parse_ops(&bytes)?;
-                    let opened = circuit::open(path).map_err(core_error)?;
-                    let result = circuit::apply(&opened.document, text_arg(revision)?, &ops)
-                        .map_err(core_error)?;
-                    (opened.disk_revision, result)
-                }
-                (Some("undo"), Some("--previous")) => {
-                    let previous = circuit::open(Path::new(input)).map_err(core_error)?;
-                    let opened = circuit::open(path).map_err(core_error)?;
-                    let result =
-                        circuit::undo(&opened.document, text_arg(revision)?, &previous.document)
-                            .map_err(core_error)?;
-                    (opened.disk_revision, result)
-                }
-                _ => return Err(usage()),
-            };
-            let (expected_disk_revision, result) = edit;
-            let disk_revision = circuit::save(
-                path,
-                &result.document,
-                SaveMode::Replace {
-                    expected_disk_revision: &expected_disk_revision,
-                },
+            let bytes = read_input(input)?;
+            let ops = parse_ops(&bytes)?;
+            let opened = circuit::open(path).map_err(core_error)?;
+            let result =
+                circuit::apply(&opened.document, text_arg(revision)?, &ops).map_err(core_error)?;
+            (path, opened, result)
+        }
+        [
+            cmd,
+            file,
+            expect,
+            after,
+            before_flag,
+            before,
+            previous_flag,
+            input,
+        ]
+        | [
+            cmd,
+            file,
+            expect,
+            after,
+            previous_flag,
+            input,
+            before_flag,
+            before,
+        ] if cmd == "undo"
+            && expect == "--expect"
+            && before_flag == "--before"
+            && previous_flag == "--previous" =>
+        {
+            let path = Path::new(file);
+            let previous = circuit::open(Path::new(input)).map_err(core_error)?;
+            let opened = circuit::open(path).map_err(core_error)?;
+            let result = circuit::undo(
+                &opened.document,
+                text_arg(after)?,
+                text_arg(before)?,
+                &previous.document,
             )
             .map_err(core_error)?;
-            Ok(json!({
-                "ok": true, "document": result.document, "receipt": result.receipt, "diskRevision": disk_revision
-            }))
+            (path, opened, result)
         }
-        _ => Err(usage()),
-    }
+        _ => return Err(usage()),
+    };
+    let disk_revision = circuit::save(
+        path,
+        &result.document,
+        SaveMode::Replace {
+            expected_disk_revision: &opened.disk_revision,
+        },
+    )
+    .map_err(core_error)?;
+    Ok(json!({
+        "ok": true, "document": result.document, "receipt": result.receipt, "diskRevision": disk_revision
+    }))
 }
 
 fn inspect_file(path: &Path) -> Result<Value, Value> {
@@ -63,6 +89,7 @@ struct Request<'a> {
     expected_revision: Option<&'a str>,
     ops: Option<&'a RawValue>,
     expected_after: Option<&'a str>,
+    expected_before: Option<&'a str>,
     previous: Option<&'a RawValue>,
     expected_disk_revision: Option<&'a str>,
 }
@@ -70,7 +97,9 @@ struct Request<'a> {
 pub fn serve_request(line: &str) -> Value {
     let response = match serde_json::from_str::<Request<'_>>(line) {
         Ok(request) => handle(request),
-        Err(error) if error.is_syntax() || error.is_eof() => Err(json!("Invalid JSON")),
+        Err(error) if error.is_syntax() || error.is_eof() => {
+            Err(json!({ "code": "invalidJson", "message": "Invalid JSON" }))
+        }
         Err(error) => Err(request_error(error.to_string())),
     };
     response.unwrap_or_else(|error| json!({ "ok": false, "error": error }))
@@ -95,10 +124,11 @@ fn handle(request: Request<'_>) -> Result<Value, Value> {
         }
         "undo" => {
             let current = document(required(request.document, "document")?)?;
-            let expected = required(request.expected_after, "expectedAfter")?;
+            let after = required(request.expected_after, "expectedAfter")?;
+            let before = required(request.expected_before, "expectedBefore")?;
             let previous = document(required(request.previous, "previous")?)?;
             Ok(success(
-                circuit::undo(&current, expected, &previous).map_err(core_error)?,
+                circuit::undo(&current, after, before, &previous).map_err(core_error)?,
             ))
         }
         "save" => {
@@ -113,7 +143,7 @@ fn handle(request: Request<'_>) -> Result<Value, Value> {
             let disk_revision = circuit::save(&file, &document, mode).map_err(core_error)?;
             Ok(json!({ "ok": true, "diskRevision": disk_revision }))
         }
-        _ => Err(json!("Unknown operation")),
+        _ => Err(json!({ "code": "unknownOperation", "message": "Unknown operation" })),
     }
 }
 
@@ -173,6 +203,6 @@ fn request_error(message: impl Into<String>) -> Value {
 
 fn usage() -> Value {
     request_error(
-        "Usage: litzsim --version | serve | inspect FILE --json | apply FILE --expect REV --ops OPS.json | undo FILE --expect AFTER --previous SNAPSHOT",
+        "Usage: litzsim --version | serve | inspect FILE --json | apply FILE --expect REV --ops OPS.json | undo FILE --expect AFTER --before BEFORE --previous SNAPSHOT",
     )
 }

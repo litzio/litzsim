@@ -31,14 +31,14 @@ Litzio 근거는 checkout `cbb6d85f` 기준이다. 플러그인 child는 Host의
 | 경계 | 입력 → 성공 결과 | 판정 |
 | --- | --- | --- |
 | 문서 | new() → 빈 v1, open(file) → {document, revision, diskRevision}, save(file, document, expectedDiskRevision 또는 신규) → {diskRevision} | **v1 유지**. parts·nets·layout·bends·simulation과 단위·부호를 보존한다. 지원 밖 모델은 명시적으로 거절하여 원본을 보존한다. |
-| 편집 | apply(document, expectedRevision, ops[]) → {document, receipt}, undo(current, expectedAfter, previous) → {document, receipt} | 추가·이동·회전·값·단자 연결·삭제를 복사본에 적용하고 모두 유효할 때 한 번 확정한다. 미접속 편집본은 저장 가능하며 실행 전에 누락 핀을 알린다. |
+| 편집 | apply(document, expectedRevision, ops[]) → {document, receipt}, undo(current, expectedAfter, expectedBefore, previous) → {document, receipt} | 추가·이동·회전·값·단자 연결·삭제를 복사본에 적용하고 모두 유효할 때 한 번 확정한다. 미접속 편집본은 저장 가능하며 실행 전에 누락 핀을 알린다. |
 | 도면 | layout(document) → {revision, symbols, pins, segments, junctions, jumps, labels, issues} | 편집 응답에서 apply와 layout을 한 왕복으로 합친다. 동일 입력에서 동일 배치가 나오도록 격자·탐색 순서·라벨 치수를 고정한다. |
 | 실행 | start(directory, document, expectedRevision) → {runId, revision, state}, status(runId)·stop(runId) → {runId, state, simulatedTime, stopTime, error?} | 작업본·초기값·설정 그대로 runs/ID/circuit.litzsim에 고정하고 접수한다. 계산 종료까지 RPC를 붙들지 않는다. |
 | 파형 | wave(runId, channels, from_s, to_s, pixels) → {channels와 단위, timeRange, 채널별 (row,t_s,value)[]} | 완료된 결과만 조회한다. 구간별 최소·최대 원본행을 시간순으로 전달하고 화면은 가장 최근 요청의 범위만 그린다. |
 
-[지난 설계](2026-11-26-web-editor-architecture.md)의 receipt에는 before/after revision, 생성·수정·삭제 ID, 바뀐 네트별 전후 핀 목록이 있다. 이를 유지한다. 작업 revision은 코어가 정규화한 문서 내용으로 계산하고 expected와 대조한다. Undo는 전 문서와 직전 receipt를 요청자가 보관하고 코어가 현재 문서와 after를 대조한다. 화면에서 revision 문자열만 비교하던 시제품을 대체한다. 실패한 연산 번호·대상 ID·이유를 돌려주며 실패 전 작업본은 유지한다.
+[지난 설계](2026-11-26-web-editor-architecture.md)의 receipt에는 before/after revision, 생성·수정·삭제 ID, 바뀐 네트별 전후 핀 목록이 있다. 이를 유지한다. 작업 revision은 코어가 정규화한 문서 내용으로 계산하고 expected와 대조한다. Undo는 전 문서와 직전 receipt를 요청자가 보관하고 코어가 현재 문서와 after, 전 문서와 before를 대조한다. 화면에서 revision 문자열만 비교하던 시제품을 대체한다. 실패한 연산 번호·대상 ID·이유를 돌려주며 실패 전 작업본은 유지한다.
 
-소유자 결정(2026-11-26)에 따라 좌우·상하 반전을 같은 편집 계약에 넣는다. v1 `layout`의 선택 필드 `mirror`는 기존 `rotation`을 적용한 뒤 회로도 축을 기준으로 적용한다. 반전이 없으면 필드를 생략한다. [CLI 연산과 파일 규약](../../README.md#cli로-회로-편집하기)
+소유자 결정(2026-11-26)에 따라 좌우·상하 반전을 같은 편집 계약에 넣는다. v1 `layout`의 선택 필드 `mirror`는 기존 `rotation`을 적용한 뒤 회로도 축을 기준으로 적용한다. 양축 반전은 180° 회전으로 합치고, 0° 회전과 반전 없음은 해당 필드를 생략한다. [CLI 연산과 파일 규약](../../README.md#cli로-회로-편집하기)
 
 디스크 revision은 읽었던 파일 바이트 기준이다. CLI와 플러그인 저장은 같은 파일별 잠금 안에서 revision 검사와 임시 파일 교체를 수행한다. 신규 저장은 기존 파일이 있으면 거절한다. 충돌 응답은 기대·관측 revision을 담고 탭은 미저장 문서를 유지한다. revision·Undo는 회로 파일에 쓰지 않는다. [v1 예제](https://github.com/litzio/litzsim/tree/archive/qt-cpp-mvp-2026-11-26/examples)
 
@@ -60,7 +60,7 @@ manifest의 entry와 screen은 각각 host.mjs와 screen.jsx다. host는 import.
 
 | 경로 | 명령 형태와 읽을 결과 | 판정 |
 | --- | --- | --- |
-| CLI | litzsim inspect FILE --json → revision·소자 값/단위·핀별 net·프로브 극성. litzsim apply FILE --expect REV --ops OPS.json → 저장된 변경과 receipt. litzsim undo FILE --expect AFTER --previous SNAPSHOT → 복원 receipt. | **같은 코어를 쓰는 CLI만 제공**. 변경 전 파일을 보관한 호출자가 Undo할 수 있다. |
+| CLI | litzsim inspect FILE --json → revision·소자 값/단위·핀별 net·프로브 극성. litzsim apply FILE --expect REV --ops OPS.json → 저장된 변경과 receipt. litzsim undo FILE --expect AFTER --before BEFORE --previous SNAPSHOT → 복원 receipt. | **같은 코어를 쓰는 CLI만 제공**. 변경 전 파일을 보관한 호출자가 Undo할 수 있다. |
 | 같은 CLI의 도면·실행 조회 | litzsim layout FILE --json → 예컨대 gate와 input의 비접속 교차 좌표, G 라벨과 배선이 겹치면 대상·영역. litzsim start FILE → run 폴더, litzsim status RUN·stop RUN → 진행·종료 상태, litzsim wave RUN --channel VC --from T0 --to T1 --pixels W → 시간·값. | GUI와 같은 ID·진단·스냅샷을 출력한다. 비서 등록·스킬·Litzio 문서 연동은 연기한다. |
 
 ## 6. 구현 PR 순서와 완료 판정
