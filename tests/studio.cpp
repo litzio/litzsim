@@ -298,7 +298,7 @@ QString verifyPdf(const QByteArray& bytes,double widthMm) {
         throw std::runtime_error("PDF is missing its page size or contains a bitmap");
     // Qt writes timestamps and a fresh document ID on each export.
     pdf.replace(QRegularExpression(R"(/(?:CreationDate|ModDate)\s*\([^\r\n]*\))"),QString());
-    pdf.replace(QRegularExpression(R"(xmp:(?:CreateDate|ModifyDate)="[^"]*")"),QString());
+    pdf.replace(QRegularExpression(R"(xmp:(?:CreateDate|ModifyDate|MetadataDate)="[^"]*")"),QString());
     pdf.replace(QRegularExpression(R"(xmpMM:(?:DocumentID|InstanceID)="[^"]*")"),QString());
     pdf.replace(QRegularExpression(R"(/ID\s*\[\s*<[0-9a-fA-F]+>\s*<[0-9a-fA-F]+>\s*\])"),QString());
     return pdf;
