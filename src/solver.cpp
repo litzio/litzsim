@@ -43,8 +43,23 @@ struct Device {
     QJsonObject params;
     int p,n,branch;
     double history;
+    int gateDriver=-1;
+    bool conducting=false;
 };
 double node(const Vector& x,int k) { return k<0 ? 0 : x.at(k); }
+bool pulseHigh(const Device& pulse,double t) {
+    const double cycles=t*pulse.params["frequency_Hz"].toDouble();
+    return cycles-std::floor(cycles)<pulse.params["duty"].toDouble();
+}
+double nextPulseEdge(const Device& pulse,double t) {
+    const double f=pulse.params["frequency_Hz"].toDouble();
+    const double duty=pulse.params["duty"].toDouble();
+    const double cycle=std::floor(t*f);
+    const double falling=(cycle+duty)/f, rising=(cycle+1)/f;
+    if (falling>t) return falling;
+    if (rising>t) return rising;
+    return (cycle+1+duty)/f;
+}
 }
 void simulate(const Circuit& circuit,const Sample& emitSample) {
     circuit.validate();
@@ -70,7 +85,12 @@ void simulate(const Circuit& circuit,const Sample& emitSample) {
         const auto pins=library().value(type).pins;
         Device d{it.key(),type,part["parameters"].toObject(),index[pinNet[it.key()+"."+pins[0]]],
                  index[pinNet[it.key()+"."+pins[1]]],-1,0};
-        if (type=="capacitor" || type=="inductor" || type=="dc" || type=="sine" || type=="ammeter") d.branch=size++;
+        if (type=="nmos") d.n=index[pinNet[it.key()+".s"]];
+        if (type=="pwm" && (d.params["frequency_Hz"].toDouble()<=0 || d.params["high_V"].toDouble()<=0 ||
+                            d.params["duty"].toDouble()<=0 || d.params["duty"].toDouble()>=1))
+            throw std::runtime_error("PWM requires positive frequency, high level and duty in (0,1)");
+        if (type=="capacitor" || type=="inductor" || type=="dc" || type=="sine" || type=="ammeter"
+            || type=="diode" || type=="nmos" || type=="pwm") d.branch=size++;
         else if (type!="resistor" && type!="voltmeter")
             throw std::runtime_error(("unsupported device: "+d.id).toStdString());
         for (const auto key:{"capacitance_F","inductance_H","resistance_ohm"})
@@ -79,36 +99,71 @@ void simulate(const Circuit& circuit,const Sample& emitSample) {
         d.history=d.params[type=="capacitor" ? "initialVoltage_V" : "initialCurrent_A"].toDouble();
         devices.push_back(d);
     }
+    for (auto& d:devices) {
+        if (d.type!="nmos") continue;
+        for (int i=0;i<static_cast<int>(devices.size());++i)
+            if (devices[i].type=="pwm" && devices[i].p==index[pinNet[d.id+".g"]] && devices[i].n==d.n)
+                d.gateDriver=i;
+        if (d.gateDriver<0) throw std::runtime_error(("missing gate-source PWM driver: "+d.id).toStdString());
+    }
     const auto cfg=circuit.document["simulation"].toObject();
     const double step=cfg["timeStep_s"].toDouble(), stop=cfg["stopTime_s"].toDouble();
     double t=0,h=0;
     for (;;) {
-        System sys(size);
-        for (const auto& d:devices) {
-            if (d.type=="voltmeter") continue;
-            if (d.type=="resistor") {
-                const double g=1/d.params["resistance_ohm"].toDouble();
-                sys.add(d.p,d.p,g); sys.add(d.n,d.n,g);
-                sys.add(d.p,d.n,-g); sys.add(d.n,d.p,-g);
-                continue;
+        // Integrate the interval using its interior switch state; end-point samples
+        // report the left limit at discontinuities.
+        const double interior=t-h/2;
+        Vector x;
+        for (unsigned iteration=0;;++iteration) {
+            if (iteration>32) throw std::runtime_error("ideal switch states did not converge");
+            System sys(size);
+            for (const auto& d:devices) {
+                if (d.type=="voltmeter") continue;
+                if (d.type=="resistor") {
+                    const double g=1/d.params["resistance_ohm"].toDouble();
+                    sys.add(d.p,d.p,g); sys.add(d.n,d.n,g);
+                    sys.add(d.p,d.n,-g); sys.add(d.n,d.p,-g);
+                    continue;
+                }
+                const int k=d.branch;
+                sys.add(d.p,k,1); sys.add(d.n,k,-1);
+                if (d.type=="diode" || d.type=="nmos") {
+                    const bool driven=d.gateDriver>=0 && pulseHigh(devices[d.gateDriver],interior);
+                    if (driven || d.conducting) {
+                        sys.add(k,d.p,1); sys.add(k,d.n,-1);
+                    } else sys.add(k,k,1);
+                    continue;
+                }
+                if (d.type=="inductor" && h==0) {
+                    sys.add(k,k,1); sys.rhs(k,d.history);
+                    continue;
+                }
+                sys.add(k,d.p,1); sys.add(k,d.n,-1);
+                if (d.type=="capacitor") {
+                    sys.add(k,k,-h/d.params["capacitance_F"].toDouble()); sys.rhs(k,d.history);
+                } else if (d.type=="inductor") {
+                    const double z=d.params["inductance_H"].toDouble()/h;
+                    sys.add(k,k,-z); sys.rhs(k,-z*d.history);
+                } else if (d.type=="dc") sys.rhs(k,d.params["voltage_V"].toDouble());
+                else if (d.type=="pwm") sys.rhs(k,pulseHigh(d,interior) ? d.params["high_V"].toDouble() : 0);
+                else if (d.type=="sine") sys.rhs(k,d.params["amplitude_V"].toDouble()*
+                    std::sin(6.283185307179586*t*d.params["frequency_Hz"].toDouble()));
             }
-            const int k=d.branch;
-            sys.add(d.p,k,1); sys.add(d.n,k,-1);
-            if (d.type=="inductor" && h==0) {
-                sys.add(k,k,1); sys.rhs(k,d.history);
-                continue;
+            x=sys.solve();
+            bool changed=false;
+            for (auto& d:devices) {
+                if (d.type!="diode" && d.type!="nmos") continue;
+                if (d.gateDriver>=0 && pulseHigh(devices[d.gateDriver],interior)) {
+                    d.conducting=false;
+                    continue;
+                }
+                const double sign=d.type=="diode" ? 1 : -1;
+                const double forward=sign*(node(x,d.p)-node(x,d.n));
+                const bool next=d.conducting ? sign*x[d.branch]>=-1e-12 : forward>1e-12;
+                if (next!=d.conducting) { d.conducting=next; changed=true; break; }
             }
-            sys.add(k,d.p,1); sys.add(k,d.n,-1);
-            if (d.type=="capacitor") {
-                sys.add(k,k,-h/d.params["capacitance_F"].toDouble()); sys.rhs(k,d.history);
-            } else if (d.type=="inductor") {
-                const double z=d.params["inductance_H"].toDouble()/h;
-                sys.add(k,k,-z); sys.rhs(k,-z*d.history);
-            } else if (d.type=="dc") sys.rhs(k,d.params["voltage_V"].toDouble());
-            else if (d.type=="sine") sys.rhs(k,d.params["amplitude_V"].toDouble()*
-                std::sin(6.283185307179586*t*d.params["frequency_Hz"].toDouble()));
+            if (!changed) break;
         }
-        auto x=sys.solve();
         QMap<QString,double> values;
         for (auto& d:devices) {
             const double v=node(x,d.p)-node(x,d.n);
@@ -116,10 +171,13 @@ void simulate(const Circuit& circuit,const Sample& emitSample) {
             if (d.type=="ammeter") values[d.id+"_A"]=x[d.branch];
             if (d.type=="capacitor") d.history=v;
             if (d.type=="inductor") d.history=x[d.branch];
+            if (d.type=="inductor" || d.type=="diode") values[d.id+"_A"]=x[d.branch];
         }
         emitSample(t,values);
         if (t==stop) break;
-        const double next=std::min(stop,t+step);
+        double next=std::min(stop,t+step);
+        for (const auto& d:devices)
+            if (d.type=="pwm") next=std::min(next,nextPulseEdge(d,t));
         h=next-t;
         if (h<=0) throw std::runtime_error("time step below clock resolution");
         t=next;
