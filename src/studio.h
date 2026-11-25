@@ -13,12 +13,28 @@
 class Sheet : public QGraphicsView {
 public:
     Sheet(const QString& filename,Circuit value,QWidget* parent);
+    ~Sheet() override { history.blockSignals(true); }
     QString path;
     Circuit circuit;
     QUndoStack history;
     void edit(const std::function<void(Circuit&)>& operation);
     virtual void redraw();
     void save();
+    void addPart(const QString& type,QPointF at);
+protected:
+    void mousePressEvent(QMouseEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+    void mouseReleaseEvent(QMouseEvent*) override;
+    void mouseDoubleClickEvent(QMouseEvent*) override;
+    void keyPressEvent(QKeyEvent*) override;
+    void dragEnterEvent(QDragEnterEvent*) override;
+    void dragMoveEvent(QDragMoveEvent*) override;
+    void dropEvent(QDropEvent*) override;
+    void drawBackground(QPainter*,const QRectF&) override;
+    void wheelEvent(QWheelEvent*) override;
+private:
+    QString selected,pending,dragging,wirePin;
+    QPointF dragOffset;
 };
 class Studio : public QMainWindow {
 public:

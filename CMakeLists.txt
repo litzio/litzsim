@@ -22,7 +22,7 @@ add_test(NAME buck COMMAND buck-test ${CMAKE_CURRENT_SOURCE_DIR}/examples/buck.l
 add_executable(wave-test tests/waves.cpp)
 target_link_libraries(wave-test PRIVATE litzcore)
 add_test(NAME waves COMMAND wave-test)
-add_library(litzstudio src/studio.cpp)
+add_library(litzstudio src/studio.cpp src/schematic.cpp)
 target_link_libraries(litzstudio PUBLIC litzcore Qt6::Widgets)
 add_executable(litzsim src/main.cpp)
 target_link_libraries(litzsim PRIVATE litzstudio)

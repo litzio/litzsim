@@ -18,4 +18,9 @@ public:
     void validate() const;
     QStringList missingPins() const;
     void move(const QString& id, int gridX, int gridY);
+    QString insert(const QString& type,int x,int y);
+    void rotate(const QString& id);
+    void connectPins(const QString& a,const QString& b);
+    void disconnectPin(const QString& pin);
+    void erase(const QString& id);
 };
