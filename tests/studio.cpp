@@ -1,4 +1,8 @@
 #include "studio.h"
+#include "waves.h"
+#include "solver.h"
+#include <QEventLoop>
+#include <QTimer>
 #include <QApplication>
 #include <QTemporaryDir>
 #include <QGraphicsSimpleTextItem>
@@ -28,5 +32,21 @@ int main(int argc,char** argv) {
     first->save();
     if (Circuit::load(a).document!=first->circuit.document) return 1;
     first->history.undo();
+    QEventLoop wait;
+    QString output;
+    studio.showResult=[&](const QString& path){output=path;wait.quit();};
+    studio.startRun();
+    auto snapshot=first->circuit;
+    first->edit([](Circuit& c){c.move("C1",-7,19);});
+    QTimer::singleShot(5000,&wait,&QEventLoop::quit);
+    wait.exec();
+    if (output.isEmpty() || Circuit::load(studio.runDirectory+"/circuit.litzsim").document!=snapshot.document) return 5;
+    Waves result(output);
+    qint64 row=0;
+    simulate(snapshot,[&](double t,const QMap<QString,double>& values){
+        if (result.at(row,0)!=t || result.at(row,1)!=values["VC_V"]) throw std::runtime_error("GUI/CLI mismatch");
+        ++row;
+    });
+    if (row!=result.rows) return 6;
     return first->history.isClean() ? 1 : 0;
 }

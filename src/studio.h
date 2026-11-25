@@ -8,6 +8,7 @@
 #include <QListWidget>
 #include <QUndoStack>
 #include <QToolBar>
+#include <QProcess>
 #include <functional>
 
 class Sheet : public QGraphicsView {
@@ -42,6 +43,10 @@ public:
     Sheet* open(const QString& filename);
     Sheet* current() const;
     void refreshTabs();
+    void startRun();
+    void stopRun();
+    QString runDirectory;
+    std::function<void(const QString&)> showResult;
 protected:
     void closeEvent(QCloseEvent* event) override;
 private:
@@ -53,4 +58,7 @@ private:
     QListWidget* parts;
     QTabWidget* tabs;
     QToolBar* bar;
+    QProcess* runner;
+    QString runState;
+    void recordRun(const QString& state,const QString& message={});
 };

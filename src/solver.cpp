@@ -1,4 +1,6 @@
 #include "solver.h"
+#include "waves.h"
+#include <memory>
 #include <QJsonArray>
 #include <QSaveFile>
 #include <QSet>
@@ -200,4 +202,19 @@ void simulateCsv(const Circuit& circuit,const QString& filename) {
     });
     out.flush();
     if (out.status()!=QTextStream::Ok || !file.commit()) throw std::runtime_error("result write failed");
+}
+void simulateWave(const Circuit& circuit,const QString& filename) {
+    std::unique_ptr<WaveWriter> writer;
+    std::vector<double> row;
+    simulate(circuit,[&](double time,const QMap<QString,double>& values){
+        if (!writer) {
+            QStringList channels{"time_s"}; channels.append(values.keys());
+            writer=std::make_unique<WaveWriter>(filename,channels);
+            row.reserve(channels.size());
+        }
+        row.clear();row.push_back(time);
+        for (double value:values) row.push_back(value);
+        writer->append(row);
+    });
+    writer->finish();
 }
