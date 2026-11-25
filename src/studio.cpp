@@ -1,4 +1,5 @@
 #include "studio.h"
+#include <QMimeData>
 #include "viewer.h"
 #include <QPointer>
 #include <QCloseEvent>
@@ -9,7 +10,9 @@
 #include <QUuid>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QComboBox>
 #include <QFontDatabase>
+#include <QStyleHints>
 #include <QLabel>
 #include <QPainter>
 #include <QPainterPath>
@@ -28,6 +31,13 @@
 #include <QVBoxLayout>
 
 namespace {
+class PartList : public QListWidget {
+    QMimeData* mimeData(const QList<QListWidgetItem*>& items) const override {
+        auto* data=new QMimeData;
+        if(items.size()==1) data->setData(partMime,items.first()->text().toUtf8());
+        return data;
+    }
+};
 QIcon icon(const QString& name) {return QIcon(":/icons/"+name+".svg");}
 class FileIcons : public QFileIconProvider {
 public:
@@ -69,6 +79,9 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
     QFont ui(QFontDatabase::applicationFontFamilies(fontId).front());
     ui.setPixelSize(14);
     QApplication::setFont(ui);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    QGuiApplication::styleHints()->setColorScheme(Qt::ColorScheme::Light);
+#endif
     resize(1220,780); setWindowTitle("LitzSim");
     QApplication::setWindowIcon(QIcon(":/icons/litzio.ico"));
     bar=addToolBar("회로");
@@ -114,12 +127,25 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
         QLineEdit step(QString::number(cfg["timeStep_s"].toDouble(),'g',16));
         QLineEdit stop(QString::number(cfg["stopTime_s"].toDouble(),'g',16));
         form.addRow("Time-step [s]",&step);form.addRow("종료 시각 [s]",&stop);
+        QLineEdit output;
+        output.setPlaceholderText("자동 · 모든 해석 표본");
+        output.setToolTip("Time-step의 정수 배로 입력합니다.");
+        if (cfg.contains("outputStep_s")) output.setText(QString::number(cfg["outputStep_s"].toDouble(),'g',16));
+        form.addRow("결과 저장 간격 [s]",&output);
+        QComboBox model;
+        if(sheet->circuit.document.contains("control")) {
+            model.addItems({"pfc-switching","pfc-average"});model.setCurrentText(cfg["model"].toString());
+            form.addRow("전력단 모델",&model);
+        }
         QDialogButtonBox buttons(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);
         form.addRow(&buttons);
         connect(&buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
         connect(&buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
         if (dialog.exec()!=QDialog::Accepted) return;
         cfg["timeStep_s"]=step.text().toDouble();cfg["stopTime_s"]=stop.text().toDouble();
+        if (output.text().trimmed().isEmpty()) cfg.remove("outputStep_s");
+        else cfg["outputStep_s"]=output.text().toDouble();
+        if(model.count()) cfg["model"]=model.currentText();
         sheet->edit([&](Circuit& c){c.document["simulation"]=cfg;});
     });
     action("실행",Qt::Key_F5,[this]{startRun();});
@@ -150,14 +176,21 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
         if (QFileInfo(path).isFile()) try { open(path); } catch(const std::exception& e){ QMessageBox::warning(this,"열기",e.what()); }
     });
     tree->setContextMenuPolicy(Qt::CustomContextMenu);
+    for(const auto name:{"새 회로","새 폴더","이름 변경","이동","삭제"}) {
+        const auto label=QString::fromUtf8(name);
+        auto* action=new QAction(label,tree);
+        tree->addAction(action);
+        connect(action,&QAction::triggered,this,[this,label] {
+            try { fileAction(label); } catch(const std::exception& e){ QMessageBox::warning(this,"탐색기",e.what()); }
+        });
+    }
     connect(tree,&QWidget::customContextMenuRequested,this,[this](QPoint point){
         tree->setCurrentIndex(tree->indexAt(point));
         QMenu menu;
-        for (const auto name:{"새 회로","새 폴더","이름 변경","이동","삭제"}) menu.addAction(QString::fromUtf8(name));
-        auto* selected=menu.exec(tree->viewport()->mapToGlobal(point));
-        if (selected) try { fileAction(selected->text()); } catch(const std::exception& e){ QMessageBox::warning(this,"탐색기",e.what()); }
+        menu.addActions(tree->actions());
+        menu.exec(tree->viewport()->mapToGlobal(point));
     });
-    parts=new QListWidget;
+    parts=new PartList;
     parts->addItems(library().keys()); parts->setDragEnabled(true);
     connect(parts,&QListWidget::itemClicked,this,[this](QListWidgetItem* item){
         if (auto* s=current()) s->addPart(item->text(),s->mapToScene(s->viewport()->rect().center()));
@@ -193,14 +226,16 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
         QLabel#brand { font-weight:600; padding:0 16px; }
         QToolButton { padding:5px 8px; border:0; border-radius:4px; }
         QToolButton:hover { background:#e8eaf0; }
+        QToolButton:focus,QTreeView:focus,QListWidget:focus,QTabBar:focus {outline:1px solid #803782;}
         QWidget#activity,QWidget#panel,QTreeView,QListWidget {background:#f6f7f9;}
         QToolButton#railItem {font-size:12px; padding:2px 0; border-left:3px solid transparent;}
         QToolButton#railItem:checked {color:#77277f; background:#f3eaf4; border-left:3px solid #803782;}
         QLabel#paneHeader {font-weight:600; padding:7px 12px; border-bottom:1px solid #e0e3e9;}
-        QTreeView,QListWidget {border:0; padding:5px; outline:0;}
+        QTreeView,QListWidget {border:0; padding:5px;}
         QTreeView::item,QListWidget::item {min-height:25px;}
         QTreeView::item:selected,QListWidget::item:selected {color:#52295e;background:#eee4f1;}
         QTabWidget::pane,QGraphicsView {border:0;background:white;}
+        QTabBar,QTabWidget {background:#f6f7f9;}
         QTabBar::tab {min-height:30px; padding:0 10px; border:0; border-bottom:3px solid transparent; background:#f4f5f7;}
         QTabBar::tab:selected {color:#492550; background:white; border-bottom:3px solid #883f91;}
         QTabBar::close-button {image:url(:/icons/X.svg);width:13px;height:13px;}

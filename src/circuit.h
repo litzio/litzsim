@@ -16,6 +16,7 @@ public:
     static Circuit load(const QString& path);
     void save(const QString& path) const;
     void validate() const;
+    qint64 outputStride() const;
     QStringList missingPins() const;
     void move(const QString& id, int gridX, int gridY);
     QString insert(const QString& type,int x,int y);
@@ -23,4 +24,6 @@ public:
     void connectPins(const QString& a,const QString& b);
     void disconnectPin(const QString& pin);
     void erase(const QString& id);
+    void setParameter(const QString& id,const QString& key,double value);
+    void setWireBend(const QString& pin,int x,int y);
 };

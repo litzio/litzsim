@@ -3,6 +3,7 @@
 #include <QSaveFile>
 #include <QPointF>
 #include <QStringList>
+#include <map>
 #include <vector>
 
 // Version one stores little-endian IEEE doubles in row order on Windows.
@@ -31,5 +32,7 @@ private:
     QFile file;
     const double* data=nullptr;
     const quint16* index=nullptr;
+    struct Extremes {qint64 low,high;double minimum,maximum;};
+    mutable std::map<int,std::vector<Extremes>> summaries;
 };
 void importCsv(const QString& input,const QString& output);
