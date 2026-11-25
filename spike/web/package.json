@@ -1,0 +1,9 @@
+{
+  "name": "litzsim-web-spike",
+  "private": true,
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}

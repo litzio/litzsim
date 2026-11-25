@@ -2,6 +2,7 @@
 #include "solver.h"
 #include "studio.h"
 #include "waves.h"
+#include "web-command.h"
 #include <QApplication>
 #include <QFileInfo>
 #include <QTextStream>
@@ -31,8 +32,11 @@ int exportSchematic(int argc,char** argv) {
 int main(int argc, char** argv) {
     try {
         if(argc>1 && std::strcmp(argv[1],"export")==0) return exportSchematic(argc,argv);
+        if ((argc==2 || (argc==3 && std::strcmp(argv[2],"--persistent")==0)) &&
+            std::strcmp(argv[1],"web-circuit")==0) return webCircuitCommand(argc,argv);
         QCoreApplication app(argc, argv);
         const auto args = app.arguments();
+        if (args.size()==4 && args[1]=="web-wave") return webWaveCommand(args[2],args[3].toInt());
         if (args.size()==4 && args[1]=="import-csv") {
             importCsv(args[2],args[3]);
             return 0;

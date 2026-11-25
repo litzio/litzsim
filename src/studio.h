@@ -24,6 +24,7 @@ public:
     QUndoStack history;
     void edit(const std::function<void(Circuit&)>& operation);
     virtual void redraw();
+    static QJsonObject layout(const Circuit& circuit);
     void save();
     void exportSchematic(const QString& filename,double widthMm,bool annotations=false) const;
     void addPart(const QString& type,QPointF at);
@@ -49,6 +50,9 @@ private:
         QJsonObject bends;
         QList<WireSegment> segments;
     };
+    static void drawSchematic(QGraphicsScene* scene,const Circuit& circuit,QMap<QString,NetRoute>& routes,
+                              QSet<QPoint>& routeCrossings,const QString& selected,const QString& pending,
+                              const QString& activeNet);
     QMap<QString,NetRoute> routes;
     QSet<QPoint> routeCrossings;
     QString selected,pending,dragging,wirePin,activeNet;

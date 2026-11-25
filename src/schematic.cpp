@@ -311,7 +311,16 @@ void Sheet::redraw() {
     setRenderHint(QPainter::Antialiasing);setAcceptDrops(true);
     const bool hadContent=!scene()->items().empty();
     const auto oldCenter=mapToScene(viewport()->rect().center());
-    scene()->clear();
+    drawSchematic(scene(),circuit,routes,routeCrossings,selected,pending,activeNet);
+    auto content=scene()->itemsBoundingRect();
+    setSceneRect(content.isEmpty()?QRectF(-450,-300,900,600):content.adjusted(-80,-80,80,80));
+    if(hadContent) centerOn(oldCenter);
+}
+
+void Sheet::drawSchematic(QGraphicsScene* scene,const Circuit& circuit,QMap<QString,NetRoute>& routes,
+                          QSet<QPoint>& routeCrossings,const QString& selected,const QString& pending,
+                          const QString& activeNet) {
+    scene->clear();
     QHash<QString,QPoint> pinPos;
     Edges labelEdges;
     QSet<QPoint> blocked,jumpBlocked;
@@ -324,18 +333,18 @@ void Sheet::redraw() {
         auto center=position(pos);int angle=pos["rotation"].toInt();
         bounds=bounds.united(QRect(center,QSize(1,1)));blocked.insert(center);
         const QColor ink=id==selected ? QColor("#007d72") : QColor(Qt::black);
-        auto* symbol=scene()->addPath(glyph(type),QPen(ink,2,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin),
+        auto* symbol=scene->addPath(glyph(type),QPen(ink,2,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin),
             type=="nmos" || type=="diode" ? QBrush(ink):QBrush(Qt::NoBrush));
         symbol->setData(0,id);symbol->setPos(center*pitch);symbol->setRotation(angle);symbol->setZValue(2);
         reserveJumpSites(symbol->sceneBoundingRect(),jumpBlocked);
         if (id==selected) {
             QPainterPath halo;halo.addRoundedRect(-40,-31,100,62,6,6);
-            auto* h=scene()->addPath(halo,QPen(QColor("#259e92"),1,Qt::DashLine),QBrush("#def4ee"));
+            auto* h=scene->addPath(halo,QPen(QColor("#259e92"),1,Qt::DashLine),QBrush("#def4ee"));
             h->setPos(center*pitch);h->setZValue(0);h->setData(0,id);
             h->setData(displayRole,EditorOnly);
         }
         for(const auto& caption:captions(circuit,id,it.value().toObject(),angle)) {
-            auto* label=scene()->addSimpleText(caption.text,caption.font());
+            auto* label=scene->addSimpleText(caption.text,caption.font());
             label->setBrush(caption.role==LabelRole::Id ? ink : QColor(Qt::black));
             label->setPos(center*pitch+caption.offset);label->setData(0,id);label->setZValue(3);
             label->setData(labelRole,int(caption.role));
@@ -352,7 +361,7 @@ void Sheet::redraw() {
             QString name=id+"."+pins[i];QPoint at=center+rotatePoint(delta[i],angle);
             blocked.insert(at);pinPos[name]=at;
             bool visible=id==selected || !pending.isEmpty();
-            auto* dot=scene()->addRect(-4,-4,8,8,visible?QPen(QColor("#168c80")):QPen(Qt::NoPen),
+            auto* dot=scene->addRect(-4,-4,8,8,visible?QPen(QColor("#168c80")):QPen(Qt::NoPen),
                 visible?QBrush(name==pending?QColor("#168c80"):QColor(Qt::white)):QBrush(Qt::transparent));
             dot->setPos(at*pitch);dot->setData(1,name);dot->setToolTip(name);dot->setZValue(4);
             dot->setData(displayRole,EditorOnly);
@@ -360,7 +369,7 @@ void Sheet::redraw() {
     }
     auto addAnnotation=[&](const QString& text,QPoint at,int size,LabelRole role) {
         auto font=QApplication::font();font.setBold(true);font.setPixelSize(size);
-        auto* label=scene()->addSimpleText(text,font);
+        auto* label=scene->addSimpleText(text,font);
         label->setBrush(Qt::black);label->setPos(at*pitch);
         label->setData(labelRole,int(role));
         reserveLabelEdges(label->sceneBoundingRect(),labelEdges);
@@ -420,7 +429,7 @@ void Sheet::redraw() {
         auto edge=[&](QPoint a,QPoint b,const QString& pin){
             int axis=a.x()==b.x() ? Vertical : Horizontal;
             const bool active=activeNet==name;
-            auto* wire=scene()->addLine(QLineF(a*pitch,b*pitch),QPen(active?QColor("#007d72"):QColor(Qt::black),active?3:1.8));
+            auto* wire=scene->addLine(QLineF(a*pitch,b*pitch),QPen(active?QColor("#007d72"):QColor(Qt::black),active?3:1.8));
             wire->setData(2,pin);wire->setData(3,name);wire->setToolTip(name);wire->setZValue(-1);
             wires.append(wire);
             cached.segments.append({a,b,pin});
@@ -486,7 +495,7 @@ void Sheet::redraw() {
             } else path=route(start,targets,avoid,occupied,bounds,labelEdges);
             if (path.empty()) {
                 complete=false;
-                auto* warn=scene()->addSimpleText("배선 경로 확인 · "+name);
+                auto* warn=scene->addSimpleText("배선 경로 확인 · "+name);
                 warn->setData(labelRole,int(LabelRole::Warning));
                 warn->setBrush(Qt::red);warn->setPos(start*pitch);continue;
             }
@@ -508,7 +517,7 @@ void Sheet::redraw() {
             return a.y()==b.y() ? a.x()<b.x() : a.y()<b.y();
         });
         for(auto p:junctions) {
-            auto* dot=scene()->addEllipse(-3,-3,6,6,Qt::NoPen,QBrush(Qt::black));dot->setPos(p*pitch);
+            auto* dot=scene->addEllipse(-3,-3,6,6,Qt::NoPen,QBrush(Qt::black));dot->setPos(p*pitch);
         }
         if(!complete) nextRoutes.remove(name);
     }
@@ -528,10 +537,10 @@ void Sheet::redraw() {
                 QPainterPath crown;
                 crown.arcMoveTo(rect,120);
                 crown.arcTo(rect,120,-60);
-                auto* casing=scene()->addPath(crown,QPen(sheetBackground,wire->pen().widthF()+jumpClearance,
+                auto* casing=scene->addPath(crown,QPen(sheetBackground,wire->pen().widthF()+jumpClearance,
                                                         Qt::SolidLine,Qt::RoundCap));
                 casing->setData(displayRole,JumpCasing);casing->setZValue(-0.5);
-                auto* arc=scene()->addPath(jump,wire->pen());
+                auto* arc=scene->addPath(jump,wire->pen());
                 arc->setData(2,wire->data(2));arc->setData(3,wire->data(3));
                 arc->setToolTip(wire->toolTip());arc->setZValue(-0.25);
             }
@@ -539,9 +548,70 @@ void Sheet::redraw() {
         };
         wire->setLine(QLineF(trim(line.p1(),line.p2()),trim(line.p2(),line.p1())));
     }
-    auto content=scene()->itemsBoundingRect();
-    setSceneRect(content.isEmpty()?QRectF(-450,-300,900,600):content.adjusted(-80,-80,80,80));
-    if(hadContent) centerOn(oldCenter);
+}
+
+QJsonObject Sheet::layout(const Circuit& circuit) {
+    QGraphicsScene scene;
+    QMap<QString,NetRoute> routes;
+    QSet<QPoint> crossings;
+    drawSchematic(&scene,circuit,routes,crossings,{},{},{});
+    auto bounds=scene.itemsBoundingRect().adjusted(-40,-40,40,40);
+    // Keep room below the circuit so new parts can be dropped into empty grid cells.
+    bounds.setHeight(std::max(bounds.height(),320.0));
+    bounds.setWidth(std::max(bounds.width(),520.0));
+    QJsonArray shapes,pins;
+    QJsonObject centers;
+    const auto positions=circuit.document["layout"].toObject();
+    const auto parts=circuit.document["parts"].toObject();
+    for (const auto& id:parts.keys()) {
+        const auto at=position(positions[id].toObject())*pitch;
+        centers[id]=QJsonArray{at.x(),at.y()};
+    }
+    auto color=[](const QBrush& brush) {
+        return brush.style()==Qt::NoBrush ? QString("none") : brush.color().name();
+    };
+    for (auto* item:scene.items(Qt::AscendingOrder)) {
+        const auto id=item->data(0).toString();
+        const auto at=item->scenePos();
+        if (const auto pin=item->data(1).toString(); !pin.isEmpty()) {
+            pins.append(QJsonObject{{"id",pin},{"x",at.x()},{"y",at.y()}});
+            continue;
+        }
+        if (auto* text=qgraphicsitem_cast<QGraphicsSimpleTextItem*>(item)) {
+            const QFontMetricsF metrics(text->font());
+            const QStringList lines=text->text().split(u'\n');
+            for (qsizetype row=0;row<lines.size();++row)
+                shapes.append(QJsonObject{{"text",lines[row]},{"id",id},{"x",at.x()},
+                    {"y",at.y()+metrics.ascent()+row*metrics.lineSpacing()},
+                    {"size",metrics.height()-metrics.leading()},{"bold",text->font().bold()},
+                    {"fill",color(text->brush())}});
+            continue;
+        }
+        QPainterPath path;
+        QPen pen;
+        QBrush fill(Qt::NoBrush);
+        if (auto* wire=qgraphicsitem_cast<QGraphicsLineItem*>(item)) {
+            path.moveTo(wire->line().p1());path.lineTo(wire->line().p2());pen=wire->pen();
+        } else if (auto* symbol=qgraphicsitem_cast<QGraphicsPathItem*>(item)) {
+            path=symbol->path();pen=symbol->pen();fill=symbol->brush();
+        } else if (auto* dot=qgraphicsitem_cast<QGraphicsEllipseItem*>(item)) {
+            path.addEllipse(dot->rect());pen=dot->pen();fill=dot->brush();
+        } else continue;
+        path=item->sceneTransform().map(path);
+        QString data;
+        for (int i=0;i<path.elementCount();++i) {
+            const auto p=path.elementAt(i);
+            if (p.isMoveTo()) data+="M";
+            else if (p.isLineTo()) data+="L";
+            else if (p.type==QPainterPath::CurveToElement) data+="C";
+            data+=QString::number(p.x,'f',3)+" "+QString::number(p.y,'f',3)+" ";
+        }
+        shapes.append(QJsonObject{{"d",data},{"id",id},{"fill",color(fill)},
+            {"stroke",pen.style()==Qt::NoPen ? QString("none") : pen.color().name()},
+            {"width",pen.widthF()}});
+    }
+    return {{"viewBox",QJsonArray{bounds.x(),bounds.y(),bounds.width(),bounds.height()}},
+        {"pitch",pitch},{"centers",centers},{"shapes",shapes},{"pins",pins}};
 }
 
 void Sheet::exportSchematic(const QString& filename,double widthMm,bool annotations) const {

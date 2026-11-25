@@ -1,0 +1,16 @@
+{
+  "id": "local.litzsim-spike",
+  "name": "LitzSim",
+  "version": "0.1.0",
+  "icon": "ChartColumn",
+  "entry": "host.mjs",
+  "screen": "screen.jsx",
+  "settingsSchema": {
+    "type": "object",
+    "properties": {
+      "executable": { "type": "string", "title": "LitzSim CLI executable" },
+      "persistentCore": { "type": "boolean", "title": "Keep the circuit core process running" }
+    },
+    "additionalProperties": false
+  }
+}
