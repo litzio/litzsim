@@ -2,6 +2,7 @@
 #include "solver.h"
 #include "studio.h"
 #include "waves.h"
+#include "wave-spike.h"
 #include <QApplication>
 #include <QFileInfo>
 #include <QTextStream>
@@ -33,6 +34,7 @@ int main(int argc, char** argv) {
         if(argc>1 && std::strcmp(argv[1],"export")==0) return exportSchematic(argc,argv);
         QCoreApplication app(argc, argv);
         const auto args = app.arguments();
+        if (args.size()==3 && args[1]=="wave-serve") return serveWave(args[2]);
         if (args.size()==4 && args[1]=="import-csv") {
             importCsv(args[2],args[3]);
             return 0;
@@ -55,6 +57,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         QTextStream(stderr) << "usage: litzsim-cli inspect FILE | copy INPUT OUTPUT | run INPUT CSV\n"
+                               "       litzsim-cli wave-serve FILE.wave\n"
                                "       litzsim-cli export INPUT OUTPUT.svg|.pdf --width-mm WIDTH [--annotations]\n";
         return 2;
     } catch (const std::exception& e) {

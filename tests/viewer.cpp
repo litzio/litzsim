@@ -9,9 +9,62 @@
 #include <algorithm>
 #include <cmath>
 #include <QTemporaryDir>
+#include <QTextStream>
 #include <cstdio>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <psapi.h>
+#endif
+
+namespace {
+int benchmark(QApplication& app,const QString& path,const std::vector<Scale>& ranges) {
+    Viewer four;
+    four.resize(1280,780);
+    QElapsedTimer timer;timer.start();
+    four.open(path);
+    const double open=timer.nsecsElapsed()/1e6;
+    if (four.active->signalsList.empty()) return 4;
+    auto signal=four.active->signalsList.front();
+    QList<Plot*> all{four.active};
+    for (int i=1;i<4;++i) {
+        auto* panel=four.addPlot();signal.y=i+1;panel->signalsList.push_back(signal);all<<panel;
+    }
+    four.show();app.processEvents();
+    QImage frame(four.size(),QImage::Format_RGB32);
+    four.render(&frame);
+    const auto first=timer.nsecsElapsed()/1e6;
+    std::vector<double> times;
+    for(const auto& range:ranges) {
+        for(auto* panel:all) panel->x=range;
+        timer.restart();four.render(&frame);times.push_back(timer.nsecsElapsed()/1e6);
+    }
+    std::sort(times.begin(),times.end());
+    std::printf("platform=%s dpr=%.2f open_ms=%.3f first_render_ms=%.3f four_plot_p95_ms=%.3f\n",
+                qPrintable(app.platformName()),four.devicePixelRatioF(),open,first,times[47]);
+#ifdef Q_OS_WIN
+    PROCESS_MEMORY_COUNTERS memory{};
+    if(K32GetProcessMemoryInfo(GetCurrentProcess(),&memory,sizeof(memory)))
+        std::printf("peak_working_set_bytes=%llu\n",static_cast<unsigned long long>(memory.PeakWorkingSetSize));
+#endif
+    return 0;
+}
+}
+
 int main(int argc,char** argv) {
     QApplication app(argc,argv);
+    if (argc==4 && QByteArray(argv[1])=="--benchmark") {
+        QFile file(QString::fromLocal8Bit(argv[3]));
+        if (!file.open(QIODevice::ReadOnly)) return 4;
+        QTextStream input(&file);
+        std::vector<Scale> ranges;
+        for (int i=0;i<50;++i) {
+            Scale range{0,0,false};
+            input>>range.low>>range.high;
+            if (input.status()!=QTextStream::Ok || !(range.low<range.high)) return 4;
+            ranges.push_back(range);
+        }
+        return benchmark(app,QString::fromLocal8Bit(argv[2]),ranges);
+    }
     if (argc<2) return 2;
     const QString examples=QString::fromLocal8Bit(argv[1]);
     const bool capture=argc>2;
@@ -50,26 +103,9 @@ int main(int argc,char** argv) {
             writer.append(values);
         }
         writer.finish();
-        Viewer four;
-        four.resize(1280,780);
-        QElapsedTimer timer;timer.start();
-        four.open(bench);
-        auto signal=four.active->signalsList.front();
-        QList<Plot*> all{four.active};
-        for (int i=1;i<4;++i) {
-            auto* panel=four.addPlot();signal.y=i+1;panel->signalsList.push_back(signal);all<<panel;
-        }
-        four.show();app.processEvents();
-        QImage frame(four.size(),QImage::Format_RGB32);
-        four.render(&frame);
-        auto first=timer.elapsed();
-        std::vector<double> times;
-        for(int i=0;i<50;++i) {
-            for(auto* panel:all) panel->x={i*0.01,9+i*0.01,false};
-            timer.restart();four.render(&frame);times.push_back(timer.nsecsElapsed()/1e6);
-        }
-        std::sort(times.begin(),times.end());
-        std::printf("first_render_ms=%lld four_plot_p95_ms=%.2f\n",static_cast<long long>(first),times[47]);
+        std::vector<Scale> ranges;
+        for(int i=0;i<50;++i) ranges.push_back({i*0.01,9+i*0.01,false});
+        return benchmark(app,bench,ranges);
     }
     return 0;
 }

@@ -1,0 +1,16 @@
+{
+  "name": "litzsim-waveform-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build --outDir ../../build/wave-spike/web --emptyOutDir"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "playwright": "1.65.1",
+    "vite": "8.3.8"
+  }
+}
