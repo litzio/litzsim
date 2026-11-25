@@ -11,6 +11,8 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QComboBox>
+#include <QCheckBox>
+#include <QDoubleSpinBox>
 #include <QFontDatabase>
 #include <QStyleHints>
 #include <QLabel>
@@ -122,10 +124,20 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
             destination.setDefaultSuffix(format==pdf ? "pdf" : "svg");
         });
         if(destination.exec()!=QDialog::Accepted) return;
-        bool ok=false;
-        const double width=QInputDialog::getDouble(this,"회로도 내보내기","최종 폭 (mm)",88.9,1,1000,2,&ok);
-        if(!ok) return;
-        sheet->exportSchematic(destination.selectedFiles().front(),width);
+        QDialog options(this);
+        options.setWindowTitle("회로도 내보내기");
+        QFormLayout form(&options);
+        QDoubleSpinBox width;
+        width.setRange(1,1000); width.setValue(88.9);
+        form.addRow("최종 폭 (mm)",&width);
+        QCheckBox annotations("도면 제목 및 구역 주석 포함");
+        form.addRow(&annotations);
+        QDialogButtonBox buttons(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);
+        form.addRow(&buttons);
+        connect(&buttons,&QDialogButtonBox::accepted,&options,&QDialog::accept);
+        connect(&buttons,&QDialogButtonBox::rejected,&options,&QDialog::reject);
+        if(options.exec()!=QDialog::Accepted) return;
+        sheet->exportSchematic(destination.selectedFiles().front(),width.value(),annotations.isChecked());
         statusBar()->showMessage("회로도를 내보냈습니다.",5000);
     });
     action("실행 취소",QKeySequence::Undo,[this]{if (current()) current()->history.undo();});

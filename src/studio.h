@@ -25,7 +25,7 @@ public:
     void edit(const std::function<void(Circuit&)>& operation);
     virtual void redraw();
     void save();
-    void exportSchematic(const QString& filename,double widthMm) const;
+    void exportSchematic(const QString& filename,double widthMm,bool annotations=false) const;
     void addPart(const QString& type,QPointF at);
 protected:
     void mousePressEvent(QMouseEvent*) override;

@@ -24,7 +24,7 @@ ctest --test-dir build --output-on-failure
 
 연결된 분기는 채운 점으로 표시합니다. 서로 다른 네트의 직교 교차에서는 세로선이 교차점을 지나고 가로선이 위로 반원을 그려 넘어갑니다. 배선은 소자와 단자 라벨을 피해 그립니다. [RC·벅·PFC 배선 전후 캡처](docs/spikes/2026-11-25-schematic-publication-audit.md#이슈-16-배선과-비접속-교차)
 
-도구 모음의 **회로도 내보내기**에서 SVG 또는 PDF와 최종 폭(mm)을 지정합니다. CLI는 출력 파일 확장자로 형식을 선택합니다. 내보낸 그림에는 회로의 기호·배선·주석과 흰 배경이 담깁니다. PDF 글자는 벡터 윤곽선이고 SVG 글자는 편집할 수 있는 텍스트입니다. 벅 한 단과 PFC 두 단에서는 일부 라벨이 8 pt 미만으로 남습니다. [예제별 미리보기와 측정값](docs/spikes/2026-11-25-schematic-publication-audit.md#이슈-17-논문용-벡터-내보내기)
+도구 모음의 **회로도 내보내기**에서 SVG 또는 PDF와 최종 폭(mm)을 지정합니다. 기본 출력은 제목과 구역 주석을 제외한 흰 배경의 회로도입니다. 제목과 구역 주석은 **도면 제목 및 구역 주석 포함** 또는 CLI의 `--annotations`로 추가합니다. 소자 ID와 극성은 9 pt 굵게, 값·단자명·게이트 신호명은 8 pt로 그립니다. PDF 글자는 벡터 윤곽선이고 SVG 글자는 편집할 수 있는 텍스트입니다. [예제별 미리보기와 측정값](docs/spikes/2026-11-25-schematic-publication-audit.md#이슈-17-논문용-벡터-내보내기)
 
 ![2상 토템폴 PFC 실제 편집 화면](docs/spikes/assets/schematic-ieee-pfc.png)
 

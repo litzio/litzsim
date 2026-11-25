@@ -31,13 +31,30 @@ constexpr int jumpClearance=4;
 const QColor sheetBackground("#fbfcfa");
 constexpr int displayRole=4;
 enum DisplayRole { EditorOnly=1, JumpCasing=2 };
+constexpr int labelRole=5;
+constexpr int labelOrigin=6;
+constexpr int sectionPixels=16;
+constexpr int titlePixels=25;
+enum class LabelRole { Meter, Polarity, Terminal, Id, Value, Gate, Section, Title, Warning };
+
+double publicationPoints(LabelRole role) {
+    switch(role) {
+    case LabelRole::Id:
+    case LabelRole::Polarity:
+    case LabelRole::Section: return 9;
+    case LabelRole::Title: return 9.0*titlePixels/sectionPixels;
+    default: return 8;
+    }
+}
 
 class ExportLabel : public QGraphicsSimpleTextItem {
 public:
     enum { Type=UserType+1 };
     int type() const override { return Type; }
     explicit ExportLabel(const QGraphicsSimpleTextItem& source)
-        :QGraphicsSimpleTextItem(source.text()) {
+        :QGraphicsSimpleTextItem(source.text()), role(LabelRole(source.data(labelRole).toInt())),
+          anchor(source.sceneBoundingRect().center()),owner(source.data(0).toString()),
+          origin(source.data(labelOrigin).toPointF()) {
         setFont(source.font());
         setBrush(Qt::black);
         setTransformOriginPoint(boundingRect().center());
@@ -60,6 +77,10 @@ public:
         }
     }
     QRectF inkBounds() const { return mapRectToScene(outline.boundingRect()); }
+    const LabelRole role;
+    const QPointF anchor;
+    const QString owner;
+    const QPointF origin;
     void paint(QPainter* painter,const QStyleOptionGraphicsItem* option,QWidget* widget) override {
         if(!useOutline) {
             QGraphicsSimpleTextItem::paint(painter,option,widget);
@@ -156,7 +177,7 @@ struct Caption {
     QPointF offset;
     int size;
     bool bold;
-    bool followsSelection=true;
+    LabelRole role;
     QFont font() const {
         auto f=QApplication::font(); f.setPixelSize(size); f.setBold(bold); return f;
     }
@@ -173,15 +194,16 @@ QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObje
     if(angle%180) horizontal=!horizontal;
     QPoint name=horizontal ? QPoint(-16,-36) : QPoint(23,-16);
     if(type=="ammeter" && horizontal) name.ry()-=4;
-    QList<Caption> labels{{id,name,16,true}};
+    QList<Caption> labels{{id,name,16,true,LabelRole::Id}};
     const auto value=valueLabel(type,part["parameters"].toObject());
-    if(!value.isEmpty()) labels.append({value,horizontal ? QPoint(-24,6) : name+QPoint(0,20),valueLabelSize,false});
+    if(!value.isEmpty()) labels.append({value,horizontal ? QPoint(-24,6) : name+QPoint(0,20),
+                                        valueLabelSize,false,LabelRole::Value});
     // Rotate terminal-relative anchors and keep the lettering upright.
-    auto mark=[&](const QString& text,QPoint anchor,int size=14,bool bold=false,bool outsideGate=false) {
-        Caption caption{text,{},size,bold,false};
+    auto mark=[&](const QString& text,QPoint anchor,LabelRole role,int size=14,bool bold=false) {
+        Caption caption{text,{},size,bold,role};
         const auto rect=caption.bounds();
         caption.offset=rotatePoint(anchor,angle)-rect.center();
-        if(outsideGate) {
+        if(role==LabelRole::Gate) {
             const QPoint outward=rotatePoint(QPoint(-1,0),angle);
             caption.offset+=QPointF(outward.x()*rect.width()/2,outward.y()*rect.height()/2);
         }
@@ -189,11 +211,11 @@ QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObje
     };
     if(type=="nmos") {
         const auto pins=offsets(type);
-        mark("D",pins[0]*pitch+QPoint(15,-13),valueLabelSize);
-        mark("G",pins[1]*pitch+QPoint(-2,17),valueLabelSize);
-        mark("S",pins[2]*pitch+QPoint(15,13),valueLabelSize);
+        mark("D",pins[0]*pitch+QPoint(15,-13),LabelRole::Terminal,valueLabelSize);
+        mark("G",pins[1]*pitch+QPoint(-2,17),LabelRole::Terminal,valueLabelSize);
+        mark("S",pins[2]*pitch+QPoint(15,13),LabelRole::Terminal,valueLabelSize);
         const auto signal=circuit.gateSignal(id+".g");
-        if(!signal.isEmpty()) mark("제어 "+signal,{-46,14},14,false,true);
+        if(!signal.isEmpty()) mark(signal,{-46,14},LabelRole::Gate);
         // On rotation the name follows the diode side, clear of the gate lead.
         auto& label=labels.first();
         const auto rect=label.bounds();
@@ -203,11 +225,11 @@ QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObje
         if(angle==270) label.offset={-rect.width()/2,-27-rect.height()};
     } else if(type=="voltmeter") {
         const auto pins=offsets(type);
-        mark("V",{0,0});
-        mark("+",pins[0]*pitch+QPoint(-27,12),22,true);
-        mark("−",pins[1]*pitch+QPoint(-27,-12),22,true);
+        mark("V",{0,0},LabelRole::Meter);
+        mark("+",pins[0]*pitch+QPoint(-27,12),LabelRole::Polarity,22,true);
+        mark("−",pins[1]*pitch+QPoint(-27,-12),LabelRole::Polarity,22,true);
     } else if(type=="ammeter") {
-        mark("A",{0,-8});
+        mark("A",{0,-8},LabelRole::Meter);
     }
     return labels;
 }
@@ -314,8 +336,10 @@ void Sheet::redraw() {
         }
         for(const auto& caption:captions(circuit,id,it.value().toObject(),angle)) {
             auto* label=scene()->addSimpleText(caption.text,caption.font());
-            label->setBrush(caption.followsSelection && caption.bold ? ink : QColor(Qt::black));
+            label->setBrush(caption.role==LabelRole::Id ? ink : QColor(Qt::black));
             label->setPos(center*pitch+caption.offset);label->setData(0,id);label->setZValue(3);
+            label->setData(labelRole,int(caption.role));
+            label->setData(labelOrigin,QPointF(center*pitch));
             const QFontMetricsF metrics(label->font());
             const auto inkBounds=metrics.tightBoundingRect(caption.text)
                 .translated(label->scenePos()+QPointF(0,metrics.ascent()));
@@ -334,18 +358,20 @@ void Sheet::redraw() {
             dot->setData(displayRole,EditorOnly);
         }
     }
-    auto addAnnotation=[&](const QString& text,QPoint at,int size) {
+    auto addAnnotation=[&](const QString& text,QPoint at,int size,LabelRole role) {
         auto font=QApplication::font();font.setBold(true);font.setPixelSize(size);
         auto* label=scene()->addSimpleText(text,font);
         label->setBrush(Qt::black);label->setPos(at*pitch);
+        label->setData(labelRole,int(role));
         reserveLabelEdges(label->sceneBoundingRect(),labelEdges);
         reserveJumpSites(label->sceneBoundingRect(),jumpBlocked);
     };
     for(auto entry:document["annotations"].toArray()) {
         const auto a=entry.toObject();
-        addAnnotation(a["text"].toString(),position(a),16);
+        addAnnotation(a["text"].toString(),position(a),sectionPixels,LabelRole::Section);
     }
-    if(document["title"].isString()) addAnnotation(document["title"].toString(),{0,-4},25);
+    if(document["title"].isString())
+        addAnnotation(document["title"].toString(),{0,-4},titlePixels,LabelRole::Title);
     bounds.adjust(-10,-8,10,8);
     QHash<QPoint,int> occupied;
     QSet<QPoint> crossings;
@@ -461,6 +487,7 @@ void Sheet::redraw() {
             if (path.empty()) {
                 complete=false;
                 auto* warn=scene()->addSimpleText("배선 경로 확인 · "+name);
+                warn->setData(labelRole,int(LabelRole::Warning));
                 warn->setBrush(Qt::red);warn->setPos(start*pitch);continue;
             }
             for (int j=1;j<path.size();++j) {
@@ -517,9 +544,10 @@ void Sheet::redraw() {
     if(hadContent) centerOn(oldCenter);
 }
 
-void Sheet::exportSchematic(const QString& filename,double widthMm) const {
+void Sheet::exportSchematic(const QString& filename,double widthMm,bool annotations) const {
     if(!std::isfinite(widthMm) || widthMm<1 || widthMm>1000)
         throw std::runtime_error("schematic width must be between 1 and 1000 mm");
+    widthMm=qRound(widthMm*100)/100.0;
     const auto suffix=QFileInfo(filename).suffix().toLower();
     if(suffix!="svg" && suffix!="pdf") throw std::runtime_error("schematic output must be SVG or PDF");
 
@@ -541,6 +569,7 @@ void Sheet::exportSchematic(const QString& filename,double widthMm) const {
             auto* path=drawing.addPath(shape->path(),pen,
                 shape->brush().style()==Qt::NoBrush ? QBrush(Qt::NoBrush) : QBrush(Qt::black));
             (role==JumpCasing ? casing : paths).append(path);
+            path->setData(0,item->data(0));
             copy=path;
         } else if(const auto* wire=qgraphicsitem_cast<QGraphicsLineItem*>(item)) {
             auto pen=wire->pen();
@@ -553,6 +582,8 @@ void Sheet::exportSchematic(const QString& filename,double widthMm) const {
             junctions.append(junction);
             copy=junction;
         } else if(const auto* text=qgraphicsitem_cast<QGraphicsSimpleTextItem*>(item)) {
+            const auto kind=LabelRole(text->data(labelRole).toInt());
+            if(!annotations && (kind==LabelRole::Section || kind==LabelRole::Title)) continue;
             auto* label=new ExportLabel(*text);
             drawing.addItem(label);
             labels.append(label);
@@ -592,42 +623,72 @@ void Sheet::exportSchematic(const QString& filename,double widthMm) const {
         dot->setRect(-r,-r,2*r,2*r);
     }
 
-    // Keep label anchors. Try the preferred size, then the minimum, only where
-    // the added ink fits in the existing layout.
-    const double clearance=0.15*unitsPerMm;
+    // Reserve the complete ink box at the final size before placing the next label.
+    const double clearance=0.2*unitsPerMm;
+    const double labelClearance=0.4*unitsPerMm;
+    const QRectF horizontalArea=frame.adjusted(clearance,0,-clearance,0);
+    QList<QRectF> placed;
+    std::stable_sort(labels.begin(),labels.end(),[](const ExportLabel* a,const ExportLabel* b){
+        return a->role<b->role;
+    });
+    QList<QPoint> offsets;
+    constexpr double stepMm=0.25;
+    constexpr int steps=32;
+    for(int y=-steps;y<=steps;++y)
+        for(int x=-steps;x<=steps;++x)
+            if(x*x+y*y<=steps*steps) offsets.append({x,y});
+    std::stable_sort(offsets.begin(),offsets.end(),[](QPoint a,QPoint b){
+        return QPoint::dotProduct(a,a)<QPoint::dotProduct(b,b);
+    });
     for(auto* label:labels) {
-        const int pixels=label->font().pixelSize();
-        if(pixels<=0 || label->text().isEmpty()) continue;
-        const auto original=label->inkBounds().adjusted(-clearance,-clearance,clearance,clearance);
-        // Allow for QPdfWriter rounding the page box to whole points.
-        for(double points:{9.05,8.05}) {
-            const double scale=points*25.4/72*unitsPerMm/pixels;
-            if(scale<=1) break;
-            label->setScale(scale);
-            const auto enlarged=label->inkBounds().adjusted(-clearance,-clearance,clearance,clearance);
-            QPainterPath extension,oldInk;
-            extension.addRect(enlarged);
-            oldInk.addRect(original);
-            extension=extension.subtracted(oldInk);
-            bool fits=frame.adjusted(margin/2,margin/2,-margin/2,-margin/2).contains(enlarged);
-            for(auto* item:drawing.items(enlarged,Qt::IntersectsItemBoundingRect)) {
-                if(item==label) continue;
-                if(const auto* other=qgraphicsitem_cast<ExportLabel*>(item)) {
-                    QPainterPath textInk;
-                    textInk.addRect(other->inkBounds());
-                    fits &= !extension.intersects(textInk);
-                } else if(const auto* path=qgraphicsitem_cast<QGraphicsPathItem*>(item);
-                          path && path->brush().style()==Qt::NoBrush) {
-                    QPainterPathStroker stroke(path->pen());
-                    fits &= !extension.intersects(path->mapToScene(stroke.createStroke(path->path())));
+        // Cancel the scene-to-page scale so the role's point size is physical.
+        label->setScale(publicationPoints(label->role)*25.4/72*unitsPerMm/label->font().pixelSize());
+        const auto ink=label->inkBounds();
+        if(ink.isEmpty()) continue;
+        const QPointF toAnchor=label->anchor-ink.center();
+        const auto padded=ink.translated(toAnchor).adjusted(-clearance,-clearance,clearance,clearance);
+        const QPointF outward=label->anchor-label->origin;
+        const double reach=steps*stepMm*unitsPerMm;
+        const auto nearby=drawing.items(padded.adjusted(-reach,-reach,reach,reach),Qt::IntersectsItemBoundingRect);
+        QList<QPainterPath> obstacles;
+        for(auto* item:nearby) {
+            if(qgraphicsitem_cast<ExportLabel*>(item)) continue;
+            QPainterPath obstacle;
+            if(const auto* path=qgraphicsitem_cast<QGraphicsPathItem*>(item)) {
+                const auto part=path->data(0).toString();
+                if(!part.isEmpty() && !(part==label->owner && label->role==LabelRole::Meter)) {
+                    obstacle.addRect(path->sceneBoundingRect());
                 } else {
-                    fits &= !extension.intersects(item->mapToScene(item->shape()));
+                    QPainterPathStroker stroke(path->pen());
+                    obstacle=path->mapToScene(stroke.createStroke(path->path()));
+                    if(path->brush().style()!=Qt::NoBrush) obstacle.addPath(path->mapToScene(path->path()));
                 }
-                if(!fits) break;
+            } else {
+                obstacle=item->mapToScene(item->shape());
             }
-            if(fits) break;
-            label->setScale(1);
+            obstacles.append(obstacle);
         }
+        bool found=false;
+        for(auto offset:offsets) {
+            const QPointF delta=QPointF(offset)*(stepMm*unitsPerMm);
+            if(label->role==LabelRole::Meter && !offset.isNull()) break;
+            if(!label->owner.isEmpty() && QPointF::dotProduct(outward,outward+delta)<0) continue;
+            const auto box=padded.translated(delta);
+            if(box.left()<horizontalArea.left() || box.right()>horizontalArea.right()) continue;
+            const auto labelBox=ink.translated(toAnchor+delta)
+                .adjusted(-labelClearance,-labelClearance,labelClearance,labelClearance);
+            if(std::any_of(placed.cbegin(),placed.cend(),[&](const QRectF& other){return labelBox.intersects(other);}) ||
+               std::any_of(obstacles.cbegin(),obstacles.cend(),[&](const QPainterPath& other){return other.intersects(box);}))
+                continue;
+            label->moveBy(toAnchor.x()+delta.x(),toAnchor.y()+delta.y());
+            placed.append(labelBox);
+            found=true;
+            break;
+        }
+        if(!found)
+            throw std::runtime_error(QString("Cannot place label %1 (%2) at %3 mm near grid (%4, %5)")
+                .arg(label->text(),label->owner).arg(widthMm)
+                .arg(label->anchor.x()/pitch,0,'f',1).arg(label->anchor.y()/pitch,0,'f',1).toStdString());
     }
 
     // Very narrow or unusual sheets can grow past the nominal margin after
@@ -651,7 +712,8 @@ void Sheet::exportSchematic(const QString& filename,double widthMm) const {
         painter.setRenderHint(QPainter::Antialiasing);
         const QRectF target(0,0,device.width(),device.height());
         painter.fillRect(target,Qt::white);
-        drawing.render(&painter,target,source,Qt::KeepAspectRatio);
+        // Render at the requested scale even if Qt rounds the PDF page box.
+        drawing.render(&painter,QRectF(0,0,page.width(),height),source,Qt::IgnoreAspectRatio);
         if(!painter.end()) throw std::runtime_error("cannot finish schematic export");
     };
     if(suffix=="svg") {

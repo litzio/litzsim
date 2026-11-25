@@ -16,13 +16,14 @@ int exportSchematic(int argc,char** argv) {
     const auto args=app.arguments();
     bool ok=false;
     const double width=args.value(5).toDouble(&ok);
-    if(args.size()!=6 || args[4]!="--width-mm" || !ok) {
-        QTextStream(stderr) << "usage: litzsim-cli export INPUT OUTPUT.svg|.pdf --width-mm WIDTH\n";
+    const bool annotations=args.size()==7 && args[6]=="--annotations";
+    if((args.size()!=6 && !annotations) || args[4]!="--width-mm" || !ok) {
+        QTextStream(stderr) << "usage: litzsim-cli export INPUT OUTPUT.svg|.pdf --width-mm WIDTH [--annotations]\n";
         return 2;
     }
     QApplication::setFont(studioFont());
     Sheet sheet(args[2],Circuit::load(args[2]),nullptr);
-    sheet.exportSchematic(args[3],width);
+    sheet.exportSchematic(args[3],width,annotations);
     return 0;
 }
 }
@@ -54,7 +55,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         QTextStream(stderr) << "usage: litzsim-cli inspect FILE | copy INPUT OUTPUT | run INPUT CSV\n"
-                               "       litzsim-cli export INPUT OUTPUT.svg|.pdf --width-mm WIDTH\n";
+                               "       litzsim-cli export INPUT OUTPUT.svg|.pdf --width-mm WIDTH [--annotations]\n";
         return 2;
     } catch (const std::exception& e) {
         QTextStream(stderr) << e.what() << Qt::endl;
