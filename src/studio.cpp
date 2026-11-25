@@ -9,7 +9,9 @@
 #include <QUuid>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QComboBox>
 #include <QFontDatabase>
+#include <QStyleHints>
 #include <QLabel>
 #include <QPainter>
 #include <QPainterPath>
@@ -69,6 +71,9 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
     QFont ui(QFontDatabase::applicationFontFamilies(fontId).front());
     ui.setPixelSize(14);
     QApplication::setFont(ui);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    QGuiApplication::styleHints()->setColorScheme(Qt::ColorScheme::Light);
+#endif
     resize(1220,780); setWindowTitle("LitzSim");
     QApplication::setWindowIcon(QIcon(":/icons/litzio.ico"));
     bar=addToolBar("회로");
@@ -114,12 +119,18 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
         QLineEdit step(QString::number(cfg["timeStep_s"].toDouble(),'g',16));
         QLineEdit stop(QString::number(cfg["stopTime_s"].toDouble(),'g',16));
         form.addRow("Time-step [s]",&step);form.addRow("종료 시각 [s]",&stop);
+        QComboBox model;
+        if(sheet->circuit.document.contains("control")) {
+            model.addItems({"pfc-switching","pfc-average"});model.setCurrentText(cfg["model"].toString());
+            form.addRow("전력단 모델",&model);
+        }
         QDialogButtonBox buttons(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);
         form.addRow(&buttons);
         connect(&buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
         connect(&buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
         if (dialog.exec()!=QDialog::Accepted) return;
         cfg["timeStep_s"]=step.text().toDouble();cfg["stopTime_s"]=stop.text().toDouble();
+        if(model.count()) cfg["model"]=model.currentText();
         sheet->edit([&](Circuit& c){c.document["simulation"]=cfg;});
     });
     action("실행",Qt::Key_F5,[this]{startRun();});
@@ -201,6 +212,7 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
         QTreeView::item,QListWidget::item {min-height:25px;}
         QTreeView::item:selected,QListWidget::item:selected {color:#52295e;background:#eee4f1;}
         QTabWidget::pane,QGraphicsView {border:0;background:white;}
+        QTabBar,QTabWidget {background:#f6f7f9;}
         QTabBar::tab {min-height:30px; padding:0 10px; border:0; border-bottom:3px solid transparent; background:#f4f5f7;}
         QTabBar::tab:selected {color:#492550; background:white; border-bottom:3px solid #883f91;}
         QTabBar::close-button {image:url(:/icons/X.svg);width:13px;height:13px;}

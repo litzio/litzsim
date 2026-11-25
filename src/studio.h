@@ -34,7 +34,7 @@ protected:
     void drawBackground(QPainter*,const QRectF&) override;
     void wheelEvent(QWheelEvent*) override;
 private:
-    QString selected,pending,dragging,wirePin;
+    QString selected,pending,dragging,wirePin,activeNet;
     QPointF dragOffset;
 };
 class Studio : public QMainWindow {

@@ -1,5 +1,6 @@
 #include "solver.h"
 #include "waves.h"
+#include "pfc.h"
 #include <memory>
 #include <QJsonArray>
 #include <QSaveFile>
@@ -67,6 +68,9 @@ void simulate(const Circuit& circuit,const Sample& emitSample) {
     circuit.validate();
     auto missing=circuit.missingPins();
     if (!missing.isEmpty()) throw std::runtime_error(("unconnected: "+missing.join(", ")).toStdString());
+    const auto mode=circuit.document["simulation"].toObject()["model"].toString("mna");
+    if(mode=="pfc-switching" || mode=="pfc-average") {simulatePfc(circuit,emitSample,mode=="pfc-average");return;}
+    if(mode!="mna") throw std::runtime_error("unknown simulation model");
     const auto nets=circuit.document["nets"].toObject();
     const auto parts=circuit.document["parts"].toObject();
     QMap<QString,QString> pinNet;
@@ -93,7 +97,7 @@ void simulate(const Circuit& circuit,const Sample& emitSample) {
             throw std::runtime_error("PWM requires positive frequency, high level and duty in (0,1)");
         if (type=="capacitor" || type=="inductor" || type=="dc" || type=="sine" || type=="ammeter"
             || type=="diode" || type=="nmos" || type=="pwm") d.branch=size++;
-        else if (type!="resistor" && type!="voltmeter")
+        else if (type!="resistor" && type!="voltmeter" && type!="sink")
             throw std::runtime_error(("unsupported device: "+d.id).toStdString());
         for (const auto key:{"capacitance_F","inductance_H","resistance_ohm"})
             if (d.params.contains(key) && d.params[key].toDouble()<=0)
@@ -121,6 +125,10 @@ void simulate(const Circuit& circuit,const Sample& emitSample) {
             System sys(size);
             for (const auto& d:devices) {
                 if (d.type=="voltmeter") continue;
+                if (d.type=="sink") {
+                    const auto amps=d.params["current_A"].toDouble();
+                    sys.rhs(d.p,-amps);sys.rhs(d.n,amps);continue;
+                }
                 if (d.type=="resistor") {
                     const double g=1/d.params["resistance_ohm"].toDouble();
                     sys.add(d.p,d.p,g); sys.add(d.n,d.n,g);

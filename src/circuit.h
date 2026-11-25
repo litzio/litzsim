@@ -23,4 +23,6 @@ public:
     void connectPins(const QString& a,const QString& b);
     void disconnectPin(const QString& pin);
     void erase(const QString& id);
+    void setParameter(const QString& id,const QString& key,double value);
+    void setWireBend(const QString& pin,int x,int y);
 };

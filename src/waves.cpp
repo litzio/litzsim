@@ -95,19 +95,44 @@ std::vector<qint64> Waves::envelopeRows(double from,double to,int y,int pixels) 
     std::vector<qint64> points;
     const qint64 nominal=std::max<qint64>(1,(end-start+pixels-1)/pixels);
     const qint64 stride=nominal>=block ? ((nominal+block-1)/block)*block : nominal;
+    // For repeated overview pans, keep the selected channel's block extrema
+    // contiguous so comparisons do not fault in distant sample pages every frame.
+    const std::vector<Extremes>* cached=nullptr;
+    if(stride>=block) {
+        auto& entries=summaries[y];
+        if(entries.empty()) {
+            std::vector<Extremes> prepared;
+            prepared.reserve((rows+block-1)/block);
+            for(qint64 r=0;r<rows;r+=block) {
+                const auto idx=(r/block*channels.size()+y)*2;
+                const qint64 a=r+index[idx],b=r+index[idx+1];
+                ensure(a<std::min(rows,r+block) && b<std::min(rows,r+block),"invalid block index");
+                prepared.push_back({a,b,at(a,y),at(b,y)});
+            }
+            entries.swap(prepared);
+        }
+        cached=&entries;
+    }
     for (qint64 begin=start;begin<end;) {
         const qint64 limit=std::min(end,(begin/stride+1)*stride);
         qint64 low=begin,high=begin;
+        double minimum=at(begin,y),maximum=minimum;
         for (qint64 r=begin;r<limit;) {
             qint64 a=r,b=r;
-            if (r%block==0 && limit-r>=block) {
+            if (cached && r%block==0 && limit-r>=block) {
+                const auto& e=(*cached)[r/block];
+                if(e.minimum<minimum) {minimum=e.minimum;low=e.low;}
+                if(e.maximum>maximum) {maximum=e.maximum;high=e.high;}
+                r+=block;
+                continue;
+            } else if (r%block==0 && limit-r>=block) {
                 auto idx=(r/block*channels.size()+y)*2;
                 a+=index[idx]; b+=index[idx+1];
                 ensure(a<r+block && b<r+block,"invalid block index");
                 r+=block;
             } else ++r;
-            if (at(a,y)<at(low,y)) low=a;
-            if (at(b,y)>at(high,y)) high=b;
+            if (at(a,y)<minimum) {minimum=at(a,y);low=a;}
+            if (at(b,y)>maximum) {maximum=at(b,y);high=b;}
         }
         qint64 selected[]={begin,std::min(low,high),std::max(low,high),limit-1};
         for (auto r:selected) {

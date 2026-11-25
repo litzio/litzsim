@@ -1,0 +1,318 @@
+{
+  "version": 1,
+  "parts": {
+    "Vac": {
+      "type": "sine",
+      "parameters": {
+        "amplitude_V": 339.4112549695428,
+        "frequency_Hz": 50
+      }
+    },
+    "L1": {
+      "type": "inductor",
+      "parameters": {
+        "inductance_H": 0.0004,
+        "initialCurrent_A": 0
+      }
+    },
+    "IL1": {
+      "type": "ammeter",
+      "parameters": {}
+    },
+    "L2": {
+      "type": "inductor",
+      "parameters": {
+        "inductance_H": 0.0004,
+        "initialCurrent_A": 0
+      }
+    },
+    "IL2": {
+      "type": "ammeter",
+      "parameters": {}
+    },
+    "Q1H": {
+      "type": "nmos",
+      "parameters": {}
+    },
+    "Q1L": {
+      "type": "nmos",
+      "parameters": {}
+    },
+    "Q2H": {
+      "type": "nmos",
+      "parameters": {}
+    },
+    "Q2L": {
+      "type": "nmos",
+      "parameters": {}
+    },
+    "QNH": {
+      "type": "nmos",
+      "parameters": {}
+    },
+    "QNL": {
+      "type": "nmos",
+      "parameters": {}
+    },
+    "Cdc": {
+      "type": "capacitor",
+      "parameters": {
+        "capacitance_F": 0.00204,
+        "initialVoltage_V": 339.4112549695428
+      }
+    },
+    "Idc": {
+      "type": "sink",
+      "parameters": {
+        "current_A": 28.8
+      }
+    },
+    "Vdc": {
+      "type": "voltmeter",
+      "parameters": {}
+    },
+    "GND": {
+      "type": "ground",
+      "parameters": {}
+    }
+  },
+  "nets": {
+    "AC_L": [
+      "Vac.p",
+      "L1.p",
+      "L2.p"
+    ],
+    "AC_N": [
+      "Vac.n",
+      "QNH.s",
+      "QNL.d"
+    ],
+    "sense1": [
+      "L1.n",
+      "IL1.p"
+    ],
+    "SW1": [
+      "IL1.n",
+      "Q1H.s",
+      "Q1L.d"
+    ],
+    "sense2": [
+      "L2.n",
+      "IL2.p"
+    ],
+    "SW2": [
+      "IL2.n",
+      "Q2H.s",
+      "Q2L.d"
+    ],
+    "DC_plus": [
+      "Q1H.d",
+      "Q2H.d",
+      "QNH.d",
+      "Cdc.p",
+      "Idc.p",
+      "Vdc.p"
+    ],
+    "DC_minus": [
+      "Q1L.s",
+      "Q2L.s",
+      "QNL.s",
+      "Cdc.n",
+      "Idc.n",
+      "Vdc.n",
+      "GND.ref"
+    ]
+  },
+  "layout": {
+    "Vac": {
+      "x": 0,
+      "y": 7
+    },
+    "L1": {
+      "x": 6,
+      "y": 4
+    },
+    "IL1": {
+      "x": 10,
+      "y": 4
+    },
+    "L2": {
+      "x": 6,
+      "y": 7
+    },
+    "IL2": {
+      "x": 10,
+      "y": 7
+    },
+    "Q1H": {
+      "x": 15,
+      "y": 2
+    },
+    "Q1L": {
+      "x": 15,
+      "y": 12
+    },
+    "Q2H": {
+      "x": 20,
+      "y": 2
+    },
+    "Q2L": {
+      "x": 20,
+      "y": 12
+    },
+    "QNH": {
+      "x": 25,
+      "y": 2
+    },
+    "QNL": {
+      "x": 25,
+      "y": 12
+    },
+    "Cdc": {
+      "x": 30,
+      "y": 7
+    },
+    "Idc": {
+      "x": 35,
+      "y": 7
+    },
+    "Vdc": {
+      "x": 40,
+      "y": 7
+    },
+    "GND": {
+      "x": 40,
+      "y": 16
+    }
+  },
+  "simulation": {
+    "model": "pfc-switching",
+    "timeStep_s": 1E-06,
+    "stopTime_s": 0.4
+  },
+  "control": {
+    "pwm_Hz": 62500,
+    "sample_s": 1.6E-05,
+    "linkReference_V": 400,
+    "parts": {
+      "grid": "Vac",
+      "inductor1": "L1",
+      "sensor1": "IL1",
+      "inductor2": "L2",
+      "sensor2": "IL2",
+      "high1": "Q1H",
+      "low1": "Q1L",
+      "high2": "Q2H",
+      "low2": "Q2L",
+      "highN": "QNH",
+      "lowN": "QNL",
+      "link": "Cdc",
+      "load": "Idc",
+      "voltageProbe": "Vdc",
+      "reference": "GND"
+    },
+    "gateSignals": {
+      "high1": "Q1H.g",
+      "low1": "Q1L.g",
+      "high2": "Q2H.g",
+      "low2": "Q2L.g",
+      "highN": "QNH.g",
+      "lowN": "QNL.g"
+    }
+  },
+  "trunks": {
+    "DC_plus": [
+      [
+        15,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    "DC_minus": [
+      [
+        15,
+        14
+      ],
+      [
+        40,
+        14
+      ]
+    ],
+    "SW1": [
+      [
+        15,
+        3
+      ],
+      [
+        15,
+        11
+      ]
+    ],
+    "SW2": [
+      [
+        20,
+        3
+      ],
+      [
+        20,
+        11
+      ]
+    ],
+    "AC_N": [
+      [
+        0,
+        10
+      ],
+      [
+        25,
+        10
+      ]
+    ],
+    "AC_L": [
+      [
+        3,
+        4
+      ],
+      [
+        3,
+        7
+      ]
+    ]
+  },
+  "annotations": [
+    {
+      "text": "AC 입력",
+      "x": 0,
+      "y": -2
+    },
+    {
+      "text": "전류 센싱",
+      "x": 6,
+      "y": -2
+    },
+    {
+      "text": "토템폴 브리지",
+      "x": 15,
+      "y": -2
+    },
+    {
+      "text": "DC 링크",
+      "x": 30,
+      "y": -2
+    },
+    {
+      "text": "DC+",
+      "x": 41,
+      "y": 0
+    },
+    {
+      "text": "DC−",
+      "x": 41,
+      "y": 14
+    }
+  ],
+  "title": "2상 인터리브드 토템폴 PFC"
+}

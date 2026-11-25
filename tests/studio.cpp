@@ -3,6 +3,7 @@
 #include "solver.h"
 #include <QEventLoop>
 #include <QTimer>
+#include <QJsonDocument>
 #include <QApplication>
 #include <QTemporaryDir>
 #include <QGraphicsSimpleTextItem>
@@ -48,5 +49,16 @@ int main(int argc,char** argv) {
         ++row;
     });
     if (row!=result.rows) return 6;
+    first->edit([](Circuit& c){
+        auto cfg=c.document["simulation"].toObject();cfg["stopTime_s"]=1000;c.document["simulation"]=cfg;
+    });
+    QEventLoop cancelWait;
+    auto* runner=studio.findChild<QProcess*>();
+    QObject::connect(runner,&QProcess::started,&studio,&Studio::stopRun);
+    QObject::connect(runner,&QProcess::finished,&cancelWait,&QEventLoop::quit);
+    studio.startRun();
+    QTimer::singleShot(5000,&cancelWait,&QEventLoop::quit);cancelWait.exec();
+    QFile report(studio.runDirectory+"/status.json");
+    if(!report.open(QIODevice::ReadOnly) || QJsonDocument::fromJson(report.readAll()).object()["state"]!="canceled") return 7;
     return first->history.isClean() ? 1 : 0;
 }

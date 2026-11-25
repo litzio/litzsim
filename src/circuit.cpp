@@ -19,6 +19,7 @@ const QMap<QString, Part>& library() {
         {"inductor", {{"p","n"}, {{"inductance_H",1e-3},{"initialCurrent_A",0}}}},
         {"capacitor", {{"p","n"}, {{"capacitance_F",1e-6},{"initialVoltage_V",0}}}},
         {"ground", {{"ref"}, {}}},
+        {"sink", {{"p","n"}, {{"current_A",1}}}},
         {"diode", {{"a","k"}, {}}},
         {"nmos", {{"d","g","s"}, {}}},
         {"pwm", {{"out","ref"}, {{"frequency_Hz",10000},{"duty",0.5},{"high_V",10}}}},
@@ -73,6 +74,11 @@ void Circuit::validate() const {
         for (const auto& pin : it.value().toArray())
             require(terminals.remove(pin.toString()), "unknown or multiply connected pin: " + pin.toString());
     }
+    const auto gates=document["control"].toObject()["gateSignals"].toObject();
+    for(auto it=gates.begin();it!=gates.end();++it) {
+        auto name=it.value().toString();
+        require(name.endsWith(".g") && terminals.remove(name),"invalid gate signal target: "+name);
+    }
     const auto layout = document["layout"].toObject();
     for (auto it = layout.begin(); it != layout.end(); ++it) {
         require(parts.contains(it.key()) && it.value().isObject(), "invalid layout: " + it.key());
@@ -90,6 +96,7 @@ void Circuit::validate() const {
 }
 QStringList Circuit::missingPins() const {
     QSet<QString> connected;
+    for(auto v:document["control"].toObject()["gateSignals"].toObject()) connected.insert(v.toString());
     for (const auto& net : document["nets"].toObject())
         for (const auto& pin : net.toArray()) connected.insert(pin.toString());
     QStringList missing;
@@ -155,6 +162,10 @@ void Circuit::connectPins(const QString& a,const QString& b) {
     next.document["nets"]=nets; next.validate(); document=next.document;
 }
 void Circuit::disconnectPin(const QString& pin) {
+    auto ctrl=document["control"].toObject(),gates=ctrl["gateSignals"].toObject();
+    for(const auto& key:gates.keys()) if(gates[key]==pin) {
+        gates.remove(key);ctrl["gateSignals"]=gates;document["control"]=ctrl;
+    }
     auto nets=document["nets"].toObject();
     for (const auto& key:nets.keys()) {
         auto original=nets[key].toArray();
@@ -174,4 +185,12 @@ void Circuit::erase(const QString& id) {
     auto bends=document["bends"].toObject();
     for (auto key:bends.keys()) if (key.startsWith(id+".")) bends.remove(key);
     document["bends"]=bends;
+}
+void Circuit::setParameter(const QString& id,const QString& key,double value) {
+    auto parts=document["parts"].toObject(),part=parts[id].toObject(),params=part["parameters"].toObject();
+    require(params.contains(key) && std::isfinite(value),"invalid parameter: "+id+"."+key);
+    params[key]=value;part["parameters"]=params;parts[id]=part;document["parts"]=parts;
+}
+void Circuit::setWireBend(const QString& pin,int x,int y) {
+    auto bends=document["bends"].toObject();bends[pin]=QJsonObject{{"x",x},{"y",y}};document["bends"]=bends;
 }
