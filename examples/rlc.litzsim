@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "simulation": {
+    "timeStep_s": 1E-05,
+    "stopTime_s": 0.005
+  },
+  "parts": {
+    "V1": {
+      "type": "dc",
+      "parameters": {
+        "voltage_V": 5
+      }
+    },
+    "R1": {
+      "type": "resistor",
+      "parameters": {
+        "resistance_ohm": 1
+      }
+    },
+    "C1": {
+      "type": "capacitor",
+      "parameters": {
+        "capacitance_F": 0.001,
+        "initialVoltage_V": 0
+      }
+    },
+    "GND": {
+      "type": "ground",
+      "parameters": {}
+    },
+    "VC": {
+      "type": "voltmeter",
+      "parameters": {}
+    },
+    "L1": {
+      "parameters": {
+        "inductance_H": 0.001,
+        "initialCurrent_A": 0
+      },
+      "type": "inductor"
+    }
+  },
+  "nets": {
+    "input": [
+      "V1.p",
+      "R1.p"
+    ],
+    "output": [
+      "L1.n",
+      "C1.p",
+      "VC.p"
+    ],
+    "ground": [
+      "GND.ref",
+      "V1.n",
+      "C1.n",
+      "VC.n"
+    ],
+    "mid": [
+      "R1.n",
+      "L1.p"
+    ]
+  },
+  "layout": {
+    "V1": {
+      "x": 0,
+      "y": 2
+    },
+    "R1": {
+      "x": 4,
+      "y": 0
+    },
+    "C1": {
+      "x": 8,
+      "y": 2
+    },
+    "GND": {
+      "x": 4,
+      "y": 6
+    },
+    "VC": {
+      "x": 12,
+      "y": 2
+    },
+    "L1": {
+      "y": 0,
+      "x": 6
+    }
+  }
+}

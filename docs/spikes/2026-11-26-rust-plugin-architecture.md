@@ -38,6 +38,8 @@ Litzio 근거는 checkout `cbb6d85f` 기준이다. 플러그인 child는 Host의
 
 [지난 설계](2026-11-26-web-editor-architecture.md)의 receipt에는 before/after revision, 생성·수정·삭제 ID, 바뀐 네트별 전후 핀 목록이 있다. 이를 유지한다. 작업 revision은 코어가 정규화한 문서 내용으로 계산하고 expected와 대조한다. Undo는 전 문서와 직전 receipt를 요청자가 보관하고 코어가 현재 문서와 after를 대조한다. 화면에서 revision 문자열만 비교하던 시제품을 대체한다. 실패한 연산 번호·대상 ID·이유를 돌려주며 실패 전 작업본은 유지한다.
 
+소유자 결정(2026-11-26)에 따라 좌우·상하 반전을 같은 편집 계약에 넣는다. v1 `layout`의 선택 필드 `mirror`는 기존 `rotation`을 적용한 뒤 회로도 축을 기준으로 적용한다. 반전이 없으면 필드를 생략한다. [CLI 연산과 파일 규약](../../README.md#cli로-회로-편집하기)
+
 디스크 revision은 읽었던 파일 바이트 기준이다. CLI와 플러그인 저장은 같은 파일별 잠금 안에서 revision 검사와 임시 파일 교체를 수행한다. 신규 저장은 기존 파일이 있으면 거절한다. 충돌 응답은 기대·관측 revision을 담고 탭은 미저장 문서를 유지한다. revision·Undo는 회로 파일에 쓰지 않는다. [v1 예제](https://github.com/litzio/litzsim/tree/archive/qt-cpp-mvp-2026-11-26/examples)
 
 도면에서 같은 네트의 분기는 점, 다른 네트의 교차는 두 net ID와 좌표가 있는 점프 반원이다. 연결 명령은 격자 위치에서 추론하지 않고 단자 쌍을 받는다. 전압은 p−n, 전류는 정의된 기준 화살표를 표시한다. 기호·ID·값·핀 라벨 상자를 라우팅 장애물로 취급하고 남은 겹침은 두 대상 ID와 영역으로 반환한다. React는 IEEE 315 기호와 검정 선을 그리고 격자 위에서 드래그한 뒤 드롭 때만 확정한다. [공동 편집](2026-11-25-circuit-editor.md) · [도면 품질 조사](2026-11-25-schematic-publication-audit.md)

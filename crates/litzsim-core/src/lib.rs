@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+pub mod circuit;
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn ping() -> Value {

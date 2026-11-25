@@ -9,4 +9,6 @@ license = "MIT"
 
 [workspace.dependencies]
 litzsim-core = { path = "crates/litzsim-core" }
-serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
+sha2 = "0.10"
