@@ -6,6 +6,7 @@
 | [1차 MVP 범위와 PR 계획](mvp.md) | 개발 계획 | 회로 작성·해석 검증·대용량 파형 탐색을 어떤 순서와 기준으로 구현하는가? |
 | [리치오와 LitzSim 화면 검토](reviews/desktop-shell.md) | 제품 화면 비교 | 탐색기·탭·글꼴·아이콘을 실제 렌더링에서 어떻게 계승했는가? |
 | [MVP 검증 기록](reviews/pfc-validation.md) | 로컬 실행 결과 | 해석해, 스위칭·평균 비교, 대용량 파형 성능은 어떤 조건에서 측정했는가? |
+| [웹 회로 편집기 아키텍처](spikes/2026-11-26-web-editor-architecture.md) | 전환 설계 | 단독 앱과 Litzio에서 편집 연산·실행·파형 화면을 어떻게 공유하는가? |
 | [공동 회로 편집](spikes/2026-11-25-circuit-editor.md) | 설계 탐색 · GUI 선행 시제품 | 사람이 선택한 배선과 AI가 편집한 단자가 어떻게 일치하는가? |
 | [논문용 회로도 품질 조사](spikes/2026-11-25-schematic-publication-audit.md) | 현황 진단 · 출판 품질 기준 | RC·벅·2상 PFC 도면에서 어떤 표기와 출력 품질을 보완해야 하는가? |
 | [전력단 모델과 검증 기준](spikes/2026-11-25-converter-models.md) | 선행 실험 · 재현 기준 | PFC·CLLLC에서 무엇을 보존하고 어떤 파형을 비교하는가? |
