@@ -12,11 +12,9 @@ C++·Qt로 만든 1차 MVP(회로 편집기, 해석 엔진, 파형 창, 논문�
 
 ## 외부 PC에서 설치하기
 
-Windows x64에서 [rustup](https://rustup.rs/)으로 Windows GNU 툴체인(`stable-x86_64-pc-windows-gnu`)을 설치합니다. 기존 rustup을 쓰는 경우 아래처럼 이 PowerShell 세션에서 사용할 툴체인을 선택합니다.
+Windows x64에 Rust가 없다면 [rustup](https://rustup.rs/)을 설치합니다. PowerShell에서 저장소를 복제하고 기본 Rust 툴체인으로 플러그인을 빌드합니다.
 
 ```powershell
-rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-$env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
 git clone https://github.com/litzio/litzsim.git
 cd litzsim
 cargo xtask plugin
@@ -26,6 +24,20 @@ cargo xtask plugin
 2. 목록에서 **LitzSim**을 켜고 **신뢰하고 켜기**를 선택합니다.
 3. 작업 막대에서 **LitzSim**을 열고 **코어 확인**을 눌러 코어 버전과 왕복 시간을 확인합니다.
 
-업데이트할 때는 같은 저장소에서 `git pull`과 `cargo xtask plugin`을 실행합니다. **다시 설치**가 표시되면 선택합니다. 이 버튼이 표시되지 않을 때는 연결한 Host를 지정해 `litzio plugins reload local.litzsim --host <Host 주소> --json`으로 다시 설치합니다.
+### `link.exe`를 찾을 수 없을 때
+
+빌드가 `link.exe`를 찾을 수 없다는 오류로 실패하면 Windows GNU 툴체인을 설치하고 현재 PowerShell 세션에서만 선택합니다. 이 툴체인으로 만든 설치 폴더를 Litzio Desktop에 등록해 코어 응답을 확인했습니다.
+
+```powershell
+rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+$env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
+cargo xtask plugin
+```
+
+### 업데이트하기
+
+1. 등록할 때 사용한 저장소 폴더에서 `git pull`과 `cargo xtask plugin`을 실행합니다.
+2. Litzio Desktop의 **설정 → 플러그인**에서 **LitzSim 설정**을 열고 **업데이트 확인**을 누릅니다.
+3. 새 내용이 감지되면 **업데이트**를 누릅니다. 작업 막대에서 **LitzSim**을 열고 **코어 확인**을 눌러 응답을 확인합니다.
 
 [제품 목적](docs/purpose.md) · [문서 색인](docs/README.md) · [에이전트 작업 안내](AGENTS.md)
