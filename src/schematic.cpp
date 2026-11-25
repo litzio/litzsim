@@ -121,8 +121,8 @@ QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObje
     if(!value.isEmpty()) labels.append({value,horizontal ? QPoint(-24,6) : name+QPoint(0,20),13,false});
     // Rotate terminal-relative anchors and keep the lettering upright.
     // Preserve the router's existing ID and value reservations.
-    auto mark=[&](const QString& text,QPoint anchor,bool outsideGate=false) {
-        Caption caption{text,{},14,false,false};
+    auto mark=[&](const QString& text,QPoint anchor,int size=14,bool bold=false,bool outsideGate=false) {
+        Caption caption{text,{},size,bold,false};
         const auto rect=caption.bounds();
         caption.offset=rotatePoint(anchor,angle)-rect.center();
         if(outsideGate) {
@@ -131,13 +131,16 @@ QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObje
         }
         labels.append(caption);
     };
+    auto terminalMark=[&](const QString& text,QPoint anchor) {
+        mark(text,anchor,22,true);
+    };
     if(type=="nmos") {
         const auto pins=offsets(type);
-        mark("D",pins[0]*pitch+QPoint(-10,5));
-        mark("G",pins[1]*pitch+QPoint(4,11));
-        mark("S",pins[2]*pitch+QPoint(-10,-5));
+        terminalMark("D",pins[0]*pitch+QPoint(15,-13));
+        terminalMark("G",pins[1]*pitch+QPoint(-2,17));
+        terminalMark("S",pins[2]*pitch+QPoint(15,13));
         const auto signal=circuit.gateSignal(id+".g");
-        if(!signal.isEmpty()) mark("제어 "+signal,{-38,14},true);
+        if(!signal.isEmpty()) mark("제어 "+signal,{-46,14},14,false,true);
         // On rotation the name follows the diode side, clear of the gate lead.
         auto& label=labels.first();
         const auto rect=label.bounds();
@@ -148,8 +151,8 @@ QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObje
     } else if(type=="voltmeter") {
         const auto pins=offsets(type);
         mark("V",{0,0});
-        mark("+",pins[0]*pitch+QPoint(-12,7));
-        mark("−",pins[1]*pitch+QPoint(-12,-7));
+        terminalMark("+",pins[0]*pitch+QPoint(-27,12));
+        terminalMark("−",pins[1]*pitch+QPoint(-27,-12));
     } else if(type=="ammeter") {
         mark("A",{0,-8});
     }
@@ -246,7 +249,7 @@ void Sheet::redraw() {
         }
         for(const auto& caption:captions(circuit,id,it.value().toObject(),angle)) {
             auto* label=scene()->addSimpleText(caption.text,caption.font());
-            label->setBrush(caption.bold ? ink : QColor(Qt::black));
+            label->setBrush(caption.reservesWireSpace && caption.bold ? ink : QColor(Qt::black));
             label->setPos(center*pitch+caption.offset);label->setData(0,id);label->setZValue(3);
             if(caption.reservesWireSpace) reserveLabelEdges(label->sceneBoundingRect(),labelEdges);
         }

@@ -16,16 +16,23 @@ QPointF terminal(const Sheet& sheet,const QString& name) {
     throw std::runtime_error(("missing scene terminal: "+name).toStdString());
 }
 
-void verifyMark(const Sheet& sheet,const QString& id,const QString& text,const QString& pin) {
+void verifyMark(const Sheet& sheet,const QString& id,const QString& text,const QString& pin,
+                bool terminalMark=true) {
     int matches=0;
     const auto target=terminal(sheet,id+"."+pin);
     for(auto* item:sheet.scene()->items()) {
         const auto* label=qgraphicsitem_cast<QGraphicsSimpleTextItem*>(item);
         if(!label || label->data(0).toString()!=id || label->text()!=text) continue;
+        // Protect the enlarged marks, which must be larger than the 13 px value labels.
+        if(terminalMark && label->font().pixelSize()<22)
+            throw std::runtime_error(("terminal mark too small: "+id+" "+text).toStdString());
         const auto area=label->sceneBoundingRect();
         const auto nearest=QPointF(std::clamp(target.x(),area.left(),area.right()),
                                    std::clamp(target.y(),area.top(),area.bottom()));
-        if(QLineF(nearest,target).length()<18 && label->brush().color()==Qt::black) ++matches;
+        // Single glyphs are anchored within one grid step. Signal names grow outward from their anchor.
+        const bool near=terminalMark ? QLineF(area.center(),target).length()<32
+                                     : QLineF(nearest,target).length()<18;
+        if(near && label->brush().color()==Qt::black) ++matches;
     }
     if(matches!=1) throw std::runtime_error(("missing or misplaced mark: "+id+" "+text).toStdString());
 }
@@ -110,7 +117,7 @@ void verifySchematic(const QString& examples) {
                 verifyMark(sheet,id,"S","s");
             }
             for(auto it=gates.begin();it!=gates.end();++it)
-                verifyMark(sheet,it.value().toString().section('.',0,0),"제어 "+it.key(),"g");
+                verifyMark(sheet,it.value().toString().section('.',0,0),"제어 "+it.key(),"g",false);
             sheet.circuit.rotate(probe);
             for(const auto& id:sensors+transistors) sheet.circuit.rotate(id);
             sheet.redraw();
