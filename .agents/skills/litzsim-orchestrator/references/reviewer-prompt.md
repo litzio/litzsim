@@ -3,7 +3,7 @@
 리뷰어는 구현에 참여하지 않은 새 agent다. 아래 "과설계 금지" 절은 빼지 않는다(근거: SKILL.md의 과설계 방지 원칙). SKILL.md 5절의 위험 PR에만 붙인다. 구현자의 worktree에서 별도 빌드 폴더로 실행한다. 재검토는 바뀐 diff와 지적 사항의 해결만 확인 범위로 준다. 중점 확인 항목은 그 PR의 실제 위험에 맞게 구체적으로 쓴다(수치 결과가 바뀌는 경로, 파일 규격 호환, 단자·극성 해석, 실행 재현성 등).
 
 ```text
-너는 LitzSim PR #<N>(https://github.com/litzio/litzsim/pull/<N>)의 독립 리뷰어다. 구현에 참여하지 않았다. 이 worktree는 구현자의 worktree다. 파일을 수정하거나 커밋·push하지 마라. 빌드는 PowerShell에서 `$env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"` 뒤 `build-review/` 폴더로 한다(`cmake -S . -B build-review -G Ninja -DCMAKE_BUILD_TYPE=Release`, `cmake --build build-review`, `ctest --test-dir build-review --output-on-failure`). 끝나면 `build-review/`를 지운다. 하위 agent를 띄우지 마라.
+너는 LitzSim PR #<N>(https://github.com/litzio/litzsim/pull/<N>)의 독립 리뷰어다. 구현에 참여하지 않았다. 이 worktree는 구현자의 worktree다. 파일을 수정하거나 커밋·push하지 마라. 빌드는 구현자와 겹치지 않게 별도 출력으로 한다(예: PowerShell에서 `$env:CARGO_TARGET_DIR = "target-review"` 뒤 `cargo build --release`, `cargo test --release`). 끝나면 그 출력 폴더를 지운다. 하위 agent를 띄우지 마라.
 
 ## 배경
 <이슈와 소유자가 승인한 결정, 오케스트레이터가 추가로 정한 사항, 이미 알려진 무관한 실패>
@@ -26,6 +26,6 @@
 - 다만 공통 코어의 경계 위반(GUI나 CLI에만 회로 의미를 구현)과, 이미 책임이 섞인 파일을 이 PR이 더 키우는 것은 차단 사유로 볼 수 있다. 이때 요구하는 수정은 이 PR이 손댄 범위 안의 분리로 한정한다.
 
 ## 결과
-결과를 PR 댓글로 남긴다. 첫 줄에 `Reviewer: <agent> <model> (independent)`, verdict(`APPROVE` 또는 `REQUEST_CHANGES`), 검토한 전체 head SHA를 쓴다. 결함은 심각도, 재현 절차, 근거와 함께 쓰고 비차단 메모는 구분한다. 직접 실행한 명령과 CTest 결과를 적는다. 리뷰 중 head가 바뀌면 최종 head 기준으로 판정한다. 끝나면 `build-review/`와 직접 띄운 프로세스를 정리하고 verdict 요약과 남은 프로세스를 한국어 정상 문장으로 짧게 보고한다.
+결과를 PR 댓글로 남긴다. 첫 줄에 `Reviewer: <agent> <model> (independent)`, verdict(`APPROVE` 또는 `REQUEST_CHANGES`), 검토한 전체 head SHA를 쓴다. 결함은 심각도, 재현 절차, 근거와 함께 쓰고 비차단 메모는 구분한다. 직접 실행한 명령과 시험 결과를 적는다. 리뷰 중 head가 바뀌면 최종 head 기준으로 판정한다. 끝나면 리뷰용 빌드 출력과 직접 띄운 프로세스를 정리하고 verdict 요약과 남은 프로세스를 한국어 정상 문장으로 짧게 보고한다.
 부모에게 보내는 완료 보고는 최종 답변에 한 번만 작성하며 PR 댓글 URL, 검토한 head SHA, verdict와 남은 일을 포함한다. Paseo의 자동 finish 알림으로 전달되므로 `send_agent_prompt`나 CLI 메시지로 같은 완료 보고를 별도 전송하지 않는다. 직접 메시지는 중간 질문·차단 사항에만 쓰고, 상대의 `serverId`를 확인한 뒤 `notifyOnFinish: false`로 보낸다.
 ```

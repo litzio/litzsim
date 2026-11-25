@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Build and test what main would become if a LitzSim PR were merged now.
 // Creates a temporary detached worktree at the PR head, merges the current origin/main into it
-// without committing, runs a Release CMake build and the whole CTest suite, then removes the worktree.
-// On success the last line is the record that pr-gate.mjs requires:
-//   로컬 검증: head <sha> on main <sha> — Release 빌드, CTest n/n 통과 (…)
+// without committing, builds and runs every test, then removes the worktree. A tree with Cargo.toml uses
+// cargo (Release build, whole workspace); one with CMakeLists.txt uses CMake/CTest; a docs-only tree records
+// that there was nothing to build. On success the last line is the record that pr-gate.mjs requires:
+//   로컬 검증: head <sha> on main <sha> — cargo Release 빌드, 시험 n/n 통과 (…)
 // Usage: node pr-verify.mjs --pr <N> [--keep]
-// The toolchain bin (default C:\msys64\ucrt64\bin when it exists) can be set with LITZSIM_TOOLCHAIN_BIN.
+// For CMake trees the toolchain bin (default C:\msys64\ucrt64\bin when it exists) can be set with LITZSIM_TOOLCHAIN_BIN.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,6 +22,15 @@ export function ctestSummary(output) {
   if (!match) return null;
   const total = Number(match[3]);
   return { passed: total - Number(match[2]), total };
+}
+
+// Sums every "test result:" line (unit, integration and doc tests) of `cargo test`.
+export function cargoSummary(output) {
+  const results = [...output.matchAll(/test result: \w+\. (\d+) passed; (\d+) failed/g)];
+  if (!results.length) return null;
+  const passed = results.reduce((sum, match) => sum + Number(match[1]), 0);
+  const failed = results.reduce((sum, match) => sum + Number(match[2]), 0);
+  return { passed, total: passed + failed };
 }
 
 function step(label, command, args, options) {
@@ -75,16 +85,33 @@ async function main() {
         throw new Error(`merge of origin/${BASE} into PR head conflicts: ${conflicts.split('\n').join(', ') || merged.stderr.trim()}`);
       }
     }
-    const configure = step('configure', 'cmake', ['-S', dir, '-B', build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release'], { env });
-    const compile = step('build', 'cmake', ['--build', build], { env });
-    const test = step('ctest', 'ctest', ['--test-dir', build, '--output-on-failure'], { env });
-    const summary = ctestSummary(test.output);
-    if (!summary || summary.passed !== summary.total || summary.total === 0) {
-      console.error(test.output.split('\n').slice(-30).join('\n'));
-      throw new Error('CTest summary missing or not all tests passed');
+    const merged = ancestor ? '' : ', main 병합 결과';
+    const prefix = `로컬 검증: head ${head} on main ${main} —`;
+    if (existsSync(path.join(dir, 'Cargo.toml'))) {
+      const cargoEnv = { ...process.env, CARGO_TARGET_DIR: path.join(dir, 'target') };
+      const compile = step('cargo build', 'cargo', ['build', '--release', '--workspace', '--all-targets'], { cwd: dir, env: cargoEnv });
+      const test = step('cargo test', 'cargo', ['test', '--release', '--workspace'], { cwd: dir, env: cargoEnv });
+      const summary = cargoSummary(test.output);
+      if (!summary || summary.passed !== summary.total || summary.total === 0) {
+        console.error(test.output.split('\n').slice(-30).join('\n'));
+        throw new Error('cargo test summary missing, no tests ran, or not all tests passed');
+      }
+      console.log(`${prefix} cargo Release 빌드, 시험 ${summary.passed}/${summary.total} 통과 (빌드 ${(compile.seconds / 60).toFixed(1)}분, 시험 ${test.seconds.toFixed(1)} s${merged})`);
+    } else if (existsSync(path.join(dir, 'CMakeLists.txt'))) {
+      const configure = step('configure', 'cmake', ['-S', dir, '-B', build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release'], { env });
+      const compile = step('build', 'cmake', ['--build', build], { env });
+      const test = step('ctest', 'ctest', ['--test-dir', build, '--output-on-failure'], { env });
+      const summary = ctestSummary(test.output);
+      if (!summary || summary.passed !== summary.total || summary.total === 0) {
+        console.error(test.output.split('\n').slice(-30).join('\n'));
+        throw new Error('CTest summary missing or not all tests passed');
+      }
+      const minutes = ((configure.seconds + compile.seconds) / 60).toFixed(1);
+      console.log(`${prefix} Release 빌드, CTest ${summary.passed}/${summary.total} 통과 (빌드 ${minutes}분, 시험 ${test.seconds.toFixed(1)} s${merged})`);
+    } else {
+      // A docs-only tree (the start of the rebuild) has nothing to compile; say so instead of passing silently.
+      console.log(`${prefix} 빌드 대상 없음 (Cargo.toml·CMakeLists.txt 없음${merged})`);
     }
-    const minutes = ((configure.seconds + compile.seconds) / 60).toFixed(1);
-    console.log(`로컬 검증: head ${head} on main ${main} — Release 빌드, CTest ${summary.passed}/${summary.total} 통과 (빌드 ${minutes}분, 시험 ${test.seconds.toFixed(1)} s${ancestor ? '' : ', main 병합 결과'})`);
   } finally {
     if (added && !keep) {
       spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: root });

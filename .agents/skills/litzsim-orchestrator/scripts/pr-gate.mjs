@@ -36,9 +36,14 @@ export const reviewDecision = note => /^독립 리뷰: (APPROVE [0-9a-f]{7,64}|�
 
 // Returns { head, main } from the "로컬 검증:" line written by pr-verify.mjs, or null.
 export function verificationRecord(note) {
-  const match = note.match(/^로컬 검증: head ([0-9a-f]{40}) on main ([0-9a-f]{40}) — .*CTest (\d+)\/(\d+) 통과/m);
-  if (!match || match[3] !== match[4] || match[3] === '0') return null;
-  return { head: match[1], main: match[2] };
+  const line = note.match(/^로컬 검증: head ([0-9a-f]{40}) on main ([0-9a-f]{40}) — (.*)$/m);
+  if (!line) return null;
+  // A docs-only tree records that nothing was built; otherwise every test must have passed.
+  if (!/^빌드 대상 없음/.test(line[3])) {
+    const count = line[3].match(/(?:CTest|시험) (\d+)\/(\d+) 통과/);
+    if (!count || count[1] !== count[2] || count[1] === '0') return null;
+  }
+  return { head: line[1], main: line[2] };
 }
 
 export function checkProblems(checks) {
@@ -105,7 +110,7 @@ async function main() {
     const note = readFileSync(noteFile, 'utf8');
     if (!reviewDecision(note)) problems.push('note must start with "독립 리뷰: APPROVE <head>" or "독립 리뷰: 생략 — <사유>"');
     const record = verificationRecord(note);
-    if (!record) problems.push('note has no passing "로컬 검증: head <sha> on main <sha> — … CTest n/n 통과" line (run pr-verify.mjs)');
+    if (!record) problems.push('note has no passing "로컬 검증: head <sha> on main <sha> — … 시험 n/n 통과" (or "빌드 대상 없음") line (run pr-verify.mjs)');
     else {
       if (record.head !== view.headRefOid) problems.push(`local verification is for head ${record.head.slice(0, 10)}, PR head is ${view.headRefOid.slice(0, 10)} (run pr-verify.mjs again)`);
       if (record.main !== main) problems.push(`local verification is on main ${record.main.slice(0, 10)}, origin/main is ${main.slice(0, 10)} (run pr-verify.mjs again)`);

@@ -1,13 +1,13 @@
 ---
 name: litzsim-orchestrator
-description: Orchestrate several LitzSim GitHub issues end to end by planning waves, launching Paseo worker agents in isolated worktrees, reviewing risky PRs, verifying each merge result locally with CMake/CTest, and merging into main. Use only when the user explicitly invokes litzsim-orchestrator inside the litzio/litzsim repository.
+description: Orchestrate several LitzSim GitHub issues end to end by planning waves, launching Paseo worker agents in isolated worktrees, reviewing risky PRs, verifying each merge result locally with the repository build and tests (cargo for the Rust rebuild), and merging into main. Use only when the user explicitly invokes litzsim-orchestrator inside the litzio/litzsim repository.
 ---
 
 # LitzSim Orchestrator
 
 여러 이슈를 작업자 agent에게 나눠 맡기고, 결과 PR을 확인해 `main`에 병합하는 통합 담당자 절차다. 오케스트레이터는 직접 제품 코드를 고치지 않는다. 판단, 배정, 확인, 로컬 검증, 병합, 정리를 맡는다. 사용자에게는 한국어로 보고한다.
 
-이 스킬은 `litzio/litzio`의 `litzio-orchestrator`를 LitzSim에 맞게 옮긴 것이다. 가장 큰 차이는 **CI와 merge queue가 없다**는 점이다([MVP 계획](../../../docs/mvp.md)에서 GitHub CI 도입을 보류했다). 그래서 queue가 하던 "병합 결과 검사"를 오케스트레이터가 [pr-verify.mjs](scripts/pr-verify.mjs)로 직접 한다. 병합 결과(현재 `main` + PR head)를 Release로 빌드하고 CTest 전체를 통과했다는 기록이 없으면 병합하지 않는다.
+이 스킬은 `litzio/litzio`의 `litzio-orchestrator`를 LitzSim에 맞게 옮긴 것이다. 가장 큰 차이는 **CI와 merge queue가 없다**는 점이다([MVP 계획](../../../docs/mvp.md)에서 GitHub CI 도입을 보류했다). 그래서 queue가 하던 "병합 결과 검사"를 오케스트레이터가 [pr-verify.mjs](scripts/pr-verify.mjs)로 직접 한다. 병합 결과(현재 `main` + PR head)를 빌드하고 전체 시험을 통과했다는 기록이 없으면 병합하지 않는다. `pr-verify`는 저장소에 `Cargo.toml`이 있으면 cargo, `CMakeLists.txt`가 있으면 CMake/CTest로 검증하고, 둘 다 없으면(문서만 있는 재구축 초기) 빌드 대상이 없다고 기록한다. 빌드된 배포물을 만드는 CI는 [Rust 재구축](../../../docs/rebuild.md)에서 다시 정한다.
 
 이 스킬은 모델과 하네스에 의존하지 않는다. 작업자 생성·메시지·상태 확인은 Paseo MCP 도구가 있으면 그것을, 없으면 `paseo` CLI를 쓴다. 사용법은 전역 `paseo` 스킬을 따른다. 스크립트 경로는 이 SKILL.md가 있는 폴더 기준이다.
 
@@ -65,15 +65,15 @@ description: Orchestrate several LitzSim GitHub issues end to end by planning wa
 ## 2. 계획
 
 1. 이슈 본문과 관련 문서([제품 목적](../../../docs/purpose.md), [MVP 범위](../../../docs/mvp.md), [검증 기록](../../../docs/reviews/pfc-validation.md), `docs/spikes/`)를 읽는다. 주장하는 사실은 코드로 확인한다.
-2. 이슈마다 고칠 파일을 예상하고, 같은 파일을 고치는 이슈끼리 선후를 정한다. 이 저장소는 파일이 적고 한 파일의 책임이 넓어서 충돌이 잦다. 특히 `src/circuit.*`(파일 규격·단자·네트), `src/solver.cpp`, `src/pfc.cpp`, `src/schematic.cpp`, `src/studio.*`, `src/viewer.*`, `CMakeLists.txt`(테스트 등록), `examples/*.litzsim`, `README.md`, `docs/reviews/pfc-validation.md`는 한 번에 한 PR만 고치게 순서를 정하거나 한 PR로 묶는다. 여러 PR이 같은 문서의 같은 절을 고치게 되면 그 문장 변경은 마지막 PR 하나에 모은다.
-3. 결정 없이 시작할 수 있고 서로 겹치지 않는 이슈를 1차로, 나머지를 선행 PR 병합 순서대로 배치한다. 동시에 실행하는 작업자와 리뷰어는 4명 이하로 둔다. 실제 제약은 같은 파일 충돌과 PC 자원이다. 작업자마다 C++/Qt를 처음부터 빌드하고, 오케스트레이터의 병합 검증도 같은 PC에서 빌드한다.
+2. 이슈마다 고칠 파일을 예상하고, 같은 파일을 고치는 이슈끼리 선후를 정한다. 재구축 초기에는 파일이 적고 한 파일의 책임이 넓어 충돌이 잦다. 공통 코어의 회로 문서·편집 연산, 해석 엔진, 도면 배치, 작업 공간 설정(`Cargo.toml`, `package.json`), 예제 회로, `README.md`, `docs/rebuild.md`의 기준표는 한 번에 한 PR만 고치게 순서를 정하거나 한 PR로 묶는다. 여러 PR이 같은 문서의 같은 절을 고치게 되면 그 문장 변경은 마지막 PR 하나에 모은다.
+3. 결정 없이 시작할 수 있고 서로 겹치지 않는 이슈를 1차로, 나머지를 선행 PR 병합 순서대로 배치한다. 동시에 실행하는 작업자와 리뷰어는 4명 이하로 둔다. 실제 제약은 같은 파일 충돌과 PC 자원이다. 작업자마다 처음부터 빌드하고, 오케스트레이터의 병합 검증도 같은 PC에서 빌드한다.
 4. 계획을 표로 보고한다(이슈, 작업자 모델·effort, 주로 고칠 파일, 선행 조건, 독립 리뷰 여부). 제외한 이슈와 이유도 쓴다.
 5. 해석 방식이나 화면 방향을 사용자가 골라야 하는 제안은 바로 구현하지 않는다. 병합하지 않는 `spike/<번호>-…` 브랜치에서 비교 실행이나 시안을 만들고, 결과를 `docs/spikes/`에 기록하는 문서 PR과 이슈 댓글로 고르게 한다. 스파이크 코드는 병합하지 않는다. 채택된 안은 이슈를 등록해 `main` 기준으로 다시 구현하게 한다.
 
 ## 3. 작업자 실행
 
 - 이슈마다 새 Paseo worktree를 `baseBranch: "origin/main"`에서 branch-off로 만든다(로컬 `main`은 낡았을 수 있다). 브랜치 이름은 기존 관례대로 `feat/…`, `fix/…`, `docs/…`를 쓴다. 병합 직후의 worktree를 재사용하지 않는다. 선행 PR의 head에서 갈라 미리 시작시키는 것은 선행 PR이 승인돼 병합 검증 중일 때만 하고, 지시문 첫 문단에 선행 PR 번호와 "선행 PR이 병합되면 origin/main을 merge한 뒤 PR을 만든다. 30분이 지나도 병합되지 않으면 보고한다"를 넣는다.
-- 지시문에 그 이슈의 **로컬 검사 명령**을 적는다. 기본은 README의 Release 빌드와 `ctest --test-dir build --output-on-failure` 전체다. 빌드 셸의 PATH 앞에 MSYS2 UCRT64의 `bin`을 둔다. 해석기·소자 모델을 바꾸면 이에 더해 검증 기록과 같은 조건의 비교 실행(`litzsim-cli run`)을 적는다. 각 worktree는 자기 `build/`를 쓴다(다른 checkout의 빌드 폴더를 공유하지 않는다).
+- 지시문에 그 이슈의 **로컬 검사 명령**을 적는다. Rust 기본은 `cargo build --release`와 `cargo test --release` 전체이며, 웹 화면이 생기면 그 패키지의 빌드·시험 명령을 더한다. 해석기·소자 모델을 바꾸면 이에 더해 [Rust 재구축](../../../docs/rebuild.md)의 기준과 같은 조건의 비교 실행을 적는다. 각 worktree는 자기 빌드 출력(`target/` 등)을 쓴다(다른 checkout의 빌드 폴더를 공유하지 않는다).
 - 지시문에 적는 사실 전제(이미 되는 동작, 지원하는 결선, 검사가 쓰는 예제 파일)는 코드나 문서로 확인한 뒤 쓴다. 확인하지 않은 전제는 "확인 필요"로 표시한다.
 - 작업자는 쓰기와 네트워크가 가능한 모드로 만든다. 지시문은 파일 쓰기 도구로 파일에 쓰고, 공통 규칙은 띄울 때마다 [worker-prompt.md](references/worker-prompt.md)의 블록을 그 파일에서 읽어 그대로 붙인다. 줄이거나 고친 세션 사본을 돌려쓰지 않는다. 공통 규칙이 모자라거나 길면 worker-prompt.md를 고치는 PR을 낸다.
 - **작업자 한 명은 PR 하나만 맡는다.** PR이 병합되면 그 작업자의 일은 끝난다. 같은 작업자에게 이어서 맡기는 것은 같은 PR의 리뷰 지적 반영, 충돌 해결, 병합 검증 실패 수정, 한 이슈를 나눈 바로 다음 조각일 때만 한다. 이어서 맡기기 전에 컨텍스트 사용량(`get_agent_status`의 `contextWindowUsedTokens`)을 확인하고 절반을 넘었으면 새 작업자로 바꾼다.
@@ -88,7 +88,7 @@ description: Orchestrate several LitzSim GitHub issues end to end by planning wa
 
 1. `gh pr view <N> --json files`와 `gh pr diff <N>`로 diff를 직접 읽는다. 확인할 것:
    - 범위 밖 변경, 테스트 단언 약화(삭제·허용오차 확대·기준값을 결과에 맞춰 고침·timeout 증가·재시도), 승인된 결정과의 일치.
-   - **공통 코어 원칙.** 단자·연결·측정 방향과 편집 연산을 GUI(`studio`·`schematic`)나 CLI에서 따로 구현하지 않았는지. 같은 연산을 공통 코어에 두고 양쪽이 호출해야 한다.
+   - **공통 코어 원칙.** 단자·연결·측정 방향과 편집 연산을 화면(웹)이나 CLI에서 따로 구현하지 않았는지. 같은 연산을 공통 코어에 두고 양쪽이 호출해야 한다.
    - **모델 변경의 검증 근거.** 해석기·소자 모델·PFC 축약 방정식이 바뀌었으면 PR 본문에 같은 회로·제어·초기조건에서의 전후 비교, 정확도 수치와 실행시간, 측정 조건, 미검증 범위가 있는지. 기준해·허용오차를 결과를 본 뒤에 정하지 않았는지.
    - **파일 규격.** `*.litzsim` 필드가 바뀌면 `version`, 예제 파일, README의 규격 설명, 저장→재열기 시험이 함께 바뀌었는지.
    - 삭제·이름 변경 PR은 지운 이름을 직접 `git grep`해 PR 본문 결과와 대조한다.
@@ -100,14 +100,14 @@ description: Orchestrate several LitzSim GitHub issues end to end by planning wa
    1. 같은 증상의 기존 이슈와 소유자 결정을 찾는다(`gh issue list --state all --search "<시험 이름>"`).
    2. 제품 결함·검사 전제 오류·원인 미확정으로 가른다. 반복 실행에서 재현되지 않았다는 것은 원인 확정이 아니다.
    3. 수치 결과가 기준을 벗어나면 기준을 바꾸지 않고 원인을 찾는다. 기준 자체가 틀렸다는 근거(해석해 재유도, 독립 계산)가 있을 때만 기준을 고치고, 그 근거를 PR 본문에 쓴다.
-   4. Qt GUI 시험(`studio`, `viewer`, `pfc-studio`, `workflow`)이 기계 속도에서만 실패하면 실제 상태를 기다리게 고친다. 단언 삭제·완화, 재시도, timeout 증가는 하지 않는다.
+   4. 화면 시험(브라우저 자동화 등)이 기계 속도에서만 실패하면 실제 상태를 기다리게 고친다. 단언 삭제·완화, 재시도, timeout 증가는 하지 않는다.
 4. 리뷰가 필요하면 5절대로 리뷰어를 붙인다. 필요 없으면 6절로 간다.
 
 ## 5. 독립 리뷰
 
-- 붙이는 기준(위험 PR): 해석기·소자 모델·적분·PFC 축약 방정식, `*.litzsim` 규격과 직렬화·저장 경로, 단자·네트·프로브 극성과 편집 연산(공통 코어), 실행 스냅샷(`runs/`)과 재현성, 대용량 파형 저장·요약(피크 보존), Windows 런타임 배치(`cmake/`), 파일 삭제·이동이 있는 탐색기 동작. 작은 UI·문구·테스트만·문서만의 수정은 오케스트레이터 확인으로 대신한다.
+- 붙이는 기준(위험 PR): 해석기·소자 모델·적분·PFC 축약 방정식, `*.litzsim` 규격과 직렬화·저장 경로, 단자·네트·프로브 극성과 편집 연산(공통 코어), 실행 스냅샷(`runs/`)과 재현성, 대용량 파형 저장·요약(피크 보존), 배포물 구성(설치 파일·런타임 동봉), 파일 삭제·이동이 있는 탐색기 동작. 작은 UI·문구·테스트만·문서만의 수정은 오케스트레이터 확인으로 대신한다.
 - 리뷰어는 구현에 참여하지 않은 새 agent이고, 프롬프트는 [reviewer-prompt.md](references/reviewer-prompt.md)를 쓴다. 이 PR에서 특히 위험한 지점을 중점 확인 항목으로 구체적으로 적는다.
-- 리뷰어는 구현자의 worktree를 같이 쓰며 별도 빌드 폴더(`build-review/`)를 쓴다. 리뷰어가 도는 동안 구현자에게 수정·push를 맡기지 않는다.
+- 리뷰어는 구현자의 worktree를 같이 쓰며 별도 빌드 출력(예: `CARGO_TARGET_DIR=target-review`)을 쓴다. 리뷰어가 도는 동안 구현자에게 수정·push를 맡기지 않는다.
 - 리뷰 중 구현자가 head를 바꾸면 리뷰어에게 최종 head 기준으로 판정하라고 알린다.
 - `REQUEST_CHANGES`면 차단 지적마다 오케스트레이터가 먼저 "엔지니어가 실제로 낼 수 있는 회로·조작에서 생기는가, 결과가 틀리거나 데이터를 잃는가"를 따진다. 아니면 비차단 메모로 내리고 그 판단을 기록에 쓴다. 남은 지적만 구현자에게 전달하고, 수정 후 같은 리뷰어 또는 새 리뷰어에게 재검토를 맡긴다.
 - 같은 종류의 지적(예: 지원하지 않는 결선의 또 다른 변형)이 라운드마다 이어지면, 오케스트레이터가 보장 범위를 정해 문장으로 고정한다. 예: "PFC 해석은 예제의 결선만 지원하고, 그 밖의 결선은 해당 소자 ID를 밝힌 오류로 거부한다." 재리뷰 지시에는 그 범위 밖 경로를 비차단 메모로 두라고 적는다.
@@ -117,7 +117,7 @@ description: Orchestrate several LitzSim GitHub issues end to end by planning wa
 CI가 없으므로 병합 결과의 검증은 오케스트레이터가 한다. 순서는 **검증 → 확인 → 병합**이고, 병합은 한 번에 하나씩 한다.
 
 ```bash
-node <skill>/scripts/pr-verify.mjs --pr <N>          # 현재 origin/main + PR head를 임시 worktree에서 Release 빌드·CTest
+node <skill>/scripts/pr-verify.mjs --pr <N>          # 현재 origin/main + PR head를 임시 worktree에서 빌드·전체 시험
 node <skill>/scripts/pr-gate.mjs --pr <N>            # 병합 조건만 확인
 node <skill>/scripts/pr-gate.mjs --pr <N> --merge --note-file <note.md> --ai-agent "<도구>" --ai-model "<provider>/<model>"
 ```
