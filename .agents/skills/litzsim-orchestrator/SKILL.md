@@ -77,6 +77,8 @@ description: Orchestrate several LitzSim GitHub issues end to end by planning wa
 - 지시문에 적는 사실 전제(이미 되는 동작, 지원하는 결선, 검사가 쓰는 예제 파일)는 코드나 문서로 확인한 뒤 쓴다. 확인하지 않은 전제는 "확인 필요"로 표시한다.
 - 작업자는 쓰기와 네트워크가 가능한 모드로 만든다. 지시문은 파일 쓰기 도구로 파일에 쓰고, 공통 규칙은 띄울 때마다 [worker-prompt.md](references/worker-prompt.md)의 블록을 그 파일에서 읽어 그대로 붙인다. 줄이거나 고친 세션 사본을 돌려쓰지 않는다. 공통 규칙이 모자라거나 길면 worker-prompt.md를 고치는 PR을 낸다.
 - **작업자 한 명은 PR 하나만 맡는다.** PR이 병합되면 그 작업자의 일은 끝난다. 같은 작업자에게 이어서 맡기는 것은 같은 PR의 리뷰 지적 반영, 충돌 해결, 병합 검증 실패 수정, 한 이슈를 나눈 바로 다음 조각일 때만 한다. 이어서 맡기기 전에 컨텍스트 사용량(`get_agent_status`의 `contextWindowUsedTokens`)을 확인하고 절반을 넘었으면 새 작업자로 바꾼다.
+- **지시문 전달(Paseo CLI).** `paseo run`에는 지시문 파일 인자가 없고, PowerShell에서 긴 글을 명령 인자로 넘기면 큰따옴표가 사라진다. 지시문은 파일로 쓰고 실행 프롬프트는 "그 파일 전체를 UTF-8로 읽고 그대로 따르라"는 한 문장으로 준다. 후속 지시는 `paseo send <id> --prompt-file <파일>`로 보내고, 실행 중인 작업에 범위를 더할 때는 `--behavior steer`를 쓴다. Codex 작업자는 `--provider codex/<model> --thinking <effort> --mode full-access`, 새 worktree는 `--new-workspace worktree --worktree-mode branch-off --base origin/main --new-branch <branch>`로 만든다.
+- **완료 대기(Paseo MCP 도구가 없는 세션).** `notifyOnFinish`를 쓸 수 없으므로 작업자를 만들거나 후속 지시를 보낸 뒤 `paseo wait <id>`를 완료 알림이 오는 백그라운드 실행으로 건다. 끝나면 `paseo logs <id>`의 마지막 보고를 읽는다.
 - 만든 뒤 1–2분 지나서 상태가 `running`인지, worktree가 실제로 있는지 직접 확인한다. 알림이 없다는 이유로 "진행 중"이라고 보고하지 않는다.
 - 작업자가 모델 용량 오류로 멈추면 같은 agent에 "`git status`, 최근 커밋, 열린 PR을 확인한 뒤 이어서 진행하라"를 보낸다. 새 agent로 교체하지 않는다.
 - 작업자가 결정이 필요하다고 멈추면, 승인된 결정 범위에서 답할 수 있으면 근거와 함께 답한다. 범위 밖이면 사용자에게 묻는다.
@@ -92,6 +94,8 @@ description: Orchestrate several LitzSim GitHub issues end to end by planning wa
    - 삭제·이름 변경 PR은 지운 이름을 직접 `git grep`해 PR 본문 결과와 대조한다.
    - README의 기능 설명은 실제로 실행하고 확인한 것만 쓰는지([제품 목적](../../../docs/purpose.md) 마지막 문장).
 2. 화면 변경은 캡처가 나오는 즉시 직접 본다. `git fetch origin pull/<N>/head:pr-<N>` 뒤 `git show pr-<N>:<캡처 경로> > <scratch>/x.png`로 꺼내 확인한다. [MVP 계획의 화면 변경 검토](../../../docs/mvp.md) 기준(리치오와 같은 논리 해상도·배율 비교, 단자·측정 방향 표시, 파형 축·범례·피크 가독성)을 적용한다. 캡처에 계정 이름·PC 이름·로컬 경로가 보이면 추가 push를 멈추게 하고 소유자에게 사실대로 보고한다.
+   - 교차·접속점·극성·단자명처럼 작은 표기는 캡처를 확대하거나 잘라서 본다. 작업자 보고의 서술(예: "세로선에는 반원과 닿지 않도록 간격을 뒀다")은 그 의미가 캡처에서 실제로 무엇인지 확인한다. PR #19에서 세로선을 잘라 낸 점프 표기를 축소 캡처만 보고 병합했다가 소유자 지적으로 고쳤다.
+   - 출판 출력이 바뀌는 PR은 편집 화면 캡처가 아니라 최종 크기의 출력물(미리보기)에서 같은 종류 라벨의 크기 일관성, 라벨과 기호·배선·다른 라벨의 겹침, 값 라벨이 자기 기호 가까이에 있는지 본다. 작업자가 "폭이 좁아 기준 미달"이라고 보고하면 원인이 정말 폭인지 출력물로 확인한다(PR #20에서는 라벨 크기 불일치가 원인이었다).
 3. 작업자의 검사 실패 보고는 다음 순서로 판정한다.
    1. 같은 증상의 기존 이슈와 소유자 결정을 찾는다(`gh issue list --state all --search "<시험 이름>"`).
    2. 제품 결함·검사 전제 오류·원인 미확정으로 가른다. 반복 실행에서 재현되지 않았다는 것은 원인 확정이 아니다.
