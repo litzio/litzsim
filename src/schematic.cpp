@@ -18,6 +18,9 @@
 
 namespace {
 constexpr int pitch=32;
+constexpr int jumpRadius=8;
+constexpr int jumpClearance=4; // Includes the selected wire's stroke.
+enum WireAxis { Horizontal=1, Vertical=2, BothAxes=Horizontal|Vertical };
 QPoint grid(QPointF p) {return {qRound(p.x()/pitch),qRound(p.y()/pitch)};}
 QPoint position(QJsonObject pos) {return {pos["x"].toInt(),pos["y"].toInt()};}
 QPoint rotatePoint(QPoint p,int degrees) {
@@ -100,7 +103,7 @@ struct Caption {
     QPointF offset;
     int size;
     bool bold;
-    bool reservesWireSpace=true;
+    bool followsSelection=true;
     QFont font() const {
         auto f=QApplication::font(); f.setPixelSize(size); f.setBold(bold); return f;
     }
@@ -121,7 +124,6 @@ QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObje
     const auto value=valueLabel(type,part["parameters"].toObject());
     if(!value.isEmpty()) labels.append({value,horizontal ? QPoint(-24,6) : name+QPoint(0,20),valueLabelSize,false});
     // Rotate terminal-relative anchors and keep the lettering upright.
-    // Preserve the router's existing ID and value reservations.
     auto mark=[&](const QString& text,QPoint anchor,int size=14,bool bold=false,bool outsideGate=false) {
         Caption caption{text,{},size,bold,false};
         const auto rect=caption.bounds();
@@ -181,6 +183,15 @@ QString collision(const Circuit& c,const QString& id,QPoint at,int angle) {
 }
 
 using Edges = QSet<QPair<QPoint,QPoint>>;
+void reserveJumpSites(const QRectF& obstacle,QSet<QPoint>& sites) {
+    // Mirror the clearance envelope about the candidate grid point.
+    constexpr int rim=jumpRadius+jumpClearance;
+    const auto candidates=obstacle.adjusted(-rim,-jumpClearance,rim,rim);
+    for(int x=int(std::ceil(candidates.left()/pitch));x<=std::floor(candidates.right()/pitch);++x)
+        for(int y=int(std::ceil(candidates.top()/pitch));y<=std::floor(candidates.bottom()/pitch);++y)
+            sites.insert({x,y});
+}
+
 void reserveLabelEdges(const QRectF& rect,Edges& edges) {
     // A label may cover the middle of a grid edge without containing either endpoint.
     for(int x=int(std::floor(rect.left()/pitch))-1;x<=std::ceil(rect.right()/pitch);++x)
@@ -188,23 +199,24 @@ void reserveLabelEdges(const QRectF& rect,Edges& edges) {
             const QPoint a(x,y);
             for(auto dir:{QPoint(1,0),QPoint(0,1)}) {
                 const QPoint b=a+dir;
-                const auto wire=QRectF(a*pitch,b*pitch).normalized().adjusted(-1,-1,1,1);
+                const auto wire=QRectF(a*pitch,b*pitch).normalized().adjusted(-1.5,-1.5,1.5,1.5);
                 if(rect.intersects(wire)) {edges.insert({a,b});edges.insert({b,a});}
             }
         }
 }
 
 // Return the shortest rectilinear route to any existing node on this net.
-// Occupied corners cannot be crossed. At another net's straight segment only
-// perpendicular travel is legal. The two nets remain electrically distinct.
+// Only the interior of another net's straight run can be crossed, and only
+// where the jump fits. A path can neither begin nor end at a crossing.
 QList<QPoint> route(QPoint start,const QSet<QPoint>& targets,const QSet<QPoint>& blocked,
                      const QHash<QPoint,int>& occupied,const QRect& bounds,const Edges& labels) {
+    if(occupied.contains(start)) return {};
     QQueue<QPoint> queue; queue.enqueue(start);
     QHash<QPoint,QPoint> parent; parent.insert(start,start);
     const QPoint dirs[]={{1,0},{0,1},{-1,0},{0,-1}};
     while (!queue.isEmpty()) {
         auto cur=queue.dequeue();
-        if (targets.contains(cur)) {
+        if (targets.contains(cur) && !occupied.contains(cur)) {
             QList<QPoint> path{cur};
             while (cur!=start) {cur=parent.value(cur);path.prepend(cur);}
             return path;
@@ -212,7 +224,7 @@ QList<QPoint> route(QPoint start,const QSet<QPoint>& targets,const QSet<QPoint>&
         for (QPoint d:dirs) {
             QPoint next=cur+d;
             if (labels.contains({cur,next}) || !bounds.contains(next) || parent.contains(next) || (blocked.contains(next) && !targets.contains(next))) continue;
-            int direction=d.x() ? 1 : 2;
+            int direction=d.x() ? Horizontal : Vertical;
             if ((occupied.value(cur)&direction) || (occupied.value(next)&direction)) continue;
             parent.insert(next,cur);queue.enqueue(next);
         }
@@ -227,10 +239,10 @@ void Sheet::redraw() {
     scene()->clear();
     QHash<QString,QPoint> pinPos;
     Edges labelEdges;
-    QSet<QPoint> blocked;
+    QSet<QPoint> blocked,jumpBlocked;
     QRect bounds(-12,-10,25,21);
-    auto layout=circuit.document["layout"].toObject();
-    auto parts=circuit.document["parts"].toObject();
+    const auto& document=circuit.document;
+    const auto layout=document["layout"].toObject(),parts=document["parts"].toObject();
     for (auto it=parts.begin();it!=parts.end();++it) {
         auto id=it.key(),type=it.value().toObject()["type"].toString();
         auto pos=layout[id].toObject();
@@ -240,6 +252,7 @@ void Sheet::redraw() {
         auto* symbol=scene()->addPath(glyph(type),QPen(ink,2,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin),
             type=="nmos" || type=="diode" ? QBrush(ink):QBrush(Qt::NoBrush));
         symbol->setData(0,id);symbol->setPos(center*pitch);symbol->setRotation(angle);symbol->setZValue(2);
+        reserveJumpSites(symbol->sceneBoundingRect(),jumpBlocked);
         if (id==selected) {
             QPainterPath halo;halo.addRoundedRect(-40,-31,100,62,6,6);
             auto* h=scene()->addPath(halo,QPen(QColor("#259e92"),1,Qt::DashLine),QBrush("#def4ee"));
@@ -247,9 +260,13 @@ void Sheet::redraw() {
         }
         for(const auto& caption:captions(circuit,id,it.value().toObject(),angle)) {
             auto* label=scene()->addSimpleText(caption.text,caption.font());
-            label->setBrush(caption.reservesWireSpace && caption.bold ? ink : QColor(Qt::black));
+            label->setBrush(caption.followsSelection && caption.bold ? ink : QColor(Qt::black));
             label->setPos(center*pitch+caption.offset);label->setData(0,id);label->setZValue(3);
-            if(caption.reservesWireSpace) reserveLabelEdges(label->sceneBoundingRect(),labelEdges);
+            const QFontMetricsF metrics(label->font());
+            const auto inkBounds=metrics.tightBoundingRect(caption.text)
+                .translated(label->scenePos()+QPointF(0,metrics.ascent()));
+            reserveLabelEdges(inkBounds,labelEdges);
+            reserveJumpSites(inkBounds,jumpBlocked);
         }
         const auto pins=library().value(type).pins;
         auto delta=offsets(type);
@@ -262,13 +279,28 @@ void Sheet::redraw() {
             dot->setPos(at*pitch);dot->setData(1,name);dot->setToolTip(name);dot->setZValue(4);
         }
     }
+    auto addAnnotation=[&](const QString& text,QPoint at,int size) {
+        auto font=QApplication::font();font.setBold(true);font.setPixelSize(size);
+        auto* label=scene()->addSimpleText(text,font);
+        label->setBrush(Qt::black);label->setPos(at*pitch);
+        reserveLabelEdges(label->sceneBoundingRect(),labelEdges);
+        reserveJumpSites(label->sceneBoundingRect(),jumpBlocked);
+    };
+    for(auto entry:document["annotations"].toArray()) {
+        const auto a=entry.toObject();
+        addAnnotation(a["text"].toString(),position(a),16);
+    }
+    if(document["title"].isString()) addAnnotation(document["title"].toString(),{0,-4},25);
     bounds.adjust(-10,-8,10,8);
     QHash<QPoint,int> occupied;
-    auto bends=circuit.document["bends"].toObject();
-    auto trunks=circuit.document["trunks"].toObject();
-    auto nets=circuit.document["nets"].toObject();
+    QSet<QPoint> crossings;
+    QList<QGraphicsLineItem*> wires;
+    const auto bends=document["bends"].toObject();
+    const auto trunks=document["trunks"].toObject();
+    const auto nets=document["nets"].toObject();
     QMap<QString,NetRoute> nextRoutes;
     QStringList keep,reroute;
+    auto obstructsJump=[&](QPoint p){return jumpBlocked.contains(p) && routeCrossings.contains(p);};
     for(auto net=nets.begin();net!=nets.end();++net) {
         auto& current=nextRoutes[net.key()];
         current.pins=net.value().toArray();
@@ -285,6 +317,7 @@ void Sheet::redraw() {
                       old->terminals==current.terminals && old->bends==current.bends;
         if(reusable) for(const auto& segment:old->segments) {
             if(labelEdges.contains({segment.a,segment.b}) ||
+               obstructsJump(segment.a) || obstructsJump(segment.b) ||
                (blocked.contains(segment.a) && !terminals.contains(segment.a)) ||
                (blocked.contains(segment.b) && !terminals.contains(segment.b))) {
                 reusable=false;break;
@@ -299,13 +332,16 @@ void Sheet::redraw() {
         auto& cached=nextRoutes[name];
         auto pins=cached.pins;
         if (pins.isEmpty()) continue;
+        QSet<QPoint> terminals;
+        for(auto pin:pins) terminals.insert(pinPos[pin.toString()]);
         QSet<QPoint> tree{pinPos.value(pins.first().toString())};
         QHash<QPoint,int> directions,degree;
         auto edge=[&](QPoint a,QPoint b,const QString& pin){
-            int axis=a.x()==b.x()?2:1;
+            int axis=a.x()==b.x() ? Vertical : Horizontal;
             const bool active=activeNet==name;
             auto* wire=scene()->addLine(QLineF(a*pitch,b*pitch),QPen(active?QColor("#007d72"):QColor(Qt::black),active?3:1.8));
             wire->setData(2,pin);wire->setData(3,name);wire->setToolTip(name);wire->setZValue(-1);
+            wires.append(wire);
             cached.segments.append({a,b,pin});
             tree.insert(a);tree.insert(b);directions[a]|=axis;directions[b]|=axis;
             degree[a]++;degree[b]++;
@@ -322,12 +358,13 @@ void Sheet::redraw() {
             int length=delta.manhattanLength();
             if(length>0 && length<1000 && (delta.x()==0 || delta.y()==0)) {
                 QPoint dir=delta/length;
-                QSet<QPoint> own;for(auto pin:pins) own.insert(pinPos[pin.toString()]);
+                const int axis=dir.x() ? Horizontal : Vertical;
                 fixed=true;
                 for(int k=0;k<=length;++k) {
                     auto p=begin+dir*k;
                     if(k<length && labelEdges.contains({p,p+dir})) fixed=false;
-                    if((blocked.contains(p) && !own.contains(p)) || (occupied.value(p)&(dir.x()?1:2))) fixed=false;
+                    if((blocked.contains(p) && !terminals.contains(p)) || (occupied.value(p)&axis)) fixed=false;
+                    if(occupied.contains(p) && (k==0 || k==length)) fixed=false;
                 }
                 if(fixed) {
                     trunkStart=begin;trunkEnd=end;
@@ -339,24 +376,33 @@ void Sheet::redraw() {
         bool complete=true;
         for (int i=fixed?0:1;!reused && i<pins.size();++i) {
             QString pin=pins[i].toString();auto start=pinPos.value(pin);
+            if(tree.contains(start) && !occupied.contains(start) && !bends.contains(pin)) continue;
             QSet<QPoint> targets=tree;
+            auto avoid=blocked;
+            // A branch must stop at the tree before it can reach another net there.
+            for(auto p:tree) if(occupied.contains(p)) {
+                avoid.insert(p);
+                targets.remove(p);
+            }
             if(fixed) {
                 QPoint tap(std::clamp(start.x(),std::min(trunkStart.x(),trunkEnd.x()),std::max(trunkStart.x(),trunkEnd.x())),
                            std::clamp(start.y(),std::min(trunkStart.y(),trunkEnd.y()),std::max(trunkStart.y(),trunkEnd.y())));
-                targets={tap};
+                if(targets.contains(tap)) targets={tap};
+                avoid.unite(tree);
             }
             QList<QPoint> path;
             if (bends.contains(pin)) {
                 QPoint bend=position(bends[pin].toObject());
                 auto area=bounds.united(QRect(bend,QSize(1,1))).adjusted(-1,-1,1,1);
-                auto first=route(start,{bend},blocked,occupied,area,labelEdges);
-                if (!first.empty()) {
-                    auto avoid=blocked;
+                auto approach=avoid;
+                approach.unite(tree);
+                auto first=route(start,{bend},approach,occupied,area,labelEdges);
+                if (!first.empty() && (!tree.contains(bend) || targets.contains(bend))) {
                     for (auto p:first) if (p!=bend) avoid.insert(p);
                     auto second=route(bend,targets,avoid,occupied,area,labelEdges);
                     if (!second.empty()) {first.removeLast();path=first+second;}
                 }
-            } else path=route(start,targets,blocked,occupied,bounds,labelEdges);
+            } else path=route(start,targets,avoid,occupied,bounds,labelEdges);
             if (path.empty()) {
                 complete=false;
                 auto* warn=scene()->addSimpleText("배선 경로 확인 · "+name);
@@ -367,8 +413,12 @@ void Sheet::redraw() {
             }
         }
         for (auto p:tree) {
-            occupied[p]|=directions.value(p);
-            bool terminal=false;for(auto v:pins) if(pinPos[v.toString()]==p) terminal=true;
+            if(!degree.contains(p)) continue;
+            const int axis=directions.value(p);
+            const bool terminal=terminals.contains(p);
+            const bool straight=degree.value(p)==2 && axis!=BothAxes && !terminal && !jumpBlocked.contains(p);
+            if(straight && occupied.value(p)==(BothAxes^axis)) crossings.insert(p);
+            occupied[p]|=straight ? axis : BothAxes;
             if (degree.value(p)+int(terminal)>=3) {
                 auto* dot=scene()->addEllipse(-3,-3,6,6,Qt::NoPen,QBrush(Qt::black));dot->setPos(p*pitch);
             }
@@ -376,15 +426,27 @@ void Sheet::redraw() {
         if(!complete) nextRoutes.remove(name);
     }
     routes=std::move(nextRoutes);
-    for(auto entry:circuit.document["annotations"].toArray()) {
-        auto a=entry.toObject();QFont font=QApplication::font();font.setBold(true);font.setPixelSize(16);
-        auto* label=scene()->addSimpleText(a["text"].toString(),font);
-        label->setBrush(Qt::black);label->setPos(position(a)*pitch);
-    }
-    if(circuit.document["title"].isString()) {
-        QFont font=QApplication::font();font.setPixelSize(25);font.setBold(true);
-        auto* heading=scene()->addSimpleText(circuit.document["title"].toString(),font);
-        heading->setBrush(Qt::black);heading->setPos(0,-4*pitch);
+    routeCrossings=crossings;
+    for(auto* wire:wires) {
+        auto line=wire->line();
+        auto trim=[&](QPointF at,QPointF other) {
+            if(!crossings.contains(grid(at))) return at;
+            if(at.x()==other.x()) {
+                // Separate the vertical stroke from the entire jump.
+                return at+QPointF(0,other.y()<at.y() ? -jumpRadius-jumpClearance : jumpClearance);
+            }
+            if(other.x()<at.x()) {
+                const QRectF rect(at.x()-jumpRadius,at.y()-jumpRadius,2*jumpRadius,2*jumpRadius);
+                QPainterPath jump;
+                jump.arcMoveTo(rect,180);
+                jump.arcTo(rect,180,-180);
+                auto* arc=scene()->addPath(jump,wire->pen());
+                arc->setData(2,wire->data(2));arc->setData(3,wire->data(3));
+                arc->setToolTip(wire->toolTip());arc->setZValue(wire->zValue());
+            }
+            return at+QPointF(other.x()<at.x() ? -jumpRadius : jumpRadius,0);
+        };
+        wire->setLine(QLineF(trim(line.p1(),line.p2()),trim(line.p2(),line.p1())));
     }
     auto content=scene()->itemsBoundingRect();
     setSceneRect(content.isEmpty()?QRectF(-450,-300,900,600):content.adjusted(-80,-80,80,80));
