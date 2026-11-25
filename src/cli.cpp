@@ -1,5 +1,6 @@
 #include "circuit.h"
 #include "solver.h"
+#include "waves.h"
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QTextStream>
@@ -8,6 +9,10 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     const auto args = app.arguments();
     try {
+        if (args.size()==4 && args[1]=="import-csv") {
+            importCsv(args[2],args[3]);
+            return 0;
+        }
         if (args.size() == 4 && args[1] == "run") {
             if (QFileInfo(args[2]) == QFileInfo(args[3]))
                 throw std::runtime_error("result path must differ from input circuit");
