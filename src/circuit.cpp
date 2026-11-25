@@ -80,6 +80,9 @@ void Circuit::validate() const {
             auto coord = it.value().toObject()[key];
             require(coord.isDouble() && coord.toDouble() == coord.toInt(), "invalid grid coordinate: " + it.key());
         }
+        auto rotation=it.value().toObject().value("rotation");
+        if (!rotation.isUndefined()) require(rotation.isDouble() && rotation.toDouble()==rotation.toInt()
+            && rotation.toInt()>=0 && rotation.toInt()<360 && rotation.toInt()%90==0,"invalid rotation: "+it.key());
     }
     const auto sim = document["simulation"].toObject();
     for (const auto key : {"timeStep_s","stopTime_s"})
@@ -106,4 +109,69 @@ void Circuit::move(const QString& id, int x, int y) {
     position["y"] = y;
     layout[id] = position;
     document["layout"] = layout;
+}
+QString Circuit::insert(const QString& type,int x,int y) {
+    require(library().contains(type),"unknown part type");
+    auto parts=document["parts"].toObject();
+    int serial=1;
+    QString id;
+    do { id=type+QString::number(serial++); } while (parts.contains(id));
+    QJsonObject params;
+    auto defaults=library().value(type).defaults;
+    for (auto it=defaults.begin();it!=defaults.end();++it) params[it.key()]=it.value();
+    parts[id]=QJsonObject{{"type",type},{"parameters",params}};
+    document["parts"]=parts; move(id,x,y);
+    return id;
+}
+void Circuit::rotate(const QString& id) {
+    require(document["parts"].toObject().contains(id),"unknown part");
+    auto layout=document["layout"].toObject();
+    auto pos=layout[id].toObject();
+    pos["rotation"]=(pos["rotation"].toInt()+90)%360;
+    layout[id]=pos; document["layout"]=layout;
+}
+void Circuit::connectPins(const QString& a,const QString& b) {
+    if (a==b) return;
+    auto nets=document["nets"].toObject();
+    QString left,right;
+    for (auto it=nets.begin();it!=nets.end();++it) {
+        auto ps=it.value().toArray();
+        if (ps.contains(a)) left=it.key();
+        if (ps.contains(b)) right=it.key();
+    }
+    if (!left.isEmpty() && left==right) return;
+    QString name=left.isEmpty() ? right : left;
+    if (name.isEmpty()) {
+        int number=1;
+        do {name="net"+QString::number(number++);} while(nets.contains(name));
+    }
+    auto pins=nets[name].toArray();
+    if (!left.isEmpty() && !right.isEmpty())
+        for (auto p:nets.take(right).toArray()) pins.append(p);
+    if (!pins.contains(a)) pins.append(a);
+    if (!pins.contains(b)) pins.append(b);
+    nets[name]=pins;
+    Circuit next=*this;
+    next.document["nets"]=nets; next.validate(); document=next.document;
+}
+void Circuit::disconnectPin(const QString& pin) {
+    auto nets=document["nets"].toObject();
+    for (const auto& key:nets.keys()) {
+        auto original=nets[key].toArray();
+        QJsonArray pins;
+        for (auto p:original) if (p!=pin) pins.append(p);
+        if (pins.size()==original.size()) continue;
+        if (pins.isEmpty()) nets.remove(key); else nets[key]=pins;
+    }
+    document["nets"]=nets;
+}
+void Circuit::erase(const QString& id) {
+    auto parts=document["parts"].toObject();
+    auto def=library().value(parts.value(id).toObject()["type"].toString());
+    for (const auto& pin:def.pins) disconnectPin(id+"."+pin);
+    parts.remove(id); document["parts"]=parts;
+    auto layout=document["layout"].toObject(); layout.remove(id); document["layout"]=layout;
+    auto bends=document["bends"].toObject();
+    for (auto key:bends.keys()) if (key.startsWith(id+".")) bends.remove(key);
+    document["bends"]=bends;
 }

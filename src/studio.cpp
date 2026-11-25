@@ -42,10 +42,6 @@ void Sheet::edit(const std::function<void(Circuit&)>& operation) {
     operation(next); next.validate();
     if (next.document!=circuit.document) history.push(new Revision(*this,circuit,next));
 }
-void Sheet::redraw() {
-    scene()->clear();
-    scene()->addText(QFileInfo(path).fileName());
-}
 void Sheet::save() { circuit.save(path); history.setClean(); }
 
 Studio::Studio(const QString& directory):root(normalized(directory)) {
@@ -92,6 +88,9 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
     });
     parts=new QListWidget;
     parts->addItems(library().keys()); parts->setDragEnabled(true);
+    connect(parts,&QListWidget::itemClicked,this,[this](QListWidgetItem* item){
+        if (auto* s=current()) s->addPart(item->text(),s->mapToScene(s->viewport()->rect().center()));
+    });
     panels->addWidget(tree); panels->addWidget(parts);
     for (const auto label:{"탐색기","라이브러리"}) {
         int n=railLayout->count();
