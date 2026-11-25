@@ -2,6 +2,7 @@
 #include <QApplication>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QFileInfo>
 #include <QGraphicsItem>
 #include <QGraphicsScene>
 #include <QInputDialog>
@@ -10,16 +11,68 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPdfWriter>
 #include <QQueue>
+#include <QRawFont>
+#include <QSaveFile>
 #include <QSet>
+#include <QSvgGenerator>
+#include <QTextLayout>
 #include <QWheelEvent>
 #include <QToolTip>
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace {
 constexpr int pitch=32;
 constexpr int jumpRadius=8;
-constexpr int jumpClearance=4; // Includes the selected wire's stroke.
+constexpr int jumpClearance=4;
+const QColor sheetBackground("#fbfcfa");
+constexpr int displayRole=4;
+enum DisplayRole { EditorOnly=1, JumpCasing=2 };
+
+class ExportLabel : public QGraphicsSimpleTextItem {
+public:
+    enum { Type=UserType+1 };
+    int type() const override { return Type; }
+    explicit ExportLabel(const QGraphicsSimpleTextItem& source)
+        :QGraphicsSimpleTextItem(source.text()) {
+        setFont(source.font());
+        setBrush(Qt::black);
+        setTransformOriginPoint(boundingRect().center());
+        QTextLayout layout(QString(text()).replace(u'\n',QChar::LineSeparator),font());
+        layout.beginLayout();
+        qreal y=0;
+        for(auto line=layout.createLine();line.isValid();line=layout.createLine()) {
+            line.setLineWidth(std::numeric_limits<int>::max());
+            line.setPosition({0,y});
+            y+=line.height();
+        }
+        layout.endLayout();
+        outline.setFillRule(Qt::WindingFill);
+        for(const auto& run:layout.glyphRuns()) {
+            const auto glyphs=run.glyphIndexes();
+            const auto positions=run.positions();
+            const auto font=run.rawFont();
+            for(qsizetype i=0;i<glyphs.size();++i)
+                outline.addPath(font.pathForGlyph(glyphs[i]).translated(positions[i]));
+        }
+    }
+    QRectF inkBounds() const { return mapRectToScene(outline.boundingRect()); }
+    void paint(QPainter* painter,const QStyleOptionGraphicsItem* option,QWidget* widget) override {
+        if(!useOutline) {
+            QGraphicsSimpleTextItem::paint(painter,option,widget);
+            return;
+        }
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(brush());
+        painter->drawPath(outline);
+    }
+    bool useOutline=false;
+private:
+    QPainterPath outline;
+};
 enum WireAxis { Horizontal=1, Vertical=2, BothAxes=Horizontal|Vertical };
 QPoint grid(QPointF p) {return {qRound(p.x()/pitch),qRound(p.y()/pitch)};}
 QPoint position(QJsonObject pos) {return {pos["x"].toInt(),pos["y"].toInt()};}
@@ -257,6 +310,7 @@ void Sheet::redraw() {
             QPainterPath halo;halo.addRoundedRect(-40,-31,100,62,6,6);
             auto* h=scene()->addPath(halo,QPen(QColor("#259e92"),1,Qt::DashLine),QBrush("#def4ee"));
             h->setPos(center*pitch);h->setZValue(0);h->setData(0,id);
+            h->setData(displayRole,EditorOnly);
         }
         for(const auto& caption:captions(circuit,id,it.value().toObject(),angle)) {
             auto* label=scene()->addSimpleText(caption.text,caption.font());
@@ -277,6 +331,7 @@ void Sheet::redraw() {
             auto* dot=scene()->addRect(-4,-4,8,8,visible?QPen(QColor("#168c80")):QPen(Qt::NoPen),
                 visible?QBrush(name==pending?QColor("#168c80"):QColor(Qt::white)):QBrush(Qt::transparent));
             dot->setPos(at*pitch);dot->setData(1,name);dot->setToolTip(name);dot->setZValue(4);
+            dot->setData(displayRole,EditorOnly);
         }
     }
     auto addAnnotation=[&](const QString& text,QPoint at,int size) {
@@ -412,6 +467,7 @@ void Sheet::redraw() {
                 edge(path[j-1],path[j],pin);
             }
         }
+        QList<QPoint> junctions;
         for (auto p:tree) {
             if(!degree.contains(p)) continue;
             const int axis=directions.value(p);
@@ -419,9 +475,13 @@ void Sheet::redraw() {
             const bool straight=degree.value(p)==2 && axis!=BothAxes && !terminal && !jumpBlocked.contains(p);
             if(straight && occupied.value(p)==(BothAxes^axis)) crossings.insert(p);
             occupied[p]|=straight ? axis : BothAxes;
-            if (degree.value(p)+int(terminal)>=3) {
-                auto* dot=scene()->addEllipse(-3,-3,6,6,Qt::NoPen,QBrush(Qt::black));dot->setPos(p*pitch);
-            }
+            if (degree.value(p)+int(terminal)>=3) junctions.append(p);
+        }
+        std::sort(junctions.begin(),junctions.end(),[](QPoint a,QPoint b){
+            return a.y()==b.y() ? a.x()<b.x() : a.y()<b.y();
+        });
+        for(auto p:junctions) {
+            auto* dot=scene()->addEllipse(-3,-3,6,6,Qt::NoPen,QBrush(Qt::black));dot->setPos(p*pitch);
         }
         if(!complete) nextRoutes.remove(name);
     }
@@ -430,19 +490,23 @@ void Sheet::redraw() {
     for(auto* wire:wires) {
         auto line=wire->line();
         auto trim=[&](QPointF at,QPointF other) {
-            if(!crossings.contains(grid(at))) return at;
-            if(at.x()==other.x()) {
-                // Separate the vertical stroke from the entire jump.
-                return at+QPointF(0,other.y()<at.y() ? -jumpRadius-jumpClearance : jumpClearance);
-            }
+            if(at.x()==other.x() || !crossings.contains(grid(at))) return at;
             if(other.x()<at.x()) {
                 const QRectF rect(at.x()-jumpRadius,at.y()-jumpRadius,2*jumpRadius,2*jumpRadius);
                 QPainterPath jump;
                 jump.arcMoveTo(rect,180);
                 jump.arcTo(rect,180,-180);
+                // A short backing stroke gives the overpass clearance at its crown.
+                // Both vertical segments still reach the crossing grid point.
+                QPainterPath crown;
+                crown.arcMoveTo(rect,120);
+                crown.arcTo(rect,120,-60);
+                auto* casing=scene()->addPath(crown,QPen(sheetBackground,wire->pen().widthF()+jumpClearance,
+                                                        Qt::SolidLine,Qt::RoundCap));
+                casing->setData(displayRole,JumpCasing);casing->setZValue(-0.5);
                 auto* arc=scene()->addPath(jump,wire->pen());
                 arc->setData(2,wire->data(2));arc->setData(3,wire->data(3));
-                arc->setToolTip(wire->toolTip());arc->setZValue(wire->zValue());
+                arc->setToolTip(wire->toolTip());arc->setZValue(-0.25);
             }
             return at+QPointF(other.x()<at.x() ? -jumpRadius : jumpRadius,0);
         };
@@ -452,6 +516,165 @@ void Sheet::redraw() {
     setSceneRect(content.isEmpty()?QRectF(-450,-300,900,600):content.adjusted(-80,-80,80,80));
     if(hadContent) centerOn(oldCenter);
 }
+
+void Sheet::exportSchematic(const QString& filename,double widthMm) const {
+    if(!std::isfinite(widthMm) || widthMm<1 || widthMm>1000)
+        throw std::runtime_error("schematic width must be between 1 and 1000 mm");
+    const auto suffix=QFileInfo(filename).suffix().toLower();
+    if(suffix!="svg" && suffix!="pdf") throw std::runtime_error("schematic output must be SVG or PDF");
+
+    // Copy the live drawing in stacking order, including any routes retained during editing.
+    // The view's camera, background and transient items do not participate.
+    QGraphicsScene drawing;
+    QList<QGraphicsPathItem*> paths,casing;
+    QList<QGraphicsLineItem*> wires;
+    QList<QGraphicsEllipseItem*> junctions;
+    QList<ExportLabel*> labels;
+    for(auto* item:scene()->items(Qt::AscendingOrder)) {
+        const int role=item->data(displayRole).toInt();
+        if(role==EditorOnly) continue;
+        QGraphicsItem* copy=nullptr;
+        if(const auto* shape=qgraphicsitem_cast<QGraphicsPathItem*>(item)) {
+            auto pen=shape->pen();
+            pen.setColor(role==JumpCasing ? Qt::white : Qt::black);
+            pen.setWidthF(role==JumpCasing ? 2+jumpClearance : 2);
+            auto* path=drawing.addPath(shape->path(),pen,
+                shape->brush().style()==Qt::NoBrush ? QBrush(Qt::NoBrush) : QBrush(Qt::black));
+            (role==JumpCasing ? casing : paths).append(path);
+            copy=path;
+        } else if(const auto* wire=qgraphicsitem_cast<QGraphicsLineItem*>(item)) {
+            auto pen=wire->pen();
+            pen.setColor(Qt::black);pen.setWidthF(1.8);
+            auto* line=drawing.addLine(wire->line(),pen);
+            wires.append(line);
+            copy=line;
+        } else if(const auto* dot=qgraphicsitem_cast<QGraphicsEllipseItem*>(item)) {
+            auto* junction=drawing.addEllipse(dot->rect(),Qt::NoPen,Qt::black);
+            junctions.append(junction);
+            copy=junction;
+        } else if(const auto* text=qgraphicsitem_cast<QGraphicsSimpleTextItem*>(item)) {
+            auto* label=new ExportLabel(*text);
+            drawing.addItem(label);
+            labels.append(label);
+            copy=label;
+        }
+        if(copy) {
+            copy->setPos(item->pos());
+            copy->setRotation(item->rotation());
+            copy->setZValue(item->zValue());
+        }
+    }
+
+    auto bounds=drawing.itemsBoundingRect();
+    if(bounds.isEmpty()) bounds={0,0,32,32};
+    const double marginMm=std::min(2.0,widthMm/8);
+    const double unitsPerMm=bounds.width()/(widthMm-2*marginMm);
+    const double margin=marginMm*unitsPerMm;
+    const auto frame=bounds.adjusted(-margin,-margin,margin,margin);
+    for(auto* path:paths) {
+        auto pen=path->pen();
+        pen.setWidthF(0.20*unitsPerMm);
+        path->setPen(pen);
+    }
+    for(auto* path:casing) {
+        auto pen=path->pen();
+        // Keep a white rim in print while limiting the casing to the jump's crown.
+        pen.setWidthF(std::min(0.50*unitsPerMm,2.0+jumpClearance));
+        path->setPen(pen);
+    }
+    for(auto* wire:wires) {
+        auto pen=wire->pen();
+        pen.setWidthF(0.20*unitsPerMm);
+        wire->setPen(pen);
+    }
+    for(auto* dot:junctions) {
+        const double r=0.35*unitsPerMm;
+        dot->setRect(-r,-r,2*r,2*r);
+    }
+
+    // Keep label anchors. Try the preferred size, then the minimum, only where
+    // the added ink fits in the existing layout.
+    const double clearance=0.15*unitsPerMm;
+    for(auto* label:labels) {
+        const int pixels=label->font().pixelSize();
+        if(pixels<=0 || label->text().isEmpty()) continue;
+        const auto original=label->inkBounds().adjusted(-clearance,-clearance,clearance,clearance);
+        // Allow for QPdfWriter rounding the page box to whole points.
+        for(double points:{9.05,8.05}) {
+            const double scale=points*25.4/72*unitsPerMm/pixels;
+            if(scale<=1) break;
+            label->setScale(scale);
+            const auto enlarged=label->inkBounds().adjusted(-clearance,-clearance,clearance,clearance);
+            QPainterPath extension,oldInk;
+            extension.addRect(enlarged);
+            oldInk.addRect(original);
+            extension=extension.subtracted(oldInk);
+            bool fits=frame.adjusted(margin/2,margin/2,-margin/2,-margin/2).contains(enlarged);
+            for(auto* item:drawing.items(enlarged,Qt::IntersectsItemBoundingRect)) {
+                if(item==label) continue;
+                if(const auto* other=qgraphicsitem_cast<ExportLabel*>(item)) {
+                    QPainterPath textInk;
+                    textInk.addRect(other->inkBounds());
+                    fits &= !extension.intersects(textInk);
+                } else if(const auto* path=qgraphicsitem_cast<QGraphicsPathItem*>(item);
+                          path && path->brush().style()==Qt::NoBrush) {
+                    QPainterPathStroker stroke(path->pen());
+                    fits &= !extension.intersects(path->mapToScene(stroke.createStroke(path->path())));
+                } else {
+                    fits &= !extension.intersects(item->mapToScene(item->shape()));
+                }
+                if(!fits) break;
+            }
+            if(fits) break;
+            label->setScale(1);
+        }
+    }
+
+    // Very narrow or unusual sheets can grow past the nominal margin after
+    // stroke correction. Expand vertically and keep the requested page width.
+    const auto actual=drawing.itemsBoundingRect();
+    const double top=std::min(frame.top(),actual.top()-margin/2);
+    const double bottom=std::max(frame.bottom(),actual.bottom()+margin/2);
+    const QRectF source(frame.left(),top,frame.width(),bottom-top);
+    if(!actual.isEmpty() && (actual.left()<source.left() || actual.right()>source.right()))
+        throw std::runtime_error("schematic strokes do not fit the requested width");
+    constexpr int dpi=2540; // 100 device units per millimetre.
+    const double height=widthMm*100*source.height()/source.width();
+    if(!std::isfinite(height) || height>std::numeric_limits<int>::max())
+        throw std::runtime_error("schematic page is too tall");
+    const QSize page(qRound(widthMm*100),qCeil(height));
+    QSaveFile output(filename);
+    if(!output.open(QIODevice::WriteOnly)) throw std::runtime_error(output.errorString().toStdString());
+    auto render=[&](QPaintDevice& device) {
+        QPainter painter;
+        if(!painter.begin(&device)) throw std::runtime_error("cannot start schematic export");
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QRectF target(0,0,device.width(),device.height());
+        painter.fillRect(target,Qt::white);
+        drawing.render(&painter,target,source,Qt::KeepAspectRatio);
+        if(!painter.end()) throw std::runtime_error("cannot finish schematic export");
+    };
+    if(suffix=="svg") {
+        QSvgGenerator svg;
+        svg.setOutputDevice(&output);
+        svg.setResolution(dpi);
+        svg.setSize(page);
+        svg.setViewBox(QRect(QPoint(),page));
+        render(svg);
+    } else {
+        // Outline the same glyphs so the PDF preserves variable font weights.
+        for(auto* label:labels) label->useOutline=true;
+        QPdfWriter pdf(&output);
+        pdf.setResolution(dpi);
+        if(!pdf.setPageSize(QPageSize(QSizeF(widthMm,page.height()/100.0),QPageSize::Millimeter,
+                                     QString(),QPageSize::ExactMatch)) ||
+           !pdf.setPageMargins(QMarginsF(),QPageLayout::Millimeter))
+            throw std::runtime_error("cannot set schematic PDF page size");
+        render(pdf);
+    }
+    if(!output.commit()) throw std::runtime_error(output.errorString().toStdString());
+}
+
 void Sheet::addPart(const QString& type,QPointF at) {
     QPoint p=grid(at);
     edit([&](Circuit& c){
@@ -532,7 +755,7 @@ void Sheet::dropEvent(QDropEvent* e) {
     if(library().contains(type)){addPart(type,mapToScene(e->position().toPoint()));e->acceptProposedAction();}
 }
 void Sheet::drawBackground(QPainter* p,const QRectF& rect) {
-    p->fillRect(rect,QColor("#fbfcfa"));p->setPen(QPen(QColor("#d7e1df"),1.3));
+    p->fillRect(rect,sheetBackground);p->setPen(QPen(QColor("#d7e1df"),1.3));
     const int interval=pitch/2;
     for (int x=int(std::floor(rect.left()/interval))*interval;x<=rect.right();x+=interval)
         for(int y=int(std::floor(rect.top()/interval))*interval;y<=rect.bottom();y+=interval) p->drawPoint(x,y);

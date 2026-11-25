@@ -1,14 +1,37 @@
 #include "circuit.h"
 #include "solver.h"
+#include "studio.h"
 #include "waves.h"
-#include <QCoreApplication>
+#include <QApplication>
 #include <QFileInfo>
 #include <QTextStream>
+#include <cstring>
+
+namespace {
+int exportSchematic(int argc,char** argv) {
+#ifndef Q_OS_WIN
+    if(qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM","offscreen");
+#endif
+    QApplication app(argc,argv);
+    const auto args=app.arguments();
+    bool ok=false;
+    const double width=args.value(5).toDouble(&ok);
+    if(args.size()!=6 || args[4]!="--width-mm" || !ok) {
+        QTextStream(stderr) << "usage: litzsim-cli export INPUT OUTPUT.svg|.pdf --width-mm WIDTH\n";
+        return 2;
+    }
+    QApplication::setFont(studioFont());
+    Sheet sheet(args[2],Circuit::load(args[2]),nullptr);
+    sheet.exportSchematic(args[3],width);
+    return 0;
+}
+}
 
 int main(int argc, char** argv) {
-    QCoreApplication app(argc, argv);
-    const auto args = app.arguments();
     try {
+        if(argc>1 && std::strcmp(argv[1],"export")==0) return exportSchematic(argc,argv);
+        QCoreApplication app(argc, argv);
+        const auto args = app.arguments();
         if (args.size()==4 && args[1]=="import-csv") {
             importCsv(args[2],args[3]);
             return 0;
@@ -30,7 +53,8 @@ int main(int argc, char** argv) {
             QTextStream(stdout) << "unconnected pins: " << circuit.missingPins().join(", ") << Qt::endl;
             return 0;
         }
-        QTextStream(stderr) << "usage: litzsim-cli inspect FILE | copy INPUT OUTPUT | run INPUT CSV\n";
+        QTextStream(stderr) << "usage: litzsim-cli inspect FILE | copy INPUT OUTPUT | run INPUT CSV\n"
+                               "       litzsim-cli export INPUT OUTPUT.svg|.pdf --width-mm WIDTH\n";
         return 2;
     } catch (const std::exception& e) {
         QTextStream(stderr) << e.what() << Qt::endl;

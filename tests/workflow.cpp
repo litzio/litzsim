@@ -86,13 +86,12 @@ void crossingAndJunction() {
     };
     Sheet sheet("",circuit,nullptr);
     int jumps=0,dots=0;
-    QPainterPath arcInk;
+    QSet<qreal> verticalEnds;
     for(auto* item:sheet.scene()->items()) {
         if(const auto* arc=qgraphicsitem_cast<QGraphicsPathItem*>(item);arc && item->data(3)==horizontal) {
             const auto rect=arc->path().boundingRect();
             expect(rect.center().x()==0 && rect.bottom()==0 && rect.top()<0 &&
                    rect.width()==2*rect.height(),"horizontal semicircle at crossing");
-            arcInk=arc->shape();
             ++jumps;
         }
         if(qgraphicsitem_cast<QGraphicsEllipseItem*>(item)) {
@@ -102,10 +101,15 @@ void crossingAndJunction() {
     }
     expect(jumps==1 && dots==1,"one jump and one connected T");
     for(auto* item:sheet.scene()->items())
-        if(qgraphicsitem_cast<QGraphicsLineItem*>(item)) {
-            if(item->data(3)==vertical) expect(!arcInk.intersects(item->shape()),"vertical stroke must clear the arc");
+        if(const auto* wire=qgraphicsitem_cast<QGraphicsLineItem*>(item)) {
+            if(item->data(3)==vertical) {
+                const auto line=wire->line();
+                if(line.p1()==QPointF(0,0)) verticalEnds.insert(line.y2());
+                if(line.p2()==QPointF(0,0)) verticalEnds.insert(line.y1());
+            }
             if(item->data(3)==horizontal) expect(!item->shape().contains({0,0}),"arc must replace straight stroke");
         }
+    expect(verticalEnds==QSet<qreal>{-32,32},"vertical stroke must reach both sides of crossing");
     expect(sheet.circuit.document==circuit.document,"rendering changed connectivity");
 }
 void localRouting(const QString& examples) {
