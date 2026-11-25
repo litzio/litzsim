@@ -8,6 +8,7 @@
 #include <QTextStream>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -57,10 +58,11 @@ bool pulseHigh(const Device& pulse,double t) {
 double nextPulseEdge(const Device& pulse,double t) {
     const double f=pulse.params["frequency_Hz"].toDouble();
     const double duty=pulse.params["duty"].toDouble();
-    const double cycle=std::floor(t*f);
-    const double falling=(cycle+duty)/f, rising=(cycle+1)/f;
-    if (falling>t) return falling;
-    if (rising>t) return rising;
+    const double cycles=t*f;
+    const double cycle=std::floor(cycles);
+    const double threshold=cycles+8*std::numeric_limits<double>::epsilon()*std::abs(cycles);
+    if (cycle+duty>threshold) return (cycle+duty)/f;
+    if (cycle+1>threshold) return (cycle+1)/f;
     return (cycle+1+duty)/f;
 }
 }
@@ -114,6 +116,8 @@ void simulate(const Circuit& circuit,const Sample& emitSample) {
     }
     const auto cfg=circuit.document["simulation"].toObject();
     const double step=cfg["timeStep_s"].toDouble(), stop=cfg["stopTime_s"].toDouble();
+    const qint64 stride=circuit.outputStride();
+    qint64 gridTick=0;
     double t=0,h=0;
     for (;;) {
         // Integrate the interval using its interior switch state; end-point samples
@@ -183,11 +187,18 @@ void simulate(const Circuit& circuit,const Sample& emitSample) {
             if (d.type=="inductor") d.history=x[d.branch];
             if (d.type=="inductor" || d.type=="diode") values[d.id+"_A"]=x[d.branch];
         }
-        emitSample(t,values);
+        const bool onGrid=t==gridTick*step;
+        if (!stride || (onGrid && gridTick%stride==0) || t==stop) emitSample(t,values);
         if (t==stop) break;
-        double next=std::min(stop,t+step);
+        if (onGrid) ++gridTick;
+        const double boundary=std::min(stop,gridTick*step);
+        double next=boundary;
         for (const auto& d:devices)
             if (d.type=="pwm") next=std::min(next,nextPulseEdge(d,t));
+        // Numerically coincident clocks represent one physical instant.
+        constexpr double epsilon=8*std::numeric_limits<double>::epsilon();
+        if (boundary-next<=epsilon*boundary) next=boundary;
+        if (stop-next<=epsilon*stop) next=stop;
         h=next-t;
         if (h<=0) throw std::runtime_error("time step below clock resolution");
         t=next;

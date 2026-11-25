@@ -93,6 +93,16 @@ void Circuit::validate() const {
     const auto sim = document["simulation"].toObject();
     for (const auto key : {"timeStep_s","stopTime_s"})
         require(sim[key].isDouble() && sim[key].toDouble() > 0, QString("invalid ") + key);
+    outputStride();
+}
+qint64 Circuit::outputStride() const {
+    const auto settings=document["simulation"].toObject();
+    if (!settings.contains("outputStep_s")) return 0;
+    const double ratio=settings["outputStep_s"].toDouble()/settings["timeStep_s"].toDouble();
+    const double rounded=std::round(ratio);
+    require(std::isfinite(ratio) && rounded>=1 && rounded<=1e12 &&
+            std::abs(ratio-rounded)<=1e-8, "outputStep_s must be a positive integer multiple of timeStep_s");
+    return static_cast<qint64>(rounded);
 }
 QStringList Circuit::missingPins() const {
     QSet<QString> connected;

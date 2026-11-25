@@ -89,11 +89,77 @@ QString valueLabel(const QString& type,const QJsonObject& values) {
     if(type=="pwm") return unit(values["frequency_Hz"].toDouble(),"Hz");
     return {};
 }
+struct Caption {
+    QString text;
+    QPoint offset;
+    int size;
+    bool bold;
+    QFont font() const {
+        auto f=QApplication::font(); f.setPixelSize(size); f.setBold(bold); return f;
+    }
+    QRectF bounds() const {
+        QGraphicsSimpleTextItem item(text); item.setFont(font());
+        return item.boundingRect().translated(offset);
+    }
+};
+
+QList<Caption> captions(const QString& id,const QJsonObject& part,int angle) {
+    const auto type=part["type"].toString();
+    bool horizontal=type=="inductor" || type=="resistor" || type=="ammeter";
+    if(angle%180) horizontal=!horizontal;
+    QPoint name=horizontal ? QPoint(-16,-36) : QPoint(23,-16);
+    QList<Caption> labels{{id,name,16,true}};
+    const auto value=valueLabel(type,part["parameters"].toObject());
+    if(!value.isEmpty()) labels.append({value,horizontal ? QPoint(-24,6) : name+QPoint(0,20),13,false});
+    if(type=="nmos") {
+        for(auto pin:QList<QPair<QString,QPoint>>{{"D",{3,-31}},{"G",{-33,-18}},{"S",{3,17}}})
+            labels.append({pin.first,rotatePoint(pin.second,angle),9,false});
+    }
+    return labels;
+}
+
+QList<QRectF> footprint(const QString& id,const QJsonObject& part,int angle,QPoint center) {
+    QTransform turn;
+    turn.rotate(angle);
+    const QPoint origin=center*pitch;
+    QList<QRectF> boxes{turn.mapRect(glyph(part["type"].toString()).boundingRect())
+                             .translated(origin).adjusted(-3,-3,3,3)};
+    for(const auto& label:captions(id,part,angle))
+        boxes.append(label.bounds().translated(origin).adjusted(-2,-2,2,2));
+    return boxes;
+}
+
+QString collision(const Circuit& c,const QString& id,QPoint at,int angle) {
+    const auto parts=c.document["parts"].toObject(),layout=c.document["layout"].toObject();
+    const auto moving=footprint(id,parts[id].toObject(),angle,at);
+    for(auto it=parts.begin();it!=parts.end();++it) {
+        if(it.key()==id) continue;
+        const auto pos=layout[it.key()].toObject();
+        const auto fixed=footprint(it.key(),it.value().toObject(),pos["rotation"].toInt(),position(pos));
+        for(const auto& a:moving) for(const auto& b:fixed) if(a.intersects(b)) return it.key();
+    }
+    return {};
+}
+
+using Edges = QSet<QPair<QPoint,QPoint>>;
+void reserveLabelEdges(const QRectF& rect,Edges& edges) {
+    // A label may cover the middle of a grid edge without containing either endpoint.
+    for(int x=int(std::floor(rect.left()/pitch))-1;x<=std::ceil(rect.right()/pitch);++x)
+        for(int y=int(std::floor(rect.top()/pitch))-1;y<=std::ceil(rect.bottom()/pitch);++y) {
+            const QPoint a(x,y);
+            for(auto dir:{QPoint(1,0),QPoint(0,1)}) {
+                const QPoint b=a+dir;
+                const auto wire=QRectF(a*pitch,b*pitch).normalized().adjusted(-1,-1,1,1);
+                if(rect.intersects(wire)) {edges.insert({a,b});edges.insert({b,a});}
+            }
+        }
+}
+
 // Return the shortest rectilinear route to any existing node on this net.
 // Occupied corners cannot be crossed. At another net's straight segment only
 // perpendicular travel is legal. The two nets remain electrically distinct.
 QList<QPoint> route(QPoint start,const QSet<QPoint>& targets,const QSet<QPoint>& blocked,
-                     const QHash<QPoint,int>& occupied,const QRect& bounds) {
+                     const QHash<QPoint,int>& occupied,const QRect& bounds,const Edges& labels) {
     QQueue<QPoint> queue; queue.enqueue(start);
     QHash<QPoint,QPoint> parent; parent.insert(start,start);
     const QPoint dirs[]={{1,0},{0,1},{-1,0},{0,-1}};
@@ -106,7 +172,7 @@ QList<QPoint> route(QPoint start,const QSet<QPoint>& targets,const QSet<QPoint>&
         }
         for (QPoint d:dirs) {
             QPoint next=cur+d;
-            if (!bounds.contains(next) || parent.contains(next) || (blocked.contains(next) && !targets.contains(next))) continue;
+            if (labels.contains({cur,next}) || !bounds.contains(next) || parent.contains(next) || (blocked.contains(next) && !targets.contains(next))) continue;
             int direction=d.x() ? 1 : 2;
             if ((occupied.value(cur)&direction) || (occupied.value(next)&direction)) continue;
             parent.insert(next,cur);queue.enqueue(next);
@@ -121,6 +187,7 @@ void Sheet::redraw() {
     const auto oldCenter=mapToScene(viewport()->rect().center());
     scene()->clear();
     QHash<QString,QPoint> pinPos;
+    Edges labelEdges;
     QSet<QPoint> blocked;
     QRect bounds(-12,-10,25,21);
     auto layout=circuit.document["layout"].toObject();
@@ -139,20 +206,11 @@ void Sheet::redraw() {
             auto* h=scene()->addPath(halo,QPen(QColor("#259e92"),1,Qt::DashLine),QBrush("#def4ee"));
             h->setPos(center*pitch);h->setZValue(0);h->setData(0,id);
         }
-        auto caption=[&](const QString& text,QPoint delta,int size,bool bold,QColor color){
-            QFont font=QApplication::font();font.setPixelSize(size);font.setBold(bold);
-            auto* label=scene()->addSimpleText(text,font);label->setBrush(color);
-            label->setPos(center*pitch+delta);label->setData(0,id);label->setZValue(3);
-        };
-        bool horizontal=type=="inductor" || type=="resistor" || type=="ammeter";
-        if(angle%180) horizontal=!horizontal;
-        QPoint labelAt=horizontal ? QPoint(-16,-36) : QPoint(23,-16);
-        caption(id,labelAt,16,true,ink);
-        auto value=valueLabel(type,it.value().toObject()["parameters"].toObject());
-        if(!value.isEmpty()) caption(value,horizontal?QPoint(-24,6):labelAt+QPoint(0,20),13,false,QColor("#536d79"));
-        if(type=="nmos") {
-            for(auto pair:QList<QPair<QString,QPoint>>{{"D",{3,-31}},{"G",{-33,-18}},{"S",{3,17}}})
-                caption(pair.first,rotatePoint(pair.second,angle),9,false,QColor("#526b75"));
+        for(const auto& caption:captions(id,it.value().toObject(),angle)) {
+            auto* label=scene()->addSimpleText(caption.text,caption.font());
+            label->setBrush(caption.bold ? ink : QColor("#536d79"));
+            label->setPos(center*pitch+caption.offset);label->setData(0,id);label->setZValue(3);
+            if(caption.size>=13) reserveLabelEdges(label->sceneBoundingRect(),labelEdges);
         }
         const auto pins=library().value(type).pins;
         auto delta=offsets(type);
@@ -170,22 +228,55 @@ void Sheet::redraw() {
     auto bends=circuit.document["bends"].toObject();
     auto trunks=circuit.document["trunks"].toObject();
     auto nets=circuit.document["nets"].toObject();
-    for (auto net=nets.begin();net!=nets.end();++net) {
-        auto pins=net.value().toArray();
+    QMap<QString,NetRoute> nextRoutes;
+    QStringList keep,reroute;
+    for(auto net=nets.begin();net!=nets.end();++net) {
+        auto& current=nextRoutes[net.key()];
+        current.pins=net.value().toArray();
+        current.trunk=trunks.value(net.key()).toArray();
+        QSet<QPoint> terminals;
+        for(auto ref:current.pins) {
+            const auto pin=ref.toString();
+            current.terminals[pin]=pinPos.value(pin);
+            terminals.insert(pinPos.value(pin));
+            if(bends.contains(pin)) current.bends.insert(pin,bends.value(pin));
+        }
+        const auto old=routes.constFind(net.key());
+        bool reusable=old!=routes.cend() && old->pins==current.pins && old->trunk==current.trunk &&
+                      old->terminals==current.terminals && old->bends==current.bends;
+        if(reusable) for(const auto& segment:old->segments) {
+            if(labelEdges.contains({segment.a,segment.b}) ||
+               (blocked.contains(segment.a) && !terminals.contains(segment.a)) ||
+               (blocked.contains(segment.b) && !terminals.contains(segment.b))) {
+                reusable=false;break;
+            }
+        }
+        if(reusable) keep.append(net.key());
+        else reroute.append(net.key());
+    }
+    // Reserve unaffected routes before searching for paths around edited components.
+    const auto order=keep+reroute;
+    for (const auto& name:order) {
+        auto& cached=nextRoutes[name];
+        auto pins=cached.pins;
         if (pins.isEmpty()) continue;
         QSet<QPoint> tree{pinPos.value(pins.first().toString())};
         QHash<QPoint,int> directions,degree;
         auto edge=[&](QPoint a,QPoint b,const QString& pin){
             int axis=a.x()==b.x()?2:1;
-            const bool active=activeNet==net.key();
+            const bool active=activeNet==name;
             auto* wire=scene()->addLine(QLineF(a*pitch,b*pitch),QPen(QColor(active?"#007d72":"#546e77"),active?3:1.8));
-            wire->setData(2,pin);wire->setData(3,net.key());wire->setToolTip(net.key());wire->setZValue(-1);
+            wire->setData(2,pin);wire->setData(3,name);wire->setToolTip(name);wire->setZValue(-1);
+            cached.segments.append({a,b,pin});
             tree.insert(a);tree.insert(b);directions[a]|=axis;directions[b]|=axis;
             degree[a]++;degree[b]++;
         };
-        auto trunk=trunks[net.key()].toArray();
+        const bool reused=keep.contains(name);
+        if(reused) for(const auto& segment:routes.constFind(name)->segments)
+            edge(segment.a,segment.b,segment.pin);
+        auto trunk=cached.trunk;
         bool fixed=false;QPoint trunkStart,trunkEnd;
-        if (trunk.size()==2 && trunk[0].toArray().size()==2 && trunk[1].toArray().size()==2) {
+        if (!reused && trunk.size()==2 && trunk[0].toArray().size()==2 && trunk[1].toArray().size()==2) {
             auto a=trunk[0].toArray(),b=trunk[1].toArray();
             QPoint begin(a[0].toInt(),a[1].toInt()),end(b[0].toInt(),b[1].toInt());
             QPoint delta=end-begin;
@@ -196,6 +287,7 @@ void Sheet::redraw() {
                 fixed=true;
                 for(int k=0;k<=length;++k) {
                     auto p=begin+dir*k;
+                    if(k<length && labelEdges.contains({p,p+dir})) fixed=false;
                     if((blocked.contains(p) && !own.contains(p)) || (occupied.value(p)&(dir.x()?1:2))) fixed=false;
                 }
                 if(fixed) {
@@ -205,7 +297,8 @@ void Sheet::redraw() {
                 }
             }
         }
-        for (int i=fixed?0:1;i<pins.size();++i) {
+        bool complete=true;
+        for (int i=fixed?0:1;!reused && i<pins.size();++i) {
             QString pin=pins[i].toString();auto start=pinPos.value(pin);
             QSet<QPoint> targets=tree;
             if(fixed) {
@@ -217,16 +310,17 @@ void Sheet::redraw() {
             if (bends.contains(pin)) {
                 QPoint bend=position(bends[pin].toObject());
                 auto area=bounds.united(QRect(bend,QSize(1,1))).adjusted(-1,-1,1,1);
-                auto first=route(start,{bend},blocked,occupied,area);
+                auto first=route(start,{bend},blocked,occupied,area,labelEdges);
                 if (!first.empty()) {
                     auto avoid=blocked;
                     for (auto p:first) if (p!=bend) avoid.insert(p);
-                    auto second=route(bend,targets,avoid,occupied,area);
+                    auto second=route(bend,targets,avoid,occupied,area,labelEdges);
                     if (!second.empty()) {first.removeLast();path=first+second;}
                 }
-            } else path=route(start,targets,blocked,occupied,bounds);
+            } else path=route(start,targets,blocked,occupied,bounds,labelEdges);
             if (path.empty()) {
-                auto* warn=scene()->addSimpleText("배선 경로 확인 · "+net.key());
+                complete=false;
+                auto* warn=scene()->addSimpleText("배선 경로 확인 · "+name);
                 warn->setBrush(Qt::red);warn->setPos(start*pitch);continue;
             }
             for (int j=1;j<path.size();++j) {
@@ -240,7 +334,9 @@ void Sheet::redraw() {
                 auto* dot=scene()->addEllipse(-3,-3,6,6,Qt::NoPen,QBrush("#546e77"));dot->setPos(p*pitch);
             }
         }
+        if(!complete) nextRoutes.remove(name);
     }
+    routes=std::move(nextRoutes);
     for(auto entry:circuit.document["annotations"].toArray()) {
         auto a=entry.toObject();QFont font=QApplication::font();font.setBold(true);font.setPixelSize(16);
         auto* label=scene()->addSimpleText(a["text"].toString(),font);
@@ -257,14 +353,11 @@ void Sheet::redraw() {
 }
 void Sheet::addPart(const QString& type,QPointF at) {
     QPoint p=grid(at);
-    auto layout=circuit.document["layout"].toObject();
-    QSet<QPoint> occupied;
-    for (auto v:layout) {
-        const QPoint center=position(v.toObject());
-        for (int x=-2;x<=2;++x) for (int y=-2;y<=2;++y) occupied.insert(center+QPoint(x,y));
-    }
-    while (occupied.contains(p)) p+=QPoint(1,0);
-    edit([&](Circuit& c){selected=c.insert(type,p.x(),p.y());});
+    edit([&](Circuit& c){
+        selected=c.insert(type,p.x(),p.y());
+        while(!collision(c,selected,p,0).isEmpty()) ++p.rx();
+        c.move(selected,p.x(),p.y());
+    });
 }
 void Sheet::mousePressEvent(QMouseEvent* e) {
     auto* item=itemAt(e->pos());
@@ -295,7 +388,10 @@ void Sheet::mouseReleaseEvent(QMouseEvent* e) {
     QPoint p=grid(mapToScene(e->pos())-dragOffset);
     if (!dragging.isEmpty()) {
         auto id=dragging;dragging.clear();
-        edit([&](Circuit& c){c.move(id,p.x(),p.y());});
+        int angle=circuit.document["layout"].toObject()[id].toObject()["rotation"].toInt();
+        QString other=collision(circuit,id,p,angle);
+        if(other.isEmpty()) edit([&](Circuit& c){c.move(id,p.x(),p.y());});
+        else QToolTip::showText(e->globalPosition().toPoint(),other+" 부품과 겹칩니다.",this);
     } else if (!wirePin.isEmpty() && (e->modifiers()&Qt::ShiftModifier)) {
         p=grid(mapToScene(e->pos()));
         edit([&](Circuit& c){c.setWireBend(wirePin,p.x(),p.y());});
@@ -318,15 +414,21 @@ void Sheet::mouseDoubleClickEvent(QMouseEvent* e) {
 }
 void Sheet::keyPressEvent(QKeyEvent* e) {
     if (e->key()==Qt::Key_Escape) {pending.clear();redraw();return;}
-    if (!selected.isEmpty() && e->key()==Qt::Key_R) {edit([&](Circuit& c){c.rotate(selected);});return;}
+    if (!selected.isEmpty() && e->key()==Qt::Key_R) {
+        auto pos=circuit.document["layout"].toObject()[selected].toObject();
+        auto other=collision(circuit,selected,position(pos),(pos["rotation"].toInt()+90)%360);
+        if(other.isEmpty()) edit([&](Circuit& c){c.rotate(selected);});
+        else QToolTip::showText(QCursor::pos(),other+" 부품과 겹칩니다.",this);
+        return;
+    }
     if (!selected.isEmpty() && e->key()==Qt::Key_Delete) {edit([&](Circuit& c){c.erase(selected);selected.clear();});return;}
     QGraphicsView::keyPressEvent(e);
 }
-void Sheet::dragEnterEvent(QDragEnterEvent* e) {if (qobject_cast<QListWidget*>(e->source())) e->acceptProposedAction();}
-void Sheet::dragMoveEvent(QDragMoveEvent* e) {if (qobject_cast<QListWidget*>(e->source())) e->acceptProposedAction();}
+void Sheet::dragEnterEvent(QDragEnterEvent* e) {if (library().contains(QString::fromUtf8(e->mimeData()->data(partMime)))) e->acceptProposedAction();}
+void Sheet::dragMoveEvent(QDragMoveEvent* e) {if (library().contains(QString::fromUtf8(e->mimeData()->data(partMime)))) e->acceptProposedAction();}
 void Sheet::dropEvent(QDropEvent* e) {
-    auto* list=qobject_cast<QListWidget*>(e->source());
-    if (list && list->currentItem()) {addPart(list->currentItem()->text(),mapToScene(e->position().toPoint()));e->acceptProposedAction();}
+    const auto type=QString::fromUtf8(e->mimeData()->data(partMime));
+    if(library().contains(type)){addPart(type,mapToScene(e->position().toPoint()));e->acceptProposedAction();}
 }
 void Sheet::drawBackground(QPainter* p,const QRectF& rect) {
     p->fillRect(rect,QColor("#fbfcfa"));p->setPen(QPen(QColor("#d7e1df"),1.3));

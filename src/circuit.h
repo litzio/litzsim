@@ -16,6 +16,7 @@ public:
     static Circuit load(const QString& path);
     void save(const QString& path) const;
     void validate() const;
+    qint64 outputStride() const;
     QStringList missingPins() const;
     void move(const QString& id, int gridX, int gridY);
     QString insert(const QString& type,int x,int y);

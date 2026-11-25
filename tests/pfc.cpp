@@ -48,6 +48,24 @@ int main(int argc,char** argv) {
     for(auto& e:error)e=std::sqrt(e/sw.means.size());
     std::printf("period mean RMSE: %.5f A, %.5f A, %.5f V\n",error[0],error[1],error[2]);
     if(error[0]>1 || error[1]>1 || error[2]>.5) return 1;
+    for(QString mode:{"pfc-average","pfc-switching"}) {
+        auto timed=c;
+        auto cfg=timed.document["simulation"].toObject();
+        cfg["model"]=mode;cfg["stopTime_s"]=80e-6;
+        std::vector<double> full;
+        for(int stride:{1,7}) {
+            cfg["outputStep_s"]=stride*1e-6;timed.document["simulation"]=cfg;
+            int row=0;
+            simulate(timed,[&](double t,const auto& values){
+                const int index=std::min(row*stride,80);
+                if(std::abs(t-index*1e-6)>1e-15) throw std::runtime_error("PFC output clock");
+                if(stride==1) full.push_back(values["Vdc_V"]);
+                else if(values["Vdc_V"]!=full.at(index)) throw std::runtime_error("PFC recording changed control");
+                ++row;
+            });
+            if(row!=(stride==1 ? 81 : 13)) return 4;
+        }
+    }
     c.disconnectPin("Q1H.d");c.connectPins("Q1H.d","Q1L.s");
     try {simulate(c,[](double,const auto&){});} catch(const std::exception&) {return 0;}
     return 3;

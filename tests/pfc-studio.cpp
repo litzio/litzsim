@@ -6,7 +6,9 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QMouseEvent>
-#include <QScrollBar>
+#include <QInputDialog>
+#include <QComboBox>
+#include <QAction>
 #include <cstdio>
 int main(int argc,char** argv) {
     QApplication app(argc,argv);
@@ -33,16 +35,41 @@ int main(int argc,char** argv) {
         QApplication::sendEvent(sheet->viewport(),&release);break;
     }
     if(argc>2 && !studio.grab().save(QString::fromLocal8Bit(argv[2])+"/pfc-editor.png")) return 4;
+    QPoint inductor;
+    for(auto* item:sheet->scene()->items()) {
+        auto* label=qgraphicsitem_cast<QGraphicsSimpleTextItem*>(item);
+        if(label && label->text()=="L1") inductor=sheet->mapFromScene(label->sceneBoundingRect().center());
+    }
+    if(inductor.isNull()) return 9;
+    QTimer::singleShot(0,[]{
+        auto* field=qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+        if(!field)return;
+        field->setTextValue("inductance_H");field->accept();
+        QTimer::singleShot(0,[]{
+            auto* value=qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+            if(value){value->setTextValue("0.000410");value->accept();}
+        });
+    });
+    QMouseEvent edit(QEvent::MouseButtonDblClick,inductor,sheet->viewport()->mapToGlobal(inductor),
+                     Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+    QApplication::sendEvent(sheet->viewport(),&edit);
+    const auto parts=sheet->circuit.document["parts"].toObject();
+    if(parts["L1"].toObject()["parameters"].toObject()["inductance_H"].toDouble()!=410e-6 ||
+       parts["L2"].toObject()["parameters"].toObject()["inductance_H"].toDouble()!=400e-6) return 10;
+    auto toolbar=studio.findChild<QToolBar*>()->actions();
     Viewer viewer;
     std::vector<Signal> signalsOut;
     for(QString mode:{"pfc-switching","pfc-average"}) {
-        sheet->edit([&](Circuit& c){
-            auto cfg=c.document["simulation"].toObject();cfg["model"]=mode;c.document["simulation"]=cfg;
-            c.setParameter("L1","inductance_H",410e-6);
+        QTimer::singleShot(0,[mode]{
+            auto* settings=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if(settings){settings->findChild<QComboBox*>()->setCurrentText(mode);settings->accept();}
         });
+        for(auto* action:toolbar) if(action->text()=="해석 설정") action->trigger();
+        if(sheet->circuit.document["simulation"].toObject()["model"].toString()!=mode) return 11;
         QEventLoop loop;QString pathOut;
         studio.showResult=[&](const QString& path){pathOut=path;loop.quit();};
-        studio.startRun();QTimer::singleShot(30000,&loop,&QEventLoop::quit);loop.exec();
+        for(auto* action:toolbar) if(action->text()=="실행") action->trigger();
+        QTimer::singleShot(30000,&loop,&QEventLoop::quit);loop.exec();
         if(pathOut.isEmpty()) return 5;
         if(Circuit::load(studio.runDirectory+"/circuit.litzsim").document!=sheet->circuit.document) return 6;
         viewer.open(pathOut);auto signal=viewer.active->signalsList.back();signal.source=mode;

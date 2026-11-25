@@ -1,6 +1,7 @@
 #pragma once
 #include "circuit.h"
 #include <QGraphicsView>
+#include <QJsonArray>
 #include <QMainWindow>
 #include <QFileSystemModel>
 #include <QTabWidget>
@@ -10,6 +11,7 @@
 #include <QToolBar>
 #include <QProcess>
 #include <functional>
+inline constexpr auto partMime = "application/x-litzsim-component";
 
 class Sheet : public QGraphicsView {
 public:
@@ -34,6 +36,17 @@ protected:
     void drawBackground(QPainter*,const QRectF&) override;
     void wheelEvent(QWheelEvent*) override;
 private:
+    struct WireSegment {
+        QPoint a,b;
+        QString pin;
+    };
+    struct NetRoute {
+        QJsonArray pins,trunk;
+        QMap<QString,QPoint> terminals;
+        QJsonObject bends;
+        QList<WireSegment> segments;
+    };
+    QMap<QString,NetRoute> routes;
     QString selected,pending,dragging,wirePin,activeNet;
     QPointF dragOffset;
 };

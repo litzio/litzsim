@@ -123,12 +123,13 @@ void simulatePfc(const Circuit& circuit,const Sample& sample,bool average) {
     };
     auto half=ticks(halfRatio),controlTicks=ticks(sampleRatio),steps=ticks(end/step);
     Controller ctl;
+    const qint64 stride=std::max<qint64>(1,circuit.outputStride());
     QMap<QString,double> values;
     for(qint64 n=0;n<=steps;++n) {
         double t=n*step;
         values[p.sensors[0]+"_A"]=p.current[0];values[p.sensors[1]+"_A"]=p.current[1];
         values[p.bus+"_V"]=p.voltage;values["gridEnergy_J"]=p.workIn;values["loadEnergy_J"]=p.workLoad;
-        sample(t,values);
+        if(n%stride==0 || n==steps) sample(t,values);
         if(n==steps) break;
         if(n%controlTicks==0) ctl.update(p,t,controlPeriod,reference);
         if(average) {advance(p,t,step,ctl.duty[0]-ctl.neutral,ctl.duty[1]-ctl.neutral);continue;}

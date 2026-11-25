@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
+#include <vector>
 
 // A stiff 3 V output gives closed-form on/off current slopes. A one-cycle
 // test distinguishes diode commutation from an inductor allowed to go negative.
@@ -36,5 +37,21 @@ int main(int argc,char** argv) {
         if (maxError>1e-9 || std::abs(peak-initial-0.1)>1e-9 || imbalance>1e-9 ||
             (initial==0 && std::abs(zero-(edge+0.1/3000))>step))
             throw std::runtime_error("buck switching reference failed");
+        auto settings=c.document["simulation"].toObject();
+        std::vector<double> currents;
+        for (int every:{1,10}) {
+            settings["outputStep_s"]=every*step;
+            c.document["simulation"]=settings;
+            int row=0;
+            simulate(c,[&](double t,const auto& values) {
+                const double expected=std::min(end,(row*every)*step);
+                if (std::abs(t-expected)>1e-15) throw std::runtime_error("output clock");
+                if (every==1) currents.push_back(values["L1_A"]);
+                else if (std::abs(values["L1_A"]-currents.at(t==end ? currents.size()-1 : row*every))>1e-12)
+                    throw std::runtime_error("recording stride changed trajectory");
+                ++row;
+            });
+            if (row!=1+int(std::ceil(end/(every*step)))) throw std::runtime_error("missing final sample");
+        }
     }
 }
