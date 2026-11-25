@@ -13,6 +13,7 @@
 #include <QSet>
 #include <functional>
 inline constexpr auto partMime = "application/x-litzsim-component";
+QFont studioFont();
 
 class Sheet : public QGraphicsView {
 public:
@@ -24,6 +25,7 @@ public:
     void edit(const std::function<void(Circuit&)>& operation);
     virtual void redraw();
     void save();
+    void exportSchematic(const QString& filename,double widthMm,bool annotations=false) const;
     void addPart(const QString& type,QPointF at);
 protected:
     void mousePressEvent(QMouseEvent*) override;

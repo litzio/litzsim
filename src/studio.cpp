@@ -11,6 +11,8 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QComboBox>
+#include <QCheckBox>
+#include <QDoubleSpinBox>
 #include <QFontDatabase>
 #include <QStyleHints>
 #include <QLabel>
@@ -73,12 +75,15 @@ void Sheet::edit(const std::function<void(Circuit&)>& operation) {
 }
 void Sheet::save() { circuit.save(path); history.setClean(); }
 
-Studio::Studio(const QString& directory):root(normalized(directory)) {
+QFont studioFont() {
     static const int fontId=QFontDatabase::addApplicationFont(":/fonts/PretendardVariable.ttf");
     if (fontId<0) throw std::runtime_error("cannot load bundled Pretendard font");
     QFont ui(QFontDatabase::applicationFontFamilies(fontId).front());
     ui.setPixelSize(14);
-    QApplication::setFont(ui);
+    return ui;
+}
+Studio::Studio(const QString& directory):root(normalized(directory)) {
+    QApplication::setFont(studioFont());
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
     QGuiApplication::styleHints()->setColorScheme(Qt::ColorScheme::Light);
 #endif
@@ -106,6 +111,35 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
         if (!p.isEmpty()) open(p);
     });
     action("저장",QKeySequence::Save,[this]{if (current()) current()->save();});
+    action("회로도 내보내기",{},[this]{
+        auto* sheet=current();
+        if(!sheet) return;
+        const QString svg="SVG (*.svg)",pdf="PDF (*.pdf)";
+        const QFileInfo source(sheet->path);
+        QFileDialog destination(this,"회로도 내보내기",source.absolutePath(),svg+";;"+pdf);
+        destination.setAcceptMode(QFileDialog::AcceptSave);
+        destination.setDefaultSuffix("svg");
+        destination.selectFile(source.completeBaseName());
+        connect(&destination,&QFileDialog::filterSelected,&destination,[&](const QString& format){
+            destination.setDefaultSuffix(format==pdf ? "pdf" : "svg");
+        });
+        if(destination.exec()!=QDialog::Accepted) return;
+        QDialog options(this);
+        options.setWindowTitle("회로도 내보내기");
+        QFormLayout form(&options);
+        QDoubleSpinBox width;
+        width.setRange(1,1000); width.setValue(88.9);
+        form.addRow("최종 폭 (mm)",&width);
+        QCheckBox annotations("도면 제목 및 구역 주석 포함");
+        form.addRow(&annotations);
+        QDialogButtonBox buttons(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);
+        form.addRow(&buttons);
+        connect(&buttons,&QDialogButtonBox::accepted,&options,&QDialog::accept);
+        connect(&buttons,&QDialogButtonBox::rejected,&options,&QDialog::reject);
+        if(options.exec()!=QDialog::Accepted) return;
+        sheet->exportSchematic(destination.selectedFiles().front(),width.value(),annotations.isChecked());
+        statusBar()->showMessage("회로도를 내보냈습니다.",5000);
+    });
     action("실행 취소",QKeySequence::Undo,[this]{if (current()) current()->history.undo();});
     action("다시 실행",QKeySequence::Redo,[this]{if (current()) current()->history.redo();});
     runner=new QProcess(this);

@@ -1,7 +1,7 @@
 # The GUI, its child CLI and the Windows test executables share one runtime directory.
 set(runtime_manifest "")
 set(runtime_inputs "")
-foreach(module IN ITEMS Core Gui Widgets Test)
+foreach(module IN ITEMS Core Gui Widgets Svg Test)
     list(APPEND runtime_inputs "$<TARGET_FILE:Qt6::${module}>")
     string(APPEND runtime_manifest "stage([[$<TARGET_FILE:Qt6::${module}>]] .)\n")
 endforeach()

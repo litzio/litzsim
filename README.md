@@ -6,7 +6,7 @@
 
 Qt 편집기에서 [RC](examples/rc.litzsim), [RLC](examples/rlc.litzsim), [벅](examples/buck.litzsim), [2상 토템폴 PFC](examples/pfc.litzsim) 예제를 열고 실행할 수 있습니다. 단자 이름은 `소자ID.핀` 형식이며 전압·전류 프로브의 기준 방향은 p에서 n입니다. 연결은 nets, 격자 위치는 layout, 적분 간격과 종료 시각은 simulation에서 관리합니다.
 
-Qt 6 Core·Widgets·Test와 SVG 아이콘 플러그인, C++17 컴파일러와 CMake로 빌드합니다. 아래는 Windows의 단일 구성 Release 빌드 예입니다. MSYS2 UCRT64의 `bin`은 빌드할 때 PATH에 추가합니다. Windows MinGW 빌드는 실행 파일 옆에 Qt·컴파일러 DLL과 플랫폼 플러그인을 배치합니다. 빌드 후에는 탐색기에서 `build\litzsim.exe`를 더블클릭해 실행할 수 있습니다. 다른 폴더로 옮길 때는 `litzsim-cli.exe`, DLL과 플러그인 하위 폴더도 함께 옮깁니다.
+Qt 6 Core·Widgets·Svg·Test와 SVG 아이콘 플러그인, C++17 컴파일러와 CMake로 빌드합니다. 아래는 Windows의 단일 구성 Release 빌드 예입니다. MSYS2 UCRT64의 `bin`은 빌드할 때 PATH에 추가합니다. Windows MinGW 빌드는 실행 파일 옆에 Qt·컴파일러 DLL과 플랫폼 플러그인을 배치합니다. 빌드 후에는 탐색기에서 `build\litzsim.exe`를 더블클릭해 실행할 수 있습니다. 다른 폴더로 옮길 때는 `litzsim-cli.exe`, DLL과 플러그인 하위 폴더도 함께 옮깁니다.
 
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -14,6 +14,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/litzsim-cli inspect examples/rc.litzsim
 ./build/litzsim-cli run examples/buck.litzsim build/buck.csv
+./build/litzsim-cli export examples/buck.litzsim build/buck.pdf --width-mm 182
 ./build/litzsim examples/pfc.litzsim
 ```
 
@@ -21,7 +22,9 @@ ctest --test-dir build --output-on-failure
 
 회로도는 IEEE 315 계열 기호를 사용합니다. 기호와 배선은 기본 검정이며, 전압 프로브의 +/−는 p/n 단자에, 전류 프로브의 화살표는 p→n 기준 방향에 대응합니다. PFC의 제어기 구동 게이트에는 단자 옆에 신호 이름이 표시됩니다. [기호표와 예제별 전후 캡처](docs/spikes/2026-11-25-schematic-publication-audit.md#이슈-15-기호와-측정-표기)
 
-연결된 분기는 채운 점으로 표시합니다. 서로 다른 네트의 직교 교차에서는 가로선이 위로 반원을 그리며 세로선과 간격을 둡니다. 배선은 소자와 단자 라벨을 피해 그립니다. [RC·벅·PFC 배선 전후 캡처](docs/spikes/2026-11-25-schematic-publication-audit.md#이슈-16-배선과-비접속-교차)
+연결된 분기는 채운 점으로 표시합니다. 서로 다른 네트의 직교 교차에서는 세로선이 교차점을 지나고 가로선이 위로 반원을 그려 넘어갑니다. 배선은 소자와 단자 라벨을 피해 그립니다. [RC·벅·PFC 배선 전후 캡처](docs/spikes/2026-11-25-schematic-publication-audit.md#이슈-16-배선과-비접속-교차)
+
+도구 모음의 **회로도 내보내기**에서 SVG 또는 PDF와 최종 폭(mm)을 지정합니다. 기본 출력은 제목과 구역 주석을 제외한 흰 배경의 회로도입니다. 제목과 구역 주석은 **도면 제목 및 구역 주석 포함** 또는 CLI의 `--annotations`로 추가합니다. 소자 ID와 극성은 9 pt 굵게, 값·단자명·게이트 신호명은 8 pt로 그립니다. PDF 글자는 벡터 윤곽선이고 SVG 글자는 편집할 수 있는 텍스트입니다. [예제별 미리보기와 측정값](docs/spikes/2026-11-25-schematic-publication-audit.md#이슈-17-논문용-벡터-내보내기)
 
 ![2상 토템폴 PFC 실제 편집 화면](docs/spikes/assets/schematic-ieee-pfc.png)
 
