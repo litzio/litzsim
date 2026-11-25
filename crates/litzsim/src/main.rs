@@ -1,16 +1,12 @@
-use serde_json::{Value, json};
+mod commands;
+
+use serde_json::json;
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
 fn serve(input: impl BufRead, mut output: impl Write) -> io::Result<()> {
     for line in input.lines() {
-        let response = match serde_json::from_str::<Value>(&line?) {
-            Ok(request) if request.get("op").and_then(Value::as_str) == Some("ping") => {
-                litzsim_core::ping()
-            }
-            Ok(_) => json!({ "ok": false, "error": "Unknown operation" }),
-            Err(_) => json!({ "ok": false, "error": "Invalid JSON" }),
-        };
+        let response = commands::serve_request(&line?);
         writeln!(output, "{response}")?;
         output.flush()?;
     }
@@ -28,8 +24,12 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!("Usage: litzsim --version | litzsim serve");
-            return ExitCode::FAILURE;
+            let response = commands::file_command(&args)
+                .unwrap_or_else(|error| json!({ "ok": false, "error": error }));
+            println!("{response}");
+            if response["ok"] != true {
+                return ExitCode::FAILURE;
+            }
         }
     }
     ExitCode::SUCCESS
