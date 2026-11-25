@@ -89,6 +89,7 @@ void verifySchematic(const QString& examples) {
         Sheet sheet(path,Circuit::load(path),nullptr);
         const QString probe=name=="pfc" ? "Vdc" : "VC";
         verifyMark(sheet,probe,"+","p");
+        QSet<QPoint> jumps;
         for(auto* item:sheet.scene()->items()) {
             const auto* wire=qgraphicsitem_cast<QGraphicsLineItem*>(item);
             const auto* junction=qgraphicsitem_cast<QGraphicsEllipseItem*>(item);
@@ -99,7 +100,21 @@ void verifySchematic(const QString& examples) {
                (symbol && symbol->pen().color()!=Qt::black) ||
                (text && text->brush().color()!=Qt::black))
                 throw std::runtime_error(("unexpected diagram color or routing warning: "+name).toStdString());
+            const auto net=item->data(3).toString();
+            if(symbol && !net.isEmpty()) {
+                const auto rect=symbol->path().boundingRect();
+                jumps.insert(QPointF(rect.center().x(),rect.bottom()).toPoint()/32);
+                for(auto* near:sheet.scene()->collidingItems(symbol))
+                    if(near->data(3).toString()!=net)
+                        throw std::runtime_error(("jump overlaps another item: "+name).toStdString());
+            }
+            const bool straightRail=(name=="rc" && (net=="input" || net=="output")) ||
+                                    (name=="buck" && (net=="output" || net=="ground" || net=="gate"));
+            if(wire && straightRail && wire->line().dy()!=0)
+                throw std::runtime_error(("unnecessary bend on "+name+" "+net).toStdString());
         }
+        const QSet<QPoint> expected=name=="pfc" ? QSet<QPoint>{{15,7},{15,10},{20,10}} : QSet<QPoint>{};
+        if(jumps!=expected) throw std::runtime_error(("unexpected wire crossings: "+name).toStdString());
         const auto gates=sheet.circuit.document["control"].toObject()["gateSignals"].toObject();
         QStringList transistors;
         for(auto it=gates.begin();it!=gates.end();++it) {

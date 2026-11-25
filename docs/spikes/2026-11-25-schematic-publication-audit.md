@@ -106,3 +106,15 @@ Windows Qt `windows` 플랫폼에서 선택을 비운 Studio 창 콘텐츠를 �
 | RC | [캡처](assets/schematic-ieee-rc-before.png) | [캡처](assets/schematic-ieee-rc.png) |
 | 벅 | [캡처](assets/schematic-ieee-buck-before.png) | [캡처](assets/schematic-ieee-buck.png) |
 | 2상 토템폴 PFC | [캡처](assets/schematic-ieee-pfc-before.png) | [캡처](assets/schematic-ieee-pfc.png) |
+
+## 이슈 16 배선과 비접속 교차
+
+소유자가 선택한 표기는 채운 접속점과 가로 배선 위쪽의 점프 반원이다. 위로 볼록한 가로선 반원은 접속에 점을 쓰는 교재의 도식과 같은 방향이다. 세로 획을 반원에서 떨어뜨려 두 획이 닿지 않게 그린다. 라우터는 단자와 네트에 따라 직교 경로를 계산하고, 반원 자리에 기호나 라벨이 있거나 교차점이 배선의 끝·꺾임·분기라면 그 지점의 교차를 피한다. [이슈 #16](https://github.com/litzio/litzsim/issues/16) · [Lessons in Electric Circuits, 9.1절](https://www-mdp.eng.cam.ac.uk/web/library/enginfo/textbooks_dvd_only/lessons_pdf/REF.pdf)
+
+| 예제 | 변경 전 | 변경 후 | 확인 결과 |
+| --- | --- | --- | --- |
+| RC | [캡처](assets/schematic-routing-rc-before.png) | [캡처](assets/schematic-routing-rc.png) | R1의 양 단자를 상단 배선과 맞춰 불필요한 꺾임 두 쌍을 없앴다. |
+| 벅 | [캡처](assets/schematic-routing-buck-before.png) | [캡처](assets/schematic-routing-buck.png) | PWM을 Q1 왼쪽에 배치해 입력선과 게이트선을 분리했다. 입력선은 V1 바로 위에서 한 번 꺾인다. R1을 90° 돌려 C1·R1·VC의 위·아래 단자를 각 레일에 맞췄고, V1·D1·GND의 귀환도 한 높이에서 연결된다. |
+| 2상 토템폴 PFC | [캡처](assets/schematic-routing-pfc-before.png) | [캡처](assets/schematic-routing-pfc.png) | `(15, 7)`의 SW2와 `(15, 10)`·`(20, 10)`의 AC_N에 반원을 표시했다. AC_N을 하단으로 우회하거나 AC_N 레그를 왼쪽으로 옮기는 후보는 교차 수를 줄이지 못해 기존 브리지 배치를 사용했다. |
+
+비교 기준은 #18 병합 직후의 `8fcc84f`다. Qt 6.10.1의 Windows 플랫폼에서 선택을 비운 Studio 창 콘텐츠를 실제 크기 1084×900 px, DPR 1, 논리 DPI 96으로 캡처했다. 전후 모두 씬 경계에 50 씬 단위 여백을 두고 전체를 맞췄다. 세 파일에서 `layout`과 `bends`를 제외한 JSON이 기준과 일치해 소자·파라미터·네트·프로브 단자·제어 매핑을 확인했다. 기존 Studio·Workflow 시험에 예제의 직선 배선, PFC 세 반원의 위치와 여유, 한 격자 떨어진 T자 분기와 비접속 교차 검사를 추가했다.

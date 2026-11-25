@@ -63,6 +63,51 @@ QSet<QPair<QPoint,QPoint>> segments(const Sheet& sheet,const QString& net) {
     }
     return result;
 }
+void crossingAndJunction() {
+    Circuit circuit{QJsonObject{{"version",1},{"parts",QJsonObject{}},{"nets",QJsonObject{}},
+        {"layout",QJsonObject{}},{"simulation",QJsonObject{{"stopTime_s",0.001},{"timeStep_s",1e-6}}}}};
+    const auto left=circuit.insert("resistor",-4,0)+".n";
+    const auto right=circuit.insert("resistor",4,0)+".p";
+    const auto branch=circuit.insert("ground",1,3)+".ref";
+    const auto top=circuit.insert("dc",0,-4)+".n";
+    const auto bottom=circuit.insert("dc",0,4)+".p";
+    circuit.connectPins(left,right);
+    circuit.connectPins(left,branch);
+    circuit.connectPins(top,bottom);
+    QString horizontal,vertical;
+    const auto nets=circuit.document["nets"].toObject();
+    for(auto it=nets.begin();it!=nets.end();++it) {
+        if(it.value().toArray().contains(left)) horizontal=it.key();
+        if(it.value().toArray().contains(top)) vertical=it.key();
+    }
+    circuit.document["trunks"]=QJsonObject{
+        {horizontal,QJsonArray{QJsonArray{-3,0},QJsonArray{3,0}}},
+        {vertical,QJsonArray{QJsonArray{0,-3},QJsonArray{0,3}}}
+    };
+    Sheet sheet("",circuit,nullptr);
+    int jumps=0,dots=0;
+    QPainterPath arcInk;
+    for(auto* item:sheet.scene()->items()) {
+        if(const auto* arc=qgraphicsitem_cast<QGraphicsPathItem*>(item);arc && item->data(3)==horizontal) {
+            const auto rect=arc->path().boundingRect();
+            expect(rect.center().x()==0 && rect.bottom()==0 && rect.top()<0 &&
+                   rect.width()==2*rect.height(),"horizontal semicircle at crossing");
+            arcInk=arc->shape();
+            ++jumps;
+        }
+        if(qgraphicsitem_cast<QGraphicsEllipseItem*>(item)) {
+            expect(item->pos()==QPointF(32,0),"junction dot only at connected T");
+            ++dots;
+        }
+    }
+    expect(jumps==1 && dots==1,"one jump and one connected T");
+    for(auto* item:sheet.scene()->items())
+        if(qgraphicsitem_cast<QGraphicsLineItem*>(item)) {
+            if(item->data(3)==vertical) expect(!arcInk.intersects(item->shape()),"vertical stroke must clear the arc");
+            if(item->data(3)==horizontal) expect(!item->shape().contains({0,0}),"arc must replace straight stroke");
+        }
+    expect(sheet.circuit.document==circuit.document,"rendering changed connectivity");
+}
 void localRouting(const QString& examples) {
     auto circuit=Circuit::load(examples+"/rc.litzsim");
     Sheet sheet("",circuit,nullptr);
@@ -73,7 +118,7 @@ void localRouting(const QString& examples) {
     for(auto segment:before) {
         auto p=segment.first/32;
         if(p.x()==1) {
-            sheet.edit([&](Circuit& c){obstruction=c.insert("ground",p.x(),p.y());});
+            sheet.edit([&](Circuit& c){obstruction=c.insert("dc",p.x(),p.y());});
             break;
         }
     }
@@ -127,9 +172,10 @@ void workbench(const QString& examples,const QString& root) {
     }
     auto target=ids["R1"];
     const auto initial=sheet->circuit.document;
-    moveTo(*sheet,target,{16,4}); // C1 occupies this grid point.
+    const auto capacitor=layout["C1"].toObject();
+    moveTo(*sheet,target,{capacitor["x"].toInt(),capacitor["y"].toInt()});
     expect(sheet->circuit.document==initial,"overlap changed circuit or layout");
-    auto point=itemPoint(*sheet,ids["L1"]);
+    auto point=itemPoint(*sheet,ids["V1"]);
     QTest::mouseClick(sheet->viewport(),Qt::LeftButton,{},point);
     QTest::keyClick(sheet,Qt::Key_R);
     expect(sheet->circuit.document["layout"]!=initial["layout"],"rotate did not act");
@@ -230,7 +276,7 @@ int main(int argc,char** argv){
     QTemporaryDir dir;
     try {
         const auto examples=QString::fromLocal8Bit(argv[1]);
-        workbench(examples,dir.path());localRouting(examples);plots(dir.path());
+        crossingAndJunction();workbench(examples,dir.path());localRouting(examples);plots(dir.path());
     }
     catch(const std::exception& e){fprintf(stderr,"%s\n",e.what());return 1;}
 }

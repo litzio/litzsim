@@ -21,6 +21,8 @@ ctest --test-dir build --output-on-failure
 
 회로도는 IEEE 315 계열 기호를 사용합니다. 기호와 배선은 기본 검정이며, 전압 프로브의 +/−는 p/n 단자에, 전류 프로브의 화살표는 p→n 기준 방향에 대응합니다. PFC의 제어기 구동 게이트에는 단자 옆에 신호 이름이 표시됩니다. [기호표와 예제별 전후 캡처](docs/spikes/2026-11-25-schematic-publication-audit.md#이슈-15-기호와-측정-표기)
 
+연결된 분기는 채운 점으로 표시합니다. 서로 다른 네트의 직교 교차에서는 가로선이 위로 반원을 그리며 세로선과 간격을 둡니다. 배선은 소자와 단자 라벨을 피해 그립니다. [RC·벅·PFC 배선 전후 캡처](docs/spikes/2026-11-25-schematic-publication-audit.md#이슈-16-배선과-비접속-교차)
+
 ![2상 토템폴 PFC 실제 편집 화면](docs/spikes/assets/schematic-ieee-pfc.png)
 
 해석 설정에서 결과 저장 간격을 time-step의 정수 배로 지정할 수 있습니다. 예를 들어 time-step이 1 µs이고 저장 간격이 7 µs이면 0, 7, 14 µs 순으로 기록하며 종료 시각의 표본도 보관합니다. JSON 필드는 `simulation.outputStep_s`입니다. 비워 두면 기존 파일처럼 해석기가 내보내는 모든 표본을 저장합니다.

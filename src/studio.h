@@ -10,6 +10,7 @@
 #include <QUndoStack>
 #include <QToolBar>
 #include <QProcess>
+#include <QSet>
 #include <functional>
 inline constexpr auto partMime = "application/x-litzsim-component";
 
@@ -47,6 +48,7 @@ private:
         QList<WireSegment> segments;
     };
     QMap<QString,NetRoute> routes;
+    QSet<QPoint> routeCrossings;
     QString selected,pending,dragging,wirePin,activeNet;
     QPointF dragOffset;
 };
