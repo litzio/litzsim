@@ -34,7 +34,7 @@ LitzSim 저장소 worktree(현재 디렉터리, 브랜치 <branch>, main 기준)
 - 리뷰 agent나 하위 agent를 띄우지 않는다.
 - 결정 범위 밖의 판단(해석 결과를 바꾸는 모델 선택, 파일 규격 변경, 단자·측정 방향 규약 변경)이 필요하면 구현을 멈추고 근거와 선택지를 보고한다. 이슈가 추정한 원인이 틀렸으면 범위 밖 구현만 멈추고 승인된 범위의 읽기·재현·판정은 계속한 뒤 보고한다.
 - 첫 커밋 전에 `paseo inspect $env:PASEO_AGENT_ID --json`(PowerShell)으로 자신의 실행 provider·model을 확인한다. 확인할 수 없으면 추측하지 말고 부모에게 보고한다.
-- 커밋은 UTF-8 메시지 파일(`git commit --file`)로 만든다. 제목과 본문은 한국어로 쓴다. 마지막 trailer 블록에 정확히 `AI-Agent: <agent>`, `AI-Model: <provider>/<model>`을 한 번씩 넣는다(실제 구현 모델, 소문자 canonical id). merge 커밋도 포함한다. Co-authored-by는 쓰지 않는다. 커밋마다 `git log -1 --format='%H%n%(trailers:only)'`로 확인한다.
+- 커밋은 UTF-8 메시지 파일(`git commit --file`)로 만든다. 제목과 본문은 한국어로 쓴다. 마지막 trailer 블록에 정확히 `AI-Agent: <agent>`, `AI-Model: <provider>/<model>`을 한 번씩 넣는다(실제 구현 모델, 소문자 canonical id). merge 커밋도 포함한다. Co-authored-by는 쓰지 않는다. 저장소의 이전 커밋 trailer(예: `AI-Model: GPT-6`)를 본뜨지 않는다. 커밋마다 `git log -1 --format='%H%n%(trailers:only)'`로 확인한다.
 - main을 base로 PR을 만든다. 본문에 `Closes #<N>`(일부만 해결하면 `Refs #<N>`), 변경 요약, 실행한 검증(명령과 결과, CTest 통과 수)을 쓴다. 재생성 가능한 대용량 결과 파일은 커밋하지 않는다.
 - 이 저장소에는 CI가 없다. PR을 올린 뒤 기다릴 검사는 없으며, 병합 전 검증은 오케스트레이터가 따로 한다. 병합은 하지 않는다.
 - 주 checkout이나 다른 worktree의 폴더를 가리키는 junction·심볼릭 링크를 만들지 않는다. 만들었으면 끝낼 때 링크 항목만 지우고(재귀 삭제 금지) 보고에 적는다.
