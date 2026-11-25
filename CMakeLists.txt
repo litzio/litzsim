@@ -52,3 +52,7 @@ add_executable(workflow-test tests/workflow.cpp)
 target_link_libraries(workflow-test PRIVATE litzstudio Qt6::Test)
 add_test(NAME workflow COMMAND workflow-test ${CMAKE_CURRENT_SOURCE_DIR}/examples)
 set_tests_properties(workflow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 40)
+
+if(WIN32 AND MINGW)
+    include(cmake/WindowsRuntime.cmake)
+endif()

@@ -53,5 +53,26 @@ int main(int argc,char** argv) {
             });
             if (row!=1+int(std::ceil(end/(every*step)))) throw std::runtime_error("missing final sample");
         }
+        // A second rising edge commutates a still-conducting freewheel diode in CCM.
+        settings.remove("outputStep_s");
+        settings["stopTime_s"]=2*end;
+        c.document["simulation"]=settings;
+        double lastAccepted=0;
+        try {
+            simulate(c,[&](double t,const auto& values){
+                lastAccepted=t;
+                if(t<=end) return;
+                const double phase=t-end;
+                const double start=std::max(0.,initial-0.05);
+                const double expected=phase<=edge ? start+2000*phase :
+                    std::max(0.,start+0.1-3000*(phase-edge));
+                if(std::abs(values["L1_A"]-expected)>1e-9 ||
+                   (phase<=edge && std::abs(values["D1_A"])>1e-9))
+                    throw std::runtime_error("incorrect second-cycle commutation");
+            });
+        } catch(const std::exception& e) {
+            std::fprintf(stderr,"after %.12g s: %s\n",lastAccepted,e.what());
+            return 1;
+        }
     }
 }
