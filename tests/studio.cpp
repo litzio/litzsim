@@ -16,22 +16,31 @@ QPointF terminal(const Sheet& sheet,const QString& name) {
     throw std::runtime_error(("missing scene terminal: "+name).toStdString());
 }
 
+int partLabelSize(const Sheet& sheet,const QString& id,bool value=false) {
+    for(auto* item:sheet.scene()->items()) {
+        const auto* label=qgraphicsitem_cast<QGraphicsSimpleTextItem*>(item);
+        if(label && label->data(0).toString()==id && (label->text()!=id)==value)
+            return label->font().pixelSize();
+    }
+    throw std::runtime_error(("missing part label: "+id).toStdString());
+}
+
 void verifyMark(const Sheet& sheet,const QString& id,const QString& text,const QString& pin,
-                bool terminalMark=true) {
+                int minSize=22,int maxSize=22) {
     int matches=0;
     const auto target=terminal(sheet,id+"."+pin);
     for(auto* item:sheet.scene()->items()) {
         const auto* label=qgraphicsitem_cast<QGraphicsSimpleTextItem*>(item);
         if(!label || label->data(0).toString()!=id || label->text()!=text) continue;
-        // Protect the enlarged marks, which must be larger than the 13 px value labels.
-        if(terminalMark && label->font().pixelSize()<22)
-            throw std::runtime_error(("terminal mark too small: "+id+" "+text).toStdString());
+        const int size=label->font().pixelSize();
+        if(minSize>0 && (size<minSize || size>maxSize))
+            throw std::runtime_error(("terminal mark outside size range: "+id+" "+text).toStdString());
         const auto area=label->sceneBoundingRect();
         const auto nearest=QPointF(std::clamp(target.x(),area.left(),area.right()),
                                    std::clamp(target.y(),area.top(),area.bottom()));
         // Single glyphs are anchored within one grid step. Signal names grow outward from their anchor.
-        const bool near=terminalMark ? QLineF(area.center(),target).length()<32
-                                     : QLineF(nearest,target).length()<18;
+        const bool near=minSize>0 ? QLineF(area.center(),target).length()<32
+                                  : QLineF(nearest,target).length()<18;
         if(near && label->brush().color()==Qt::black) ++matches;
     }
     if(matches!=1) throw std::runtime_error(("missing or misplaced mark: "+id+" "+text).toStdString());
@@ -112,12 +121,14 @@ void verifySchematic(const QString& examples) {
             for(const auto& id:sensors) verifySymbol(sheet,id,{"p","n"},true);
             for(const auto& id:transistors) {
                 verifySymbol(sheet,id,{"d","g","s"});
-                verifyMark(sheet,id,"D","d");
-                verifyMark(sheet,id,"G","g");
-                verifyMark(sheet,id,"S","s");
+                const int valueSize=partLabelSize(sheet,"L1",true);
+                const int idSize=partLabelSize(sheet,id);
+                verifyMark(sheet,id,"D","d",valueSize,idSize);
+                verifyMark(sheet,id,"G","g",valueSize,idSize);
+                verifyMark(sheet,id,"S","s",valueSize,idSize);
             }
             for(auto it=gates.begin();it!=gates.end();++it)
-                verifyMark(sheet,it.value().toString().section('.',0,0),"제어 "+it.key(),"g",false);
+                verifyMark(sheet,it.value().toString().section('.',0,0),"제어 "+it.key(),"g",0);
             sheet.circuit.rotate(probe);
             for(const auto& id:sensors+transistors) sheet.circuit.rotate(id);
             sheet.redraw();

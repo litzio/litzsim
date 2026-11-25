@@ -111,6 +111,7 @@ struct Caption {
 };
 
 QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObject& part,int angle) {
+    constexpr int valueLabelSize=13;
     const auto type=part["type"].toString();
     bool horizontal=type=="inductor" || type=="resistor" || type=="ammeter";
     if(angle%180) horizontal=!horizontal;
@@ -118,7 +119,7 @@ QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObje
     if(type=="ammeter" && horizontal) name.ry()-=4;
     QList<Caption> labels{{id,name,16,true}};
     const auto value=valueLabel(type,part["parameters"].toObject());
-    if(!value.isEmpty()) labels.append({value,horizontal ? QPoint(-24,6) : name+QPoint(0,20),13,false});
+    if(!value.isEmpty()) labels.append({value,horizontal ? QPoint(-24,6) : name+QPoint(0,20),valueLabelSize,false});
     // Rotate terminal-relative anchors and keep the lettering upright.
     // Preserve the router's existing ID and value reservations.
     auto mark=[&](const QString& text,QPoint anchor,int size=14,bool bold=false,bool outsideGate=false) {
@@ -131,14 +132,11 @@ QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObje
         }
         labels.append(caption);
     };
-    auto terminalMark=[&](const QString& text,QPoint anchor) {
-        mark(text,anchor,22,true);
-    };
     if(type=="nmos") {
         const auto pins=offsets(type);
-        terminalMark("D",pins[0]*pitch+QPoint(15,-13));
-        terminalMark("G",pins[1]*pitch+QPoint(-2,17));
-        terminalMark("S",pins[2]*pitch+QPoint(15,13));
+        mark("D",pins[0]*pitch+QPoint(15,-13),valueLabelSize);
+        mark("G",pins[1]*pitch+QPoint(-2,17),valueLabelSize);
+        mark("S",pins[2]*pitch+QPoint(15,13),valueLabelSize);
         const auto signal=circuit.gateSignal(id+".g");
         if(!signal.isEmpty()) mark("제어 "+signal,{-46,14},14,false,true);
         // On rotation the name follows the diode side, clear of the gate lead.
@@ -151,8 +149,8 @@ QList<Caption> captions(const Circuit& circuit,const QString& id,const QJsonObje
     } else if(type=="voltmeter") {
         const auto pins=offsets(type);
         mark("V",{0,0});
-        terminalMark("+",pins[0]*pitch+QPoint(-27,12));
-        terminalMark("−",pins[1]*pitch+QPoint(-27,-12));
+        mark("+",pins[0]*pitch+QPoint(-27,12),22,true);
+        mark("−",pins[1]*pitch+QPoint(-27,-12),22,true);
     } else if(type=="ammeter") {
         mark("A",{0,-8});
     }
