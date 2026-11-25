@@ -1,4 +1,6 @@
 #include "studio.h"
+#include "viewer.h"
+#include <QPointer>
 #include <QCloseEvent>
 #include <QDir>
 #include <QApplication>
@@ -7,8 +9,13 @@
 #include <QUuid>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QFontDatabase>
+#include <QLabel>
+#include <QPainter>
+#include <QPainterPath>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFileIconProvider>
 #include <QGraphicsScene>
 #include <QInputDialog>
 #include <QMenu>
@@ -17,9 +24,15 @@
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QToolButton>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
+QIcon icon(const QString& name) {return QIcon(":/icons/"+name+".svg");}
+class FileIcons : public QFileIconProvider {
+public:
+    QIcon icon(const QFileInfo& info) const override {return ::icon(info.isDir() ? "Folder":"File");}
+};
 class Revision : public QUndoCommand {
 public:
     Revision(Sheet& target,Circuit before,Circuit after):sheet(target),oldValue(before),newValue(after) {}
@@ -51,11 +64,25 @@ void Sheet::edit(const std::function<void(Circuit&)>& operation) {
 void Sheet::save() { circuit.save(path); history.setClean(); }
 
 Studio::Studio(const QString& directory):root(normalized(directory)) {
+    static const int fontId=QFontDatabase::addApplicationFont(":/fonts/PretendardVariable.ttf");
+    if (fontId<0) throw std::runtime_error("cannot load bundled Pretendard font");
+    QFont ui(QFontDatabase::applicationFontFamilies(fontId).front());
+    ui.setPixelSize(14);
+    QApplication::setFont(ui);
     resize(1220,780); setWindowTitle("LitzSim");
+    QApplication::setWindowIcon(QIcon(":/icons/litzio.ico"));
     bar=addToolBar("회로");
     bar->setMovable(false);
+    auto* mark=new QLabel;mark->setContentsMargins(12,0,0,0);
+    mark->setPixmap(QApplication::windowIcon().pixmap(24,24));bar->addWidget(mark);
+    auto* brand=new QLabel("LitzSim");brand->setObjectName("brand");bar->addWidget(brand);bar->addSeparator();
     auto action=[&](const QString& label,const QKeySequence& key,auto fn) {
         auto* a=bar->addAction(label); a->setShortcut(key);
+        if(label=="열기") a->setIcon(icon("FolderOpen"));
+        if(label=="해석 설정") a->setIcon(icon("Settings2"));
+        if(label=="실행") a->setIcon(icon("Play"));
+        if(label=="중지") a->setIcon(icon("Square"));
+        bar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         connect(a,&QAction::triggered,this,[this,fn]{
             try { fn(); } catch (const std::exception& e) { QMessageBox::warning(this,"LitzSim",e.what()); }
         });
@@ -95,16 +122,25 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
         cfg["timeStep_s"]=step.text().toDouble();cfg["stopTime_s"]=stop.text().toDouble();
         sheet->edit([&](Circuit& c){c.document["simulation"]=cfg;});
     });
-    action("▶ 실행",Qt::Key_F5,[this]{startRun();});
-    action("■ 중지",Qt::SHIFT|Qt::Key_F5,[this]{stopRun();});
+    action("실행",Qt::Key_F5,[this]{startRun();});
+    action("중지",Qt::SHIFT|Qt::Key_F5,[this]{stopRun();});
+    auto viewer=std::make_shared<QPointer<Viewer>>();
+    showResult=[this,viewer](const QString& path){
+        if (!*viewer) *viewer=new Viewer(this);
+        if (!path.isEmpty()) (*viewer)->open(path);
+        (*viewer)->show();(*viewer)->raise();
+    };
+    action("파형 창",{},[this]{showResult({});});
 
     auto* frame=new QWidget;
     auto* row=new QHBoxLayout(frame); row->setSpacing(0); row->setContentsMargins(0,0,0,0);
     auto* rail=new QWidget; auto* railLayout=new QVBoxLayout(rail);
+    rail->setObjectName("activity");rail->setFixedWidth(72);
     railLayout->setContentsMargins(3,6,3,6);
     auto* panels=new QStackedWidget;
     auto* split=new QSplitter;
-    files=new QFileSystemModel(this); files->setRootPath(root);
+    files=new QFileSystemModel(this);static FileIcons fileIcons;
+    files->setIconProvider(&fileIcons);files->setRootPath(root);
     files->setNameFilters({"*.litzsim"}); files->setNameFilterDisables(false);
     tree=new QTreeView; tree->setModel(files); tree->setRootIndex(files->index(root));
     tree->setHeaderHidden(true);
@@ -126,10 +162,18 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
     connect(parts,&QListWidget::itemClicked,this,[this](QListWidgetItem* item){
         if (auto* s=current()) s->addPart(item->text(),s->mapToScene(s->viewport()->rect().center()));
     });
-    panels->addWidget(tree); panels->addWidget(parts);
+    auto side=[&](QString heading,QWidget* content){
+        auto* panel=new QWidget;panel->setObjectName("panel");auto* layout=new QVBoxLayout(panel);
+        layout->setContentsMargins(0,0,0,0);layout->setSpacing(0);
+        auto* title=new QLabel(heading);title->setObjectName("paneHeader");layout->addWidget(title);layout->addWidget(content);
+        panels->addWidget(panel);
+    };
+    side("탐색기",tree);side("부품 라이브러리",parts);
     for (const auto label:{"탐색기","라이브러리"}) {
         int n=railLayout->count();
         auto* button=new QToolButton; button->setText(QString::fromUtf8(label)); button->setCheckable(true);
+        button->setObjectName("railItem");button->setIcon(icon(n==1?"LayoutGrid":"Files"));button->setIconSize(QSize(20,20));
+        button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);button->setFixedSize(66,52);
         button->setAutoExclusive(true); button->setChecked(n==0);
         connect(button,&QToolButton::clicked,panels,[panels,n]{panels->setCurrentIndex(n);});
         railLayout->addWidget(button);
@@ -140,9 +184,28 @@ Studio::Studio(const QString& directory):root(normalized(directory)) {
         auto* sheet=static_cast<Sheet*>(tabs->widget(i));
         if (confirmClose(sheet)) { tabs->removeTab(i); delete sheet; }
     });
-    split->addWidget(panels); split->addWidget(tabs); split->setStretchFactor(1,1); split->setSizes({225,900});
+    panels->resize(240,600);
+    split->addWidget(panels); split->addWidget(tabs); split->setStretchFactor(1,1); split->setSizes({240,900});
     row->addWidget(rail); row->addWidget(split,1); setCentralWidget(frame);
-    setStyleSheet("QMainWindow,QToolBar{background:#eceef2} QToolButton:checked,QTabBar::tab:selected{background:#ede7f2;color:#563c67} QTreeView,QListWidget,QGraphicsView{background:white} QToolBar{spacing:6px}");
+    setStyleSheet(R"(
+        QWidget { font-family:'Pretendard Variable'; font-size:14px; color:#232633; }
+        QToolBar { background:#f6f7f9; border:0; border-bottom:1px solid #d5dae4; spacing:4px; min-height:40px; }
+        QLabel#brand { font-weight:600; padding:0 16px; }
+        QToolButton { padding:5px 8px; border:0; border-radius:4px; }
+        QToolButton:hover { background:#e8eaf0; }
+        QWidget#activity,QWidget#panel,QTreeView,QListWidget {background:#f6f7f9;}
+        QToolButton#railItem {font-size:12px; padding:2px 0; border-left:3px solid transparent;}
+        QToolButton#railItem:checked {color:#77277f; background:#f3eaf4; border-left:3px solid #803782;}
+        QLabel#paneHeader {font-weight:600; padding:7px 12px; border-bottom:1px solid #e0e3e9;}
+        QTreeView,QListWidget {border:0; padding:5px; outline:0;}
+        QTreeView::item,QListWidget::item {min-height:25px;}
+        QTreeView::item:selected,QListWidget::item:selected {color:#52295e;background:#eee4f1;}
+        QTabWidget::pane,QGraphicsView {border:0;background:white;}
+        QTabBar::tab {min-height:30px; padding:0 10px; border:0; border-bottom:3px solid transparent; background:#f4f5f7;}
+        QTabBar::tab:selected {color:#492550; background:white; border-bottom:3px solid #883f91;}
+        QTabBar::close-button {image:url(:/icons/X.svg);width:13px;height:13px;}
+        QSplitter::handle {background:#d5dae4;width:1px;}
+    )");
 }
 Sheet* Studio::open(const QString& path) {
     for (int i=0;i<tabs->count();++i) {
@@ -151,6 +214,11 @@ Sheet* Studio::open(const QString& path) {
     }
     auto* sheet=new Sheet(path,Circuit::load(path),tabs);
     tabs->setCurrentIndex(tabs->addTab(sheet,QFileInfo(path).fileName()));
+    tree->setCurrentIndex(files->index(normalized(path)));
+    QTimer::singleShot(0,sheet,[sheet]{
+        auto bounds=sheet->scene()->itemsBoundingRect();
+        if (!bounds.isEmpty()) sheet->fitInView(bounds.adjusted(-50,-50,50,50),Qt::KeepAspectRatio);
+    });
     connect(&sheet->history,&QUndoStack::cleanChanged,this,[this]{refreshTabs();});
     return sheet;
 }

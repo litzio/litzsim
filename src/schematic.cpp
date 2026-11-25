@@ -1,4 +1,5 @@
 #include "studio.h"
+#include <QApplication>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QGraphicsItem>
@@ -59,7 +60,7 @@ QPainterPath glyph(const QString& t) {
         if (t=="dc") {line(-4,-5,4,-5);line(0,-9,0,-1);line(-4,6,4,6);}
         if (t=="pwm") {p.moveTo(-9,4);p.lineTo(-4,4);p.lineTo(-4,-5);p.lineTo(4,-5);p.lineTo(4,4);p.lineTo(9,4);}
         if (t=="sine") {p.moveTo(-10,0);p.cubicTo(-4,-13,4,13,10,0);}
-        if (t=="voltmeter" || t=="ammeter") p.addText(-6,6,QFont("Segoe UI",11),t=="voltmeter"?"V":"A");
+        if (t=="voltmeter" || t=="ammeter") p.addText(-5,5,QApplication::font(),t=="voltmeter"?"V":"A");
     }
     return p;
 }
@@ -104,7 +105,7 @@ void Sheet::redraw() {
         bounds=bounds.united(QRect(center,QSize(1,1)));blocked.insert(center);
         auto* symbol=scene()->addPath(glyph(type),QPen(id==selected?QColor("#75418c"):QColor("#232832"),2));
         symbol->setData(0,id);symbol->setPos(center*pitch);symbol->setRotation(angle);symbol->setZValue(2);
-        auto* label=scene()->addSimpleText(id);label->setPos(center*pitch+QPoint(9,-25));label->setData(0,id);label->setZValue(3);
+        auto* label=scene()->addSimpleText(id);label->setPos(center*pitch+QPoint(17,-28));label->setData(0,id);label->setZValue(3);
         const auto pins=library().value(type).pins;
         auto delta=offsets(type);
         for (int i=0;i<pins.size();++i) {

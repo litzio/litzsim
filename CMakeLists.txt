@@ -22,7 +22,13 @@ add_test(NAME buck COMMAND buck-test ${CMAKE_CURRENT_SOURCE_DIR}/examples/buck.l
 add_executable(wave-test tests/waves.cpp)
 target_link_libraries(wave-test PRIVATE litzcore)
 add_test(NAME waves COMMAND wave-test)
-add_library(litzstudio src/studio.cpp src/schematic.cpp)
+add_library(litzstudio src/studio.cpp src/schematic.cpp src/viewer.cpp)
+qt_add_resources(litzstudio typography PREFIX "/fonts" BASE assets/fonts
+    FILES assets/fonts/PretendardVariable.ttf assets/fonts/Pretendard-OFL.txt)
+qt_add_resources(litzstudio symbols PREFIX "/icons" BASE assets/icons FILES
+    assets/icons/litzio.ico assets/icons/Files.svg assets/icons/LayoutGrid.svg assets/icons/X.svg
+    assets/icons/Folder.svg assets/icons/FolderOpen.svg assets/icons/File.svg assets/icons/Play.svg
+    assets/icons/Square.svg assets/icons/Settings2.svg assets/icons/Lucide-LICENSE.txt assets/icons/Litzio-LICENSE.txt)
 target_link_libraries(litzstudio PUBLIC litzcore Qt6::Widgets)
 add_executable(litzsim src/main.cpp)
 target_link_libraries(litzsim PRIVATE litzstudio)
@@ -30,3 +36,7 @@ add_executable(studio-test tests/studio.cpp)
 target_link_libraries(studio-test PRIVATE litzstudio)
 add_test(NAME studio COMMAND studio-test ${CMAKE_CURRENT_SOURCE_DIR}/examples)
 set_tests_properties(studio PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_executable(viewer-test tests/viewer.cpp)
+target_link_libraries(viewer-test PRIVATE litzstudio)
+add_test(NAME viewer COMMAND viewer-test ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+set_tests_properties(viewer PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

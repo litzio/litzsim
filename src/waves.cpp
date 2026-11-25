@@ -77,6 +77,11 @@ double Waves::at(qint64 row,int col) const {
     return data[row*channels.size()+col];
 }
 std::vector<QPointF> Waves::envelope(double from,double to,int y,int pixels) const {
+    std::vector<QPointF> points;
+    for(auto row:envelopeRows(from,to,y,pixels)) points.emplace_back(at(row,0),at(row,y));
+    return points;
+}
+std::vector<qint64> Waves::envelopeRows(double from,double to,int y,int pixels) const {
     ensure(from<=to && pixels>0 && y>=0 && y<channels.size(),"invalid wave viewport");
     auto bound=[&](double time,bool upper) {
         qint64 lo=0,hi=rows;
@@ -87,10 +92,11 @@ std::vector<QPointF> Waves::envelope(double from,double to,int y,int pixels) con
         return lo;
     };
     const qint64 start=bound(from,false),end=bound(to,true);
-    std::vector<QPointF> points;
-    for (int px=0;px<pixels;++px) {
-        const qint64 begin=start+(end-start)*px/pixels,limit=start+(end-start)*(px+1)/pixels;
-        if (begin==limit) continue;
+    std::vector<qint64> points;
+    const qint64 nominal=std::max<qint64>(1,(end-start+pixels-1)/pixels);
+    const qint64 stride=nominal>=block ? ((nominal+block-1)/block)*block : nominal;
+    for (qint64 begin=start;begin<end;) {
+        const qint64 limit=std::min(end,(begin/stride+1)*stride);
         qint64 low=begin,high=begin;
         for (qint64 r=begin;r<limit;) {
             qint64 a=r,b=r;
@@ -105,9 +111,9 @@ std::vector<QPointF> Waves::envelope(double from,double to,int y,int pixels) con
         }
         qint64 selected[]={begin,std::min(low,high),std::max(low,high),limit-1};
         for (auto r:selected) {
-            QPointF p(at(r,0),at(r,y));
-            if (points.empty() || points.back()!=p) points.push_back(p);
+            if (points.empty() || points.back()!=r) points.push_back(r);
         }
+        begin=limit;
     }
     return points;
 }

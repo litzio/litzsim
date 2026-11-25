@@ -26,6 +26,7 @@ public:
     qint64 rows=0;
     double at(qint64 row,int col) const;
     std::vector<QPointF> envelope(double from,double to,int y,int pixels) const;
+    std::vector<qint64> envelopeRows(double from,double to,int y,int pixels) const;
 private:
     QFile file;
     const double* data=nullptr;
