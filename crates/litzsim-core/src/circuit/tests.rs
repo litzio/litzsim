@@ -359,6 +359,31 @@ fn batch_is_atomic_and_receipt_tracks_net_merges_deletes_and_undo() {
         undone.receipt.nets["input"].after,
         edited.receipt.nets["input"].before
     );
+
+    let setting = |key: &str, value| Operation::SetSimulation {
+        key: key.into(),
+        value,
+    };
+    let timed = apply(
+        &document,
+        &revision,
+        &[setting("stopTime_s", 10.0), setting("outputStep_s", 1e-3)],
+    )
+    .unwrap();
+    let saved = Document::from_bytes(&timed.document.to_bytes()).unwrap();
+    assert_eq!(
+        json!(saved)["simulation"],
+        json!({ "timeStep_s": 1e-7, "stopTime_s": 10.0, "outputStep_s": 1e-3 })
+    );
+    for (ops, target) in [
+        (vec![setting("timeStep_s", 0.0)], "timeStep_s"),
+        (vec![setting("outputStep_s", 1.5e-7)], "outputStep_s"),
+        (vec![setting("model", 1.0)], "simulation"),
+    ] {
+        let error = apply(&document, &revision, &ops).unwrap_err();
+        assert_eq!(error.code, "operationFailed");
+        assert_eq!(error.target_id.as_deref(), Some(target));
+    }
 }
 
 #[test]

@@ -181,6 +181,8 @@ fn serves_json_lines_until_stdin_closes() {
     let undone = request(undo.clone(), true);
     assert_eq!(undone["document"], blank["document"]);
     assert_eq!(undone["receipt"]["afterRevision"], blank["revision"]);
+    assert_eq!(undone["layout"]["revision"], blank["revision"]);
+    assert_eq!(undone["layout"]["symbols"], json!([]));
     undo["previous"] = edited["document"].clone();
     let rejected = request(undo, false);
     assert_eq!(rejected["error"]["code"], "previousMismatch");
@@ -199,6 +201,14 @@ fn serves_json_lines_until_stdin_closes() {
     let mut from_file = directory.run(&["layout", "circuit.litzsim", "--json"], true);
     from_file.as_object_mut().unwrap().remove("ok");
     assert_eq!(from_file, edited["layout"]);
+    for (key, source) in [
+        ("file", json!(file)),
+        ("document", edited["document"].clone()),
+    ] {
+        let mut drawn = request(json!({ "op": "layout", key: source }), true);
+        drawn.as_object_mut().unwrap().remove("ok");
+        assert_eq!(drawn, edited["layout"]);
+    }
     let replaced = request(
         json!({
             "op": "save", "file": file, "document": undone["document"],

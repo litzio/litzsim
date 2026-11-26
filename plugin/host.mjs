@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -83,11 +84,26 @@ export async function activate() {
     }),
     operations: {
       ping: () => invoke("ping"),
-      start: payload => invoke("start", payload),
+      new: () => invoke("new"),
+      inspect: payload => invoke("inspect", payload),
+      layout: payload => invoke("layout", payload),
+      apply: payload => invoke("apply", payload),
+      undo: payload => invoke("undo", payload),
+      save: async ({ folder, name, ...payload }) => {
+        if (folder === undefined) return invoke("save", payload);
+        if (typeof name !== "string" || !name || path.basename(name) !== name) {
+          return { ok: false, error: { code: "invalidRequest", message: "Expected a file name without folders." } };
+        }
+        // New circuits are saved without an expected revision, which refuses existing files.
+        const file = path.join(folder, name);
+        const response = await invoke("save", { ...payload, file });
+        return response.ok ? { ...response, file } : response;
+      },
+      start: ({ file, ...payload }) => invoke("start", { ...payload, directory: path.dirname(file) }),
       status: payload => invoke("status", payload),
       stop: payload => invoke("stop", payload),
       wave: payload => invoke("wave", payload),
     },
-    dispose,
+    dispose: () => dispose(),
   };
 }
