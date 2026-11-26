@@ -8,7 +8,10 @@ import { createInterface } from "node:readline";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { startRequest } from "./host.mjs";
-import { applyToAll, autoRange, axisFor, defaultRun, formatValue, niceStep, panRange, ticks, zoomAxis, zoomRange } from "./plot.js";
+import {
+  applyToAll, autoRange, axisFor, defaultRun, formatValue, keepSignals, keepView, niceStep, panRange, readTimeAxis, ticks,
+  timeAxisProblem, zoomAxis, zoomRange,
+} from "./plot.js";
 import { PARTS, ROTATE_SHORTCUT, shortcutOf } from "./parts.js";
 import { deleteSelection, isDirty, nearestPair, selectInBox, selectedSegmentIndex, selectionBox } from "./rules.js";
 
@@ -154,16 +157,16 @@ test("a second unit goes to the right axis; the same unit stays left", () => {
 
 test("applying settings to all graphs copies grids and automatic choices, and typed ranges only to the same signals", () => {
   const axis = (auto, min = null, max = null, step = null) => ({ auto, min, max, step });
-  const manual = { major: true, minor: false, timeStep: null, left: axis(false, 0, 12, 2), right: axis(false, -1, 1, 0.5) };
+  const manual = { major: true, minor: false, left: axis(false, 0, 12, 2), right: axis(false, -1, 1, 0.5) };
   const graphs = [
     { id: 1, signals: [{ name: "VC_V", unit: "V", axis: "left" }], settings: manual },
     { id: 2, signals: [{ name: "VC_V", unit: "V", axis: "left" }, { name: "AM1_A", unit: "A", axis: "right" }], settings: manual },
     { id: 3, signals: [{ name: "VM1_V", unit: "V", axis: "left" }], settings: manual },
   ];
-  const chosen = { major: false, minor: true, timeStep: 5e-5, left: axis(false, 3.5, 5.5), right: axis(true) };
+  const chosen = { major: false, minor: true, left: axis(false, 3.5, 5.5), right: axis(true) };
   const applied = applyToAll(graphs, 2, chosen);
   assert.deepEqual(applied[1].settings, chosen);
-  for (const graph of applied) assert.deepEqual([graph.settings.major, graph.settings.minor, graph.settings.timeStep], [false, true, 5e-5]);
+  for (const graph of applied) assert.deepEqual([graph.settings.major, graph.settings.minor], [false, true]);
   // VC_V gets the typed range; the gate voltage keeps its own range but takes the automatic step.
   assert.deepEqual(applied[0].settings.left, chosen.left);
   assert.deepEqual(applied[2].settings.left, axis(false, 0, 12, null));
@@ -180,6 +183,49 @@ test("time zoom keeps the pointer time and stays inside the run; panning stops a
   assert.ok(Math.abs(narrowest[1] - narrowest[0] - 4e-7) < 1e-15);
   assert.deepEqual(panRange([2e-4, 4e-4], -1, full), [0, 2e-4]);
   assert.deepEqual(panRange([2e-4, 4e-4], 1, full), [8e-4, 1e-3]);
+});
+
+test("the time axis takes typed times with property-panel prefixes and refuses a range it cannot show", () => {
+  const full = [0, 1e-3];
+  // Untouched fields arrive as the live numbers and pass unchanged; typed ones are parsed.
+  assert.deepEqual(readTimeAxis({ from: 2e-4, to: 4e-4, step: null }, full), { range: [2e-4, 4e-4], step: null });
+  assert.deepEqual(readTimeAxis({ from: "0.5m", to: 1e-3, step: "50u" }, full), { range: [5e-4, 1e-3], step: 50 * 1e-6 });
+  assert.deepEqual(readTimeAxis({ from: 0, to: 1e-3, step: " " }, full).step, null);
+  // A formatted end a hair past the run is the run's end, not "out of range".
+  assert.deepEqual(readTimeAxis({ from: 0, to: "1.0000000001m", step: null }, full).range, full);
+
+  const refused = (fields, expected) => assert.deepEqual(Object.keys(readTimeAxis(fields, full).problems ?? {}), expected);
+  refused({ from: "0.6m", to: "0.2m", step: null }, ["to"]);
+  refused({ from: "0.5m", to: "0.5m", step: null }, ["to"]);
+  refused({ from: "-1u", to: "1m", step: null }, ["from"]);
+  refused({ from: 0, to: "2m", step: null }, ["to"]);
+  refused({ from: "1 ms", to: "abc", step: "0" }, ["from", "to", "step"]);
+  refused({ from: 0, to: 1e-3, step: "-1u" }, ["step"]);
+  // A step that would draw more than 400 grid lines over the typed range.
+  refused({ from: 0, to: 1e-3, step: "1n" }, ["step"]);
+  assert.match(timeAxisProblem(readTimeAxis({ from: 0, to: "2m", step: null }, full).problems), /^끝: 실행 구간 0 s – 1 ms/);
+});
+
+test("a new run keeps graphs, settings and the zoomed time range; only signals it did not record leave", () => {
+  const settings = { major: true, minor: true, left: { auto: false, min: 3.5, max: 5.5, step: 0.5 }, right: { auto: true, min: null, max: null, step: null } };
+  const graphs = [
+    { id: 1, signals: [{ name: "VC_V", unit: "V", axis: "left" }], settings },
+    { id: 2, signals: [{ name: "VC_V", unit: "V", axis: "left" }, { name: "AM1_A", unit: "A", axis: "right" }], settings },
+    { id: 3, signals: [], settings },
+  ];
+  const kept = keepSignals(graphs, [{ name: "L1_A", unit: "A" }, { name: "VC_V", unit: "V" }]);
+  assert.deepEqual(kept.map(graph => graph.id), [1, 2, 3]);
+  assert.equal(kept[0], graphs[0], "a graph whose signals all remain is untouched");
+  assert.deepEqual(kept[1].signals, [{ name: "VC_V", unit: "V", axis: "left" }]);
+  assert.equal(kept[1].settings, settings);
+  assert.equal(kept[2], graphs[2]);
+
+  // A zoomed view stays; a whole-run view follows the new run; a view past its end is clipped or reset.
+  assert.deepEqual(keepView([2e-4, 4e-4], [0, 1e-3], [0, 2e-3]), [2e-4, 4e-4]);
+  assert.deepEqual(keepView([0, 1e-3], [0, 1e-3], [0, 2e-3]), [0, 2e-3]);
+  assert.deepEqual(keepView([0, 1e-3 * (1 - 1e-12)], [0, 1e-3], [0, 5e-4]), [0, 5e-4]);
+  assert.deepEqual(keepView([8e-4, 1e-3 - 1e-5], [0, 1e-3], [0, 9e-4]), [8e-4, 9e-4]);
+  assert.deepEqual(keepView([6e-4, 8e-4], [0, 1e-3], [0, 5e-4]), [0, 5e-4]);
 });
 
 test("the waveform window opens the newest completed run of the circuit folder and reads it by file", async () => {
