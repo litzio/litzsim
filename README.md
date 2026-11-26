@@ -44,7 +44,7 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 - `inspect`는 회로 문서, 정규화한 문서의 `revision`, 읽은 파일 바이트의 `diskRevision`, 단자별 네트와 격자 좌표, 계기 기준 방향을 반환합니다. 미접속 단자는 `missingPins`에서 확인할 수 있습니다.
 - `apply`와 `undo`는 문서와 receipt를 반환하고 파일을 교체합니다. receipt는 작업 전후 revision, 생성·수정·삭제된 소자 ID, 변경된 네트별 전후 단자 목록, 이 작업으로 두 단자가 새로 같은 네트가 된 전압원(직류·사인 전압원, PWM) ID 목록 `shortedSources`를 담습니다. 실패하면 JSON 오류와 0이 아닌 종료 코드를 반환합니다. 배치 연산 오류에는 1부터 시작하는 연산 번호와 대상 ID가 들어갑니다.
 - `undo`는 현재 문서와 스냅샷의 revision을 각각 receipt의 `afterRevision`, `beforeRevision`과 대조합니다. 스냅샷이 다르면 `previousMismatch`를 반환합니다.
-- `layout`은 같은 문서 revision의 기호·단자·직각 배선·접속점·교차 점프·라벨과 겹침 진단을 반환합니다. 좌표와 라벨 치수는 [회로도 기하 규약](docs/layout.md)을 따릅니다.
+- `layout`은 같은 문서 revision의 기호·단자·직각 배선·접속점·교차 점프·라벨과 겹침 진단을 반환합니다. 배선 기하는 네트의 단자 배열 순서와 무관하며, 라벨은 소유 기호 주변에 배치합니다. 좌표와 라벨 치수는 [회로도 기하 규약](docs/layout.md)을 따릅니다.
 
 | `ops.json`의 `op` | 필드 |
 | --- | --- |
@@ -57,7 +57,7 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 | `disconnect` | `pin` |
 | `delete` | `id` |
 | `setSimulation` | `key`(`timeStep_s`, `stopTime_s`, `outputStep_s`), `value` |
-| `insertInBranch` | `type`(두 단자 소자, 예: `ammeter`), `layout` 선분의 `terminals`, `from`, `to`. 선분을 끊고 소자를 직렬로 넣습니다. 첫 단자(전류계 `p`)는 `terminals[0]` 쪽에 연결하므로 전류계는 `terminals[0]` 쪽에서 `terminals[1]` 쪽으로 흐르는 전류를 잽니다. [가지에 끼우기](docs/layout.md#가지에-끼우기) |
+| `insertInBranch` | `type`(두 단자 소자, 예: `ammeter`), `layout` 선분의 `terminals`, `from`, `to`. 선분을 끊고 소자를 직렬로 넣습니다. 첫 단자(전류계 `p`)는 `terminals[0]` 쪽에 연결하므로 전류계는 `terminals[0]` 쪽에서 `terminals[1]` 쪽으로 흐르는 전류를 잽니다. 3격자 이하에서 전류계와 이웃 기호의 획이 겹치면 연산을 거절합니다. [가지에 끼우기](docs/layout.md#가지에-끼우기) |
 
 ### 회로 파일과 상주 모드
 

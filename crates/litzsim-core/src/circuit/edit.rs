@@ -331,7 +331,6 @@ fn insert_in_branch(
         return Err(Error::invalid(kind, "expected a two-terminal part"));
     };
     let (net, far) = crate::layout::branch_cut(document, terminals, from, to)?;
-    let circuit = &mut document.0;
     // Center the part on the segment and turn its first pin toward `from`.
     let pitch = crate::layout::GRID_PITCH;
     let center = |axis: usize| {
@@ -354,6 +353,17 @@ fn insert_in_branch(
             turned.orient(definition.pin_offsets[0]) == toward
         })
         .filter(|&rotation| rotation != 0);
+    let length = from[0].abs_diff(to[0]) + from[1].abs_diff(to[1]);
+    if kind == "ammeter"
+        && length <= (3 * pitch) as u64
+        && let Some(neighbor) = crate::layout::ammeter_overlap(document, placement, [from, to])
+    {
+        return Err(Error::invalid(
+            neighbor,
+            format!("ammeter would overlap {neighbor} on this short segment"),
+        ));
+    }
+    let circuit = &mut document.0;
     let id = next_id(definition.id_prefix, &circuit.parts);
     circuit.layout.insert(id.clone(), placement);
     circuit.parts.insert(

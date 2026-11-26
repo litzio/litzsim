@@ -257,7 +257,13 @@ pub fn layout(document: &Document) -> Layout<'_> {
             symbol: Some((symbol.id, symbol.center)),
         })
         .collect();
-    result.labels = symbols::place_labels(captions, &result.symbols, &result.pins, &mut obstacles);
+    result.labels = symbols::place_labels(
+        captions,
+        &result.symbols,
+        &result.pins,
+        &mut obstacles,
+        &mut result.issues,
+    );
     for (i, a) in obstacles.iter().enumerate() {
         for b in &obstacles[i + 1..] {
             let contact = if a.symbol.is_some() && b.symbol.is_some() {
@@ -330,6 +336,27 @@ pub(crate) fn branch_cut(
         .collect();
     debug_assert!(pins.contains(&terminals[1]) && !pins.contains(&terminals[0]));
     Ok((net.to_owned(), pins))
+}
+
+pub(crate) fn ammeter_overlap(
+    document: &Document,
+    placement: crate::circuit::Placement,
+    endpoints: [Point; 2],
+) -> Option<&str> {
+    let meter: Vec<_> = symbols::ink_bounds("ammeter", placement).collect();
+    document
+        .layout_parts()
+        .find(|part| {
+            symbols::ink_bounds(part.kind, part.placement).any(|neighbor| {
+                meter.iter().any(|&stroke| {
+                    // A lead may meet its neighbor at the end of the cut.
+                    stroke.intersection(neighbor).is_some_and(|contact| {
+                        contact.min != contact.max || !endpoints.contains(&contact.min)
+                    })
+                })
+            })
+        })
+        .map(|part| part.id)
 }
 
 #[cfg(test)]
