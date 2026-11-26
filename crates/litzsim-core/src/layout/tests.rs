@@ -8,6 +8,61 @@ const RLC: &[u8] = include_bytes!("../../../../examples/rlc.litzsim");
 const BUCK: &[u8] = include_bytes!("../../../../examples/buck.litzsim");
 
 #[test]
+fn sum_slots_place_inputs_in_order_on_the_grid() {
+    let mut circuit = json!({
+        "version": 1, "simulation": {"timeStep_s": 1, "stopTime_s": 1},
+        "parts": {"SUM": {"type": "sum", "parameters": {"inputs": "|++", "iconShape": "round"}}},
+        "nets": {}, "layout": {"SUM": {"x": 0, "y": 0}}
+    });
+    for (inputs, shape, positions) in [
+        ("|++", "round", vec![[-32, 0], [0, 32]]),
+        ("|+-", "round", vec![[-32, 0], [0, 32]]),
+        ("+-", "round", vec![[0, -32], [0, 32]]),
+        ("+++", "round", vec![[0, -32], [-32, 0], [0, 32]]),
+        ("3", "round", vec![[0, -32], [-32, 0], [0, 32]]),
+        (
+            "++|--",
+            "rectangular",
+            vec![[-32, -64], [-32, -32], [-32, 32], [-32, 64]],
+        ),
+    ] {
+        let parameters = &mut circuit["parts"]["SUM"]["parameters"];
+        parameters["inputs"] = json!(inputs);
+        parameters["iconShape"] = json!(shape);
+        let document = Document::from_bytes(&serde_json::to_vec(&circuit).unwrap()).unwrap();
+        let drawing = layout(&document);
+        check_geometry(&document, &drawing);
+        assert!(drawing.issues.is_empty(), "{inputs}: {:?}", drawing.issues);
+        assert_eq!(drawing.pins.len(), positions.len() + 1);
+        assert_eq!(drawing.pins["SUM.out"].at, [32, 0]);
+        for (index, at) in positions.into_iter().enumerate() {
+            let pin = &drawing.pins[&format!("SUM.in{}", index + 1)];
+            assert_eq!(pin.at, at, "{inputs}");
+            assert_eq!(pin.signal_direction, Some("input"));
+        }
+        let round = drawing.symbols[0]
+            .strokes
+            .iter()
+            .any(|stroke| matches!(stroke, Stroke::Circle { .. }));
+        assert_eq!(round, shape == "round");
+    }
+    for inputs in [
+        json!(""),
+        json!("|||"),
+        json!("0"),
+        json!("+x"),
+        json!("1.5"),
+        json!(-3),
+        json!(3),
+    ] {
+        circuit["parts"]["SUM"]["parameters"]["inputs"] = inputs;
+        let error = Document::from_bytes(&serde_json::to_vec(&circuit).unwrap()).unwrap_err();
+        assert_eq!(error.target_id.as_deref(), Some("SUM"));
+        assert!(error.message.starts_with("inputs"));
+    }
+}
+
+#[test]
 fn buck_probe_routes_its_only_terminal_without_overlapping_labels() {
     let document =
         Document::from_bytes(include_bytes!("../../../../examples/buck-probe.litzsim")).unwrap();

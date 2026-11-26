@@ -15,7 +15,7 @@ import {
 import { CATEGORIES, DUTY_UPDATE_LABELS, PARTS, RECORDING_LABELS, ROTATE_SHORTCUT, libraryCategories, partLabel, shortcutOf } from "./parts.js";
 import {
   deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex, selectionBox,
-  undoRenamed, wireStyle,
+  sumParameterOps, undoRenamed, wireStyle,
 } from "./rules.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -137,12 +137,22 @@ test("the control library, recording and wire styles follow the core layout", as
   assert.equal(refused.ok, false);
   assert.match(refused.error.message, /^Cannot connect signal and electrical terminals:/);
 
-  const signStroke = (symbol, y) => symbol.strokes.some(stroke => stroke.kind === "polyline"
-    && JSON.stringify(stroke.points) === JSON.stringify([[-11, y - 4], [-11, y + 4]]));
-  assert.ok(signStroke(sum, -32));
-  assert.ok(!signStroke(sum, 32));
-  const changed = await apply(sheet, [{ op: "setParameter", id: "SUM1", key: "sign2", value: 1 }]);
-  assert.ok(signStroke(changed.layout.symbols.find(symbol => symbol.id === "SUM1"), 32));
+  assert.ok(sum.strokes.some(stroke => stroke.kind === "circle"));
+  assert.deepEqual(sheet.document.parts.SUM1.parameters, { inputs: "|+-", iconShape: "round" });
+  const signs = sumParameterOps("SUM1", "inputs", "|++-");
+  const shape = sumParameterOps("SUM1", "iconShape", "rectangular");
+  assert.deepEqual(signs, [{ op: "setParameter", id: "SUM1", key: "inputs", value: "|++-" }]);
+  assert.deepEqual(shape, [{ op: "setParameter", id: "SUM1", key: "iconShape", value: "rectangular" }]);
+  const changed = await apply(sheet, [...signs, ...shape]);
+  assert.deepEqual(changed.document.parts.SUM1.parameters, { inputs: "|++-", iconShape: "rectangular" });
+  assert.equal(changed.layout.pins["SUM1.in3"].signalDirection, "input");
+  assert.equal(changed.layout.symbols.find(symbol => symbol.id === "SUM1").strokes.some(stroke => stroke.kind === "circle"), false);
+  const invalid = await send("apply", {
+    document: sheet.document, expectedRevision: sheet.revision, ops: sumParameterOps("SUM1", "inputs", "|"),
+  });
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.error.targetId, "SUM1");
+  assert.match(invalid.error.message, /^inputs /);
 });
 
 test("new control and switch types use the same display names in the library and properties", async () => {
@@ -184,7 +194,7 @@ test("suggestions never merge two connected nets (review repro: R1 dragged to [1
 
 test("a nearby terminal is suggested by distance and the core validates its net", async () => {
   const opened = await call("inspect", { file: `${root}examples/control-signals.litzsim` });
-  const sheet = await apply(opened, [{ op: "add", type: "constant", grid: [2, 3] }]);
+  const sheet = await apply(opened, [{ op: "add", type: "constant", grid: [2, 4] }]);
   const { a, b, distance } = nearestPair(sheet.layout, "CONST2");
   assert.deepEqual([a, b, distance], ["CONST2.out", "SUM1.in1", 32]);
   const refused = await send("apply", {

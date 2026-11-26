@@ -83,8 +83,6 @@ export const PARAMETERS = {
   startTime_s: ["시작 시각", "s"],
   slope_per_s: ["기울기", "1/s"],
   finalValue: ["최종값", ""],
-  sign1: ["입력 1 부호", ""],
-  sign2: ["입력 2 부호", ""],
   min: ["하한", ""],
   max: ["상한", ""],
   initiallyClosed: ["초기 닫힘 (0/1)", ""],

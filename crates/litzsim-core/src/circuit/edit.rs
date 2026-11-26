@@ -1,5 +1,6 @@
-use super::{CircuitV1, Document, Error, Mirror, Part, RecordQuantity, part_definition};
+use super::{CircuitV1, Document, Error, Mirror, Part, RecordQuantity, Sum, part_definition, sum};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Deserialize)]
@@ -25,7 +26,7 @@ pub enum Operation {
     SetParameter {
         id: String,
         key: String,
-        value: f64,
+        value: Value,
     },
     SetRecording {
         id: String,
@@ -211,11 +212,18 @@ impl CircuitV1 {
                 let definition = part_definition(kind)
                     .ok_or_else(|| Error::invalid(kind, "unknown part type"))?;
                 let id = next_id(definition.id_prefix, &self.parts);
-                let parameters = definition
-                    .defaults
-                    .iter()
-                    .map(|&(key, value)| (key.to_owned(), value.into()))
-                    .collect();
+                let parameters = if kind == "sum" {
+                    BTreeMap::from([
+                        ("inputs".into(), sum::DEFAULT_INPUTS.into()),
+                        ("iconShape".into(), sum::DEFAULT_SHAPE.into()),
+                    ])
+                } else {
+                    definition
+                        .defaults
+                        .iter()
+                        .map(|&(key, value)| (key.to_owned(), value.into()))
+                        .collect()
+                };
                 let [x, y] = grid.unwrap_or_default();
                 self.layout.insert(
                     id.clone(),
@@ -269,21 +277,46 @@ impl CircuitV1 {
                 position.normalize_orientation();
             }
             Operation::SetParameter { id, key, value } => {
-                self.require_part(id)?;
-                let parameter = self
-                    .parts
-                    .get_mut(id)
-                    .unwrap()
-                    .parameters
-                    .get_mut(key)
-                    .ok_or_else(|| Error::invalid(id, format!("unknown parameter: {key}")))?;
-                if !value.is_finite() {
+                let part = self.require_part(id)?;
+                if !part.parameters.contains_key(key) {
+                    return Err(Error::invalid(id, format!("unknown parameter: {key}")));
+                }
+                let value = if part.kind == "sum" {
+                    let mut parameters = part.parameters.clone();
+                    parameters.insert(key.clone(), value.clone());
+                    let revised = Sum::read(id, &parameters)?;
+                    if key == "inputs" {
+                        let before = part.sum().expect("validated sum").signs().count();
+                        let after = revised.signs().count();
+                        let removed: Vec<_> = (after + 1..=before)
+                            .map(|index| format!("{id}.in{index}"))
+                            .collect();
+                        if let Some(pin) = removed.iter().find(|pin| self.net_of(pin).is_some()) {
+                            return Err(Error::invalid(
+                                id,
+                                format!("Disconnect {pin} before removing this input"),
+                            ));
+                        }
+                        if let Some(bends) = &mut self.bends {
+                            for pin in removed {
+                                bends.remove(&pin);
+                            }
+                        }
+                    }
+                    value.clone()
+                } else if let Some(value) = value.as_f64().filter(|value| value.is_finite()) {
+                    value.into()
+                } else {
                     return Err(Error::invalid(
                         id,
                         format!("invalid value for parameter: {key}"),
                     ));
-                }
-                *parameter = (*value).into();
+                };
+                self.parts
+                    .get_mut(id)
+                    .unwrap()
+                    .parameters
+                    .insert(key.clone(), value);
             }
             Operation::SetRecording {
                 id,
@@ -324,8 +357,7 @@ impl CircuitV1 {
             }
             Operation::Delete { id } => {
                 let part = self.require_part(id)?;
-                let definition = part_definition(&part.kind).expect("validated part");
-                for pin in definition.pins {
+                for (pin, _, _) in part.pins() {
                     let terminal = format!("{id}.{pin}");
                     self.disconnect(&terminal);
                     if let Some(bends) = &mut self.bends {
@@ -346,7 +378,7 @@ impl CircuitV1 {
 
     fn rename(&mut self, id: &str, new_id: &str) -> Result<(), Error> {
         let part = self.require_part(id)?;
-        let pins = part_definition(&part.kind).expect("validated part").pins;
+        let pins = part.pins();
         if new_id == id {
             return Err(Error::invalid(id, "new ID is the same as the current ID"));
         }
@@ -386,7 +418,7 @@ impl CircuitV1 {
         if let Some(placement) = self.layout.remove(id) {
             self.layout.insert(new_id.into(), placement);
         }
-        for pin in pins {
+        for (pin, _, _) in pins {
             let (old, new) = (format!("{id}.{pin}"), format!("{new_id}.{pin}"));
             for terminal in self.nets.values_mut().flatten() {
                 if *terminal == old {
@@ -641,7 +673,7 @@ fn receipt(
             Some(old)
                 if &before.0.parts[old] != part
                     || before.0.layout.get(old) != after.0.layout.get(id)
-                    || part_definition(&part.kind).unwrap().pins.iter().any(|pin| {
+                    || part.pins().into_iter().any(|(pin, _, _)| {
                         let bend = |document: &Document, id: &str| {
                             let bends = document.0.bends.as_ref()?;
                             bends.get(&format!("{id}.{pin}")).cloned()

@@ -70,8 +70,8 @@
     "ERR": {
       "type": "sum",
       "parameters": {
-        "sign1": 1,
-        "sign2": -1
+        "inputs": "|+-",
+        "iconShape": "round"
       },
       "record": {
         "output": true

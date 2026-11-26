@@ -16,7 +16,7 @@ enum Equation {
         slope: f64,
         final_value: f64,
     },
-    Sum(f64, f64),
+    Sum(Vec<f64>),
     Gain(f64),
     Limiter {
         min: f64,
@@ -74,13 +74,7 @@ impl Equation {
                     final_value,
                 }
             }
-            "sum" => {
-                let (a, b) = (param("sign1"), param("sign2"));
-                if a.abs() != 1.0 || b.abs() != 1.0 {
-                    return Err(Error::invalid(id, "Sum signs must be +1 or -1"));
-                }
-                Self::Sum(a, b)
-            }
+            "sum" => Self::Sum(part.sum().expect("validated sum").signs().collect()),
             "gain" => Self::Gain(param("gain")),
             "limiter" | "integrator" | "pi" => {
                 let (min, max) = (param("min"), param("max"));
@@ -169,12 +163,11 @@ impl<'a> Control<'a> {
         let mut recorded = Vec::new();
         let mut pwm_inputs = BTreeMap::new();
         for (id, part) in parts {
-            let definition = part_definition(&part.kind).expect("validated part");
             let mut inputs = Vec::new();
-            for pin in definition
-                .pins
-                .iter()
-                .filter(|pin| definition.pin_kind(pin) == PinKind::SignalInput)
+            for (pin, _, _) in part
+                .pins()
+                .into_iter()
+                .filter(|(_, _, kind)| *kind == PinKind::SignalInput)
             {
                 let terminal = format!("{id}.{pin}");
                 let driver = pin_nets[&terminal].and_then(|net| drivers.get(net));
@@ -296,7 +289,16 @@ impl<'a> Control<'a> {
                     final_value,
                 } => ((time - *start).max(0.0) * *slope)
                     .clamp(final_value.min(0.0), final_value.max(0.0)),
-                Equation::Sum(a, b) => *a * input(0) + *b * input(1),
+                Equation::Sum(signs) => {
+                    let mut terms = signs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, sign)| sign * input(index));
+                    // Starting with the first signed term preserves the old sum's
+                    // arithmetic, including a possible negative zero.
+                    let first = terms.next().expect("sum has at least one input");
+                    terms.fold(first, |total, term| total + term)
+                }
                 Equation::Gain(gain) => *gain * input(0),
                 Equation::Limiter { min, max } => input(0).clamp(*min, *max),
                 Equation::Integrator { state, min, max } => {

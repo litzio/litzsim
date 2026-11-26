@@ -6,7 +6,7 @@ import {
 import { Schematic, sheetView, contentBounds } from "./schematic.jsx";
 import {
   EMPTY_SELECTION, deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex,
-  selectionBox, undoRenamed,
+  selectionBox, sumParameterOps, undoRenamed,
 } from "./rules.js";
 import { Waveform } from "./waveform.jsx";
 
@@ -147,7 +147,44 @@ const SIMULATION = [
   ["controlSamplePeriod_s", "제어 샘플 주기", "s"],
 ];
 
-function Properties({ ui, sheet, selectedId, busy, edit, rename }) {
+function SumProperties({ ui, id, parameters, disabled, commit }) {
+  const { inputs, iconShape } = parameters;
+  const [draft, setDraft] = React.useState(inputs);
+  const [inputError, setInputError] = React.useState(null);
+  const [shapeError, setShapeError] = React.useState(null);
+  const pending = React.useRef(false);
+  React.useEffect(() => { setDraft(inputs); setInputError(null); }, [inputs]);
+  React.useEffect(() => { setShapeError(null); }, [iconShape]);
+  async function commitInputs() {
+    if (disabled || pending.current || draft === inputs) return;
+    pending.current = true;
+    try {
+      setInputError(await commit(id, "inputs", draft));
+    } finally {
+      pending.current = false;
+    }
+  }
+  const errorStyle = { color: "var(--id-color-danger)", fontSize: "var(--font-size-xs)" };
+  return <>
+    <label style={styles.field}>
+      <span>입력 부호</span>
+      <ui.Input data-parameter="inputs" value={draft} disabled={disabled} aria-invalid={!!inputError}
+        onChange={event => { setDraft(event.target.value); setInputError(null); }}
+        onBlur={commitInputs} onKeyDown={event => {
+          if (event.key === "Enter") { event.preventDefault(); commitInputs(); }
+          if (event.key === "Escape") { setDraft(inputs); setInputError(null); }
+        }} />
+      {inputError && <span role="alert" style={errorStyle}>{inputError}</span>}
+    </label>
+    <ui.Select label="모양" value={iconShape} disabled={disabled} options={[
+      { value: "round", label: "원형" },
+      { value: "rectangular", label: "사각형" },
+    ]} onValueChange={async value => setShapeError(await commit(id, "iconShape", value))} />
+    {shapeError && <span role="alert" style={errorStyle}>{shapeError}</span>}
+  </>;
+}
+
+function Properties({ ui, sheet, selectedId, busy, edit, rename, editSumParameter }) {
   const part = selectedId && sheet.document.parts[selectedId];
   const pins = Object.entries(sheet.layout.pins);
   if (!part) {
@@ -184,7 +221,9 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename }) {
     </div>
     {Object.keys(part.parameters).length > 0 && <div style={styles.group}>
       <h4 style={{ margin: 0 }}>값</h4>
-      {Object.entries(part.parameters).map(([name, value]) => <NumberField key={name} ui={ui} owner={selectedId}
+      {part.type === "sum" ? <SumProperties key={selectedId} ui={ui} id={selectedId}
+        parameters={part.parameters} disabled={busy} commit={editSumParameter} />
+        : Object.entries(part.parameters).map(([name, value]) => <NumberField key={name} ui={ui} owner={selectedId}
         name={name} text={(PARAMETERS[name] ?? [name])[0]} unit={(PARAMETERS[name] ?? [name, ""])[1]} value={value}
         disabled={busy} onCommit={(key, next) => edit([{ op: "setParameter", id: selectedId, key, value: next }])} />)}
     </div>}
@@ -451,6 +490,17 @@ export function Editor({ ui, adapter }) {
         return null;
       } catch (failure) {
         return renameProblem(failure);
+      }
+    });
+  }
+
+  function editSumParameter(id, key, value) {
+    return perform(async () => {
+      try {
+        await applyNow(sumParameterOps(id, key, value));
+        return null;
+      } catch (failure) {
+        return failure.message;
       }
     });
   }
@@ -977,7 +1027,8 @@ export function Editor({ ui, adapter }) {
             </div>
           </div>
           <aside aria-label="속성" style={styles.panel}>
-            <Properties ui={ui} sheet={sheet} selectedId={selectedId} busy={busy} edit={edit} rename={rename} />
+            <Properties ui={ui} sheet={sheet} selectedId={selectedId} busy={busy} edit={edit} rename={rename}
+              editSumParameter={editSumParameter} />
           </aside>
         </div>
         <footer style={styles.status} aria-live="polite">
