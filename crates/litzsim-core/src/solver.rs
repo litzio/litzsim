@@ -150,14 +150,18 @@ pub fn simulate_with_warnings(
             && timed_switches
                 .iter()
                 .any(|switch| same_clock_time(switch.at, time));
-        if at_stop && !control_changed && !timed_edge {
+        let pwm_edge_at_stop = at_stop
+            && clocks
+                .iter()
+                .any(|pulse| same_clock_time(pulse.next_edge(previous), time));
+        if at_stop && !control_changed && !timed_edge && !pwm_edge_at_stop {
             return Ok((wave, warnings));
         }
         if on_grid {
             tick += 1;
         }
         // At stop, use the interval that would follow this sample to solve
-        // the right limit for a time switch or a changed control output.
+        // the right limit at a switch edge or a changed control output.
         let grid = tick as f64 * step;
         let boundary = if at_stop { grid } else { stop.min(grid) };
         let edge = clocks
@@ -187,18 +191,14 @@ pub fn simulate_with_warnings(
                 "Time step below clock resolution",
             ));
         }
-        // A switch edge at this sample switches the next interval. Record the
-        // right limit as a second row at the same time: capacitor voltages and
-        // inductor currents stay, and the circuit is solved with the switch
-        // states of the next interval. Switch states are restored afterwards so
-        // the following steps are computed exactly as without this row.
-        // Include any updated control outputs in this same right-limit row.
+        // Solve the right limit at a switch edge even off the recording grid:
+        // incompatible switch states must be diagnosed before integrating
+        // past the edge. Restore the switch states for the next time step.
         let right = (time + next) / 2.0;
-        let switching = record
-            && (timed_edge
-                || clocks
-                    .iter()
-                    .any(|pulse| pulse.is_high(time - h / 2.0) != pulse.is_high(right)));
+        let switching = timed_edge
+            || clocks
+                .iter()
+                .any(|pulse| pulse.is_high(time - h / 2.0) != pulse.is_high(right));
         if switching {
             let switches: Vec<_> = devices.iter().map(|d| (d.driven, d.conducting)).collect();
             let limit = Sample {
@@ -217,14 +217,17 @@ pub fn simulate_with_warnings(
             };
             solve_sample(&mut devices, &mut system, settle)?;
             solve_sample(&mut devices, &mut system, limit)?;
-            push_row(
-                &mut wave,
-                &devices,
-                &probes,
-                control.as_ref(),
-                time,
-                &system.rhs,
-            )?;
+            // Preserve the existing single final row at a PWM-only edge.
+            if record && (!at_stop || timed_edge || control_changed) {
+                push_row(
+                    &mut wave,
+                    &devices,
+                    &probes,
+                    control.as_ref(),
+                    time,
+                    &system.rhs,
+                )?;
+            }
             for (device, (driven, conducting)) in devices.iter_mut().zip(switches) {
                 (device.driven, device.conducting) = (driven, conducting);
             }

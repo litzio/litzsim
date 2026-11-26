@@ -347,6 +347,10 @@ fn timed_switch_closes_a_parallel_rc_load_off_grid() {
         }
         closed |= row[0] == edge;
     }
+    circuit["simulation"]["outputStep_s"] = json!(20e-6);
+    let sparse = simulate(&document(&circuit), || false).unwrap();
+    let full_grid = wave.rows().filter(|row| row[0] != edge).step_by(10);
+    assert!(sparse.rows().eq(full_grid));
     circuit["simulation"]["stopTime_s"] = json!(edge);
     let short = simulate(&document(&circuit), || false).unwrap();
     assert_eq!(
@@ -356,6 +360,73 @@ fn timed_switch_closes_a_parallel_rc_load_off_grid() {
             .collect::<Vec<_>>(),
         at_edge
     );
+}
+
+fn capacitor_short_at_edge() -> Value {
+    let mut circuit: Value = serde_json::from_str(LOAD_STEP).unwrap();
+    circuit["parts"].as_object_mut().unwrap().remove("R2");
+    circuit["layout"].as_object_mut().unwrap().remove("R2");
+    circuit["nets"].as_object_mut().unwrap().remove("branch");
+    circuit["nets"]["output"] = json!(["R1.n", "C1.p", "SW1.p"]);
+    circuit
+}
+
+#[test]
+fn timed_switch_capacitor_short_is_diagnosed_off_the_recording_grid() {
+    let mut circuit = capacitor_short_at_edge();
+    for stride in [None, Some(20e-6)] {
+        if let Some(stride) = stride {
+            circuit["simulation"]["outputStep_s"] = json!(stride);
+        }
+        let error = simulate(&document(&circuit), || false).unwrap_err();
+        assert_eq!(error.code, "singularCircuit");
+        assert_eq!(error.target_id.as_deref(), Some("SW1"));
+        assert_eq!(
+            error.message,
+            "Ideal voltage constraint loop at 0.000755 s: SW1, C1"
+        );
+    }
+}
+
+#[test]
+fn pwm_capacitor_short_is_diagnosed_off_the_recording_grid() {
+    let mut circuit = capacitor_short_at_edge();
+    circuit["parts"].as_object_mut().unwrap().remove("SW1");
+    circuit["layout"].as_object_mut().unwrap().remove("SW1");
+    circuit["parts"]["D1"] = json!({"type": "diode", "parameters": {}});
+    circuit["parts"]["PWM"] = json!({
+        "type": "pwm", "parameters": {"frequency_Hz": 0.5 / 755e-6, "duty": 0.5, "high_V": 10}
+    });
+    circuit["nets"]["output"] = json!(["R1.n", "C1.p", "D1.a"]);
+    circuit["nets"]["ground"] = json!(["V1.n", "C1.n", "PWM.ref", "GND.ref"]);
+    circuit["nets"]["gate"] = json!(["PWM.out", "D1.k"]);
+
+    let full = simulate(&document(&circuit), || false).unwrap_err();
+    assert_eq!(full.code, "singularCircuit");
+    for part in ["D1", "C1", "PWM"] {
+        assert!(full.message.contains(part), "{full:?}");
+    }
+    assert!(full.message.contains("at 0.000755 s"), "{full:?}");
+    circuit["simulation"]["outputStep_s"] = json!(20e-6);
+    let sparse = simulate(&document(&circuit), || false).unwrap_err();
+    assert_eq!(sparse.code, full.code);
+    assert_eq!(sparse.target_id, full.target_id);
+    assert_eq!(sparse.message, full.message);
+
+    circuit["simulation"]["stopTime_s"] = json!(755e-6);
+    circuit["simulation"]["controlSamplePeriod_s"] = json!(755e-6);
+    circuit["parts"]["STEP"] = json!({
+        "type": "step", "parameters": {"stepTime_s": 755e-6, "before": 0, "after": 1}
+    });
+    for record in [true, false] {
+        circuit["parts"]["STEP"]["record"] = json!({"output": record});
+        let Err(error) = simulate(&document(&circuit), || false) else {
+            panic!("expected the same short at the final PWM edge with record.output={record}");
+        };
+        assert_eq!(error.code, full.code);
+        assert_eq!(error.target_id, full.target_id);
+        assert_eq!(error.message, full.message);
+    }
 }
 
 #[test]
