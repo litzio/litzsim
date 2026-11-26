@@ -5,6 +5,8 @@ mod library;
 mod tests;
 
 pub use edit::{EditResult, MirrorAxis, NetChange, Operation, Receipt, apply, undo};
+#[cfg(windows)]
+pub use file::REPLACE_RETRY_DELAYS;
 pub(crate) use file::StagedFile;
 pub use file::{Opened, SaveMode, open, save};
 pub use library::{Measurement, PartDefinition, part_definition};
