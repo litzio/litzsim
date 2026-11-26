@@ -7,7 +7,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
-    let (path, opened, result) = match args {
+    let (result, disk_revision) = match args {
         [cmd, file, flag] if cmd == "inspect" && flag == "--json" => {
             return inspect_file(Path::new(file));
         }
@@ -33,7 +33,15 @@ pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
             let opened = circuit::open(path).map_err(core_error)?;
             let result =
                 circuit::apply(&opened.document, text_arg(revision)?, &ops).map_err(core_error)?;
-            (path, opened, result)
+            let disk_revision = circuit::save(
+                path,
+                &result.document,
+                SaveMode::Replace {
+                    expected_disk_revision: &opened.disk_revision,
+                },
+            )
+            .map_err(core_error)?;
+            (result, disk_revision)
         }
         [
             cmd,
@@ -60,27 +68,22 @@ pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
             && previous_flag == "--previous" =>
         {
             let path = Path::new(file);
-            let previous = circuit::open(Path::new(input)).map_err(core_error)?;
+            let bytes = read_input(input)?;
+            let previous = Document::from_bytes(&bytes).map_err(core_error)?;
             let opened = circuit::open(path).map_err(core_error)?;
             let result = circuit::undo(
                 &opened.document,
                 text_arg(after)?,
                 text_arg(before)?,
-                &previous.document,
+                &previous,
             )
             .map_err(core_error)?;
-            (path, opened, result)
+            let disk_revision =
+                circuit::save_snapshot(path, &bytes, &opened.disk_revision).map_err(core_error)?;
+            (result, disk_revision)
         }
         _ => return Err(usage()),
     };
-    let disk_revision = circuit::save(
-        path,
-        &result.document,
-        SaveMode::Replace {
-            expected_disk_revision: &opened.disk_revision,
-        },
-    )
-    .map_err(core_error)?;
     Ok(json!({
         "ok": true, "document": result.document, "receipt": result.receipt, "diskRevision": disk_revision
     }))

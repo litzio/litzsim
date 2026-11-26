@@ -290,6 +290,12 @@ fn new_parts_take_short_designators_and_skip_used_numbers() {
     )
     .unwrap();
     assert_eq!(inserted.receipt.created, ["AM1"]);
+    // Numbers skip IDs a rename took, in any case.
+    for (new_id, created) in [("VM2", "VM1"), ("vm1", "VM2")] {
+        let ops = [rename("VC", new_id), add("voltmeter")];
+        let renamed = apply(&rc, &rc.revision(), &ops).unwrap();
+        assert_eq!(renamed.receipt.created, [created]);
+    }
 }
 
 #[test]
@@ -775,6 +781,13 @@ fn receipt_reports_voltage_sources_newly_shorted_by_the_edit() {
     )
     .unwrap();
     assert!(later.receipt.shorted_sources.is_empty());
+    let renamed = apply(
+        &shorted.document,
+        &shorted.receipt.after_revision,
+        &[rename("V1", "Vin")],
+    )
+    .unwrap();
+    assert!(renamed.receipt.shorted_sources.is_empty());
     let undone = undo(
         &shorted.document,
         &shorted.receipt.after_revision,
@@ -797,4 +810,180 @@ fn receipt_reports_voltage_sources_newly_shorted_by_the_edit() {
     )
     .unwrap();
     assert_eq!(pwm.receipt.shorted_sources, ["PWM1"]);
+}
+
+fn rename(id: &str, new_id: &str) -> Operation {
+    Operation::Rename {
+        id: id.into(),
+        new_id: new_id.into(),
+    }
+}
+
+#[test]
+fn rename_updates_every_reference_round_trips_and_names_the_channel() {
+    let buck = Document::from_bytes(BUCK).unwrap();
+    let revision = buck.revision();
+    // Q1 has a net terminal, a placement and a bend; VC is the output voltmeter.
+    let edited = apply(
+        &buck,
+        &revision,
+        &[rename("Q1", "Q_high"), rename("VC", "Vout")],
+    )
+    .unwrap();
+    let receipt = &edited.receipt;
+    assert_eq!(
+        json!(receipt)["renamed"],
+        json!({"Q1": "Q_high", "VC": "Vout"})
+    );
+    assert!(receipt.created.is_empty() && receipt.deleted.is_empty());
+    assert!(receipt.modified.is_empty() && receipt.shorted_sources.is_empty());
+    assert_eq!(
+        json!(receipt.nets["output"]),
+        json!({
+            "before": ["L1.n", "C1.p", "R1.p", "VC.p"], "after": ["L1.n", "C1.p", "R1.p", "Vout.p"]
+        })
+    );
+    // The same file with every reference rewritten by hand.
+    let expected = String::from_utf8(BUCK.to_vec())
+        .unwrap()
+        .replace("\"Q1", "\"Q_high")
+        .replace("\"VC", "\"Vout");
+    assert_eq!(
+        edited.document,
+        Document::from_bytes(expected.as_bytes()).unwrap()
+    );
+    assert_eq!(edited.document.layout_bend("Q_high.d"), Some([0, 1]));
+
+    let drawn = crate::layout::layout(&edited.document);
+    assert!(drawn.labels.iter().any(|label| label.text == "Vout"));
+    assert!(
+        drawn
+            .labels
+            .iter()
+            .all(|label| label.part_id != "VC" && label.text != "VC")
+    );
+    assert!(drawn.pins.contains_key("Q_high.d") && !drawn.pins.contains_key("Q1.d"));
+
+    let folder = SaveTestDirectory::new("rename");
+    let path = folder.0.join("renamed.litzsim");
+    save(&path, &edited.document, SaveMode::New).unwrap();
+    let opened = open(&path).unwrap();
+    assert_eq!(opened.document, edited.document);
+    assert_eq!(opened.revision, receipt.after_revision);
+
+    let undone = undo(&opened.document, &opened.revision, &revision, &buck).unwrap();
+    assert_eq!(undone.document.to_bytes(), buck.to_bytes());
+    // Undo compares snapshots only, so the old IDs come back as created parts.
+    assert!(undone.receipt.renamed.is_empty());
+    assert_eq!(undone.receipt.created, ["Q1", "VC"]);
+    assert_eq!(undone.receipt.deleted, ["Q_high", "Vout"]);
+
+    // Runs name the channel after the new ID; the samples are the same circuit's.
+    let channel = |wave: &crate::waves::Waveform, name: &str| {
+        wave.channels().iter().position(|c| c.name == name)
+    };
+    let original = crate::solver::simulate(&buck, || false).unwrap();
+    let renamed = crate::solver::simulate(&edited.document, || false).unwrap();
+    let (before, after) = (
+        channel(&original, "VC_V").unwrap(),
+        channel(&renamed, "Vout_V").unwrap(),
+    );
+    assert_eq!(channel(&renamed, "VC_V"), None);
+    assert_eq!(renamed.rows().count(), original.rows().count());
+    assert!(
+        original
+            .rows()
+            .zip(renamed.rows())
+            .all(|(old, new)| old[before].to_bits() == new[after].to_bits())
+    );
+}
+
+#[test]
+fn receipt_distinguishes_new_parts_from_surviving_parts_with_reused_ids() {
+    let buck = Document::from_bytes(BUCK).unwrap();
+    let revision = buck.revision();
+    let add_resistor = || Operation::Add {
+        kind: "resistor".into(),
+        grid: None,
+    };
+    let delete = |id: &str| Operation::Delete { id: id.into() };
+
+    let replaced = apply(&buck, &revision, &[delete("R1"), add_resistor()]).unwrap();
+    assert_eq!(replaced.receipt.created, ["R1"]);
+    assert_eq!(replaced.receipt.deleted, ["R1"]);
+    assert!(replaced.receipt.modified.is_empty());
+    assert!(replaced.receipt.renamed.is_empty());
+
+    let edited = apply(
+        &buck,
+        &revision,
+        &[
+            rename("R1", "R2"),
+            delete("R2"),
+            add_resistor(),
+            rename("R1", "R2"),
+            rename("VC", "Vout"),
+            Operation::Move {
+                id: "Vout".into(),
+                grid: [30, 5],
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(edited.receipt.created, ["R2"]);
+    assert_eq!(edited.receipt.deleted, ["R1"]);
+    assert_eq!(edited.receipt.modified, ["Vout"]);
+    assert_eq!(json!(edited.receipt.renamed), json!({"VC": "Vout"}));
+}
+
+#[test]
+fn rename_rejects_invalid_or_taken_ids_without_changing_the_document() {
+    let buck = Document::from_bytes(BUCK).unwrap();
+    let revision = buck.revision();
+    let long = "V".repeat(33);
+    for (new_id, reason) in [
+        ("R1", "already in use: R1"),
+        ("r1", "already in use: R1"),
+        ("gnd", "already in use: GND"),
+        ("VC", "same as the current ID"),
+        ("", "empty"),
+        ("1out", "invalid new ID"),
+        ("_out", "invalid new ID"),
+        ("V-out", "invalid new ID"),
+        ("Vout.p", "invalid new ID"),
+        ("출력", "invalid new ID"),
+        (long.as_str(), "longer than 32"),
+    ] {
+        let ops = [Operation::Rotate { id: "R1".into() }, rename("VC", new_id)];
+        let error = apply(&buck, &revision, &ops).unwrap_err();
+        assert_eq!(error.code, "operationFailed");
+        assert_eq!(error.operation, Some(2));
+        assert_eq!(error.target_id.as_deref(), Some("VC"), "{new_id}");
+        assert!(error.message.contains(reason), "{new_id}: {error}");
+    }
+    assert_eq!(buck, Document::from_bytes(BUCK).unwrap());
+    let missing = apply(&buck, &revision, &[rename("VM9", "Vout")]).unwrap_err();
+    assert_eq!(missing.target_id.as_deref(), Some("VM9"));
+
+    // A part may change only its own case, use a 32-character ID, and pass a name along.
+    let chained = apply(
+        &buck,
+        &revision,
+        &[
+            rename("VC", "vc"),
+            rename("R1", "tmp"),
+            rename("C1", "R1"),
+            rename("tmp", &"C".repeat(32)),
+            rename("D1", "D2"),
+            rename("D2", "D1"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        json!(chained.receipt.renamed),
+        json!({"C1": "R1", "R1": "C".repeat(32), "VC": "vc"})
+    );
+    assert!(chained.receipt.created.is_empty() && chained.receipt.deleted.is_empty());
+    // Its parameters moved with the capacitor, so the new R1 is not a modification.
+    assert!(chained.receipt.modified.is_empty());
 }

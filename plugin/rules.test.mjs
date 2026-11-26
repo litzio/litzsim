@@ -13,7 +13,10 @@ import {
   timeAxisProblem, zoomAxis, zoomRange,
 } from "./plot.js";
 import { CATEGORIES, PARTS, ROTATE_SHORTCUT, shortcutOf } from "./parts.js";
-import { deleteSelection, isDirty, nearestPair, selectInBox, selectedSegmentIndex, selectionBox } from "./rules.js";
+import {
+  deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex, selectionBox,
+  undoRenamed,
+} from "./rules.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const executable = ["litzsim.exe", "litzsim"].map(name => `${root}target/release/${name}`).find(existsSync);
@@ -27,9 +30,13 @@ before(() => {
 });
 after(() => core.stdin.end());
 
-async function call(op, payload = {}) {
+async function send(op, payload = {}) {
   core.stdin.write(JSON.stringify({ ...payload, op }) + "\n");
-  const response = JSON.parse((await lines.next()).value);
+  return JSON.parse((await lines.next()).value);
+}
+
+async function call(op, payload = {}) {
+  const response = await send(op, payload);
   assert.equal(response.ok, true, JSON.stringify(response.error));
   return response;
 }
@@ -126,6 +133,41 @@ test("the core reports a shorted voltage source before the screen keeps the conn
   assert.deepEqual((await connect("V1.p", "V1.n")).receipt.shortedSources, ["V1"]);
   assert.deepEqual((await connect("R1.p", "C1.p")).receipt.shortedSources, []);
   assert.deepEqual((await connect("C1.n", "GND.ref")).receipt.shortedSources, []);
+});
+
+test("the name field sends one rename, follows the new ID and shows why the core refused a name", async () => {
+  const sheet = await apply(await rc(), []);
+  assert.deepEqual(renameOps("VC", " VC "), []);
+  const ops = renameOps("VC", " Vout ");
+  assert.deepEqual(ops, [{ op: "rename", id: "VC", newId: "Vout" }]);
+  const renamed = await call("apply", { document: sheet.document, expectedRevision: sheet.revision, ops });
+  assert.deepEqual(renamed.receipt.renamed, { VC: "Vout" });
+  assert.deepEqual(renamed.receipt.created, []);
+  assert.ok(renamed.layout.labels.some(label => label.partId === "Vout" && label.text === "Vout"));
+  assert.deepEqual(renamedIds(["VC", "R1"], renamed.receipt.renamed), ["Vout", "R1"]);
+  assert.deepEqual(renamedIds(["Vout"], undoRenamed(renamed.receipt)), ["VC"]);
+  const constructorNamed = await call("apply", {
+    document: sheet.document, expectedRevision: sheet.revision, ops: renameOps("VC", "constructor"),
+  });
+  assert.deepEqual(renamedIds(["VC"], constructorNamed.receipt.renamed), ["constructor"]);
+  assert.deepEqual(renamedIds(["constructor"], {}), ["constructor"]);
+  assert.deepEqual(renamedIds(["constructor"], undoRenamed(constructorNamed.receipt)), ["VC"]);
+  const undone = await call("undo", {
+    document: renamed.document, expectedAfter: renamed.layout.revision, expectedBefore: sheet.revision, previous: sheet.document,
+  });
+  assert.deepEqual(undone.document, sheet.document);
+
+  for (const [text, reason] of [
+    ["r1", "R1이(가) 이미 쓰는 이름입니다. 대소문자만 다른 이름도 쓸 수 없습니다."],
+    ["  ", "이름을 입력하세요."],
+    ["V out", "영문자로 시작하고 영문자·숫자·밑줄(_)만 쓸 수 있습니다."],
+    ["V".repeat(33), "32자 이하로 입력하세요."],
+  ]) {
+    const refused = await send("apply", { document: sheet.document, expectedRevision: sheet.revision, ops: renameOps("VC", text) });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.error.targetId, "VC");
+    assert.equal(renameProblem(refused.error), reason);
+  }
 });
 
 test("a run of a circuit at a drive root starts in that root, not a drive-relative path", () => {

@@ -57,3 +57,31 @@ export function nearestPair(layout, partId, [dx, dy] = [0, 0]) {
   }
   return best;
 }
+
+/** The core request for a typed part name; none when it names the part as it is. The core checks the name. */
+export function renameOps(id, text) {
+  const newId = text.trim();
+  return newId === id ? [] : [{ op: "rename", id, newId }];
+}
+
+/** Selected IDs after an edit whose receipt renamed parts (`renamed` maps old ID → new ID). */
+export function renamedIds(ids, renamed = {}) {
+  return ids.map(id => Object.hasOwn(renamed, id) ? renamed[id] : id);
+}
+
+/** Undoing an edit gives its renamed parts their old IDs back. */
+export function undoRenamed(receipt) {
+  return Object.fromEntries(Object.entries(receipt.renamed ?? {}).map(([from, to]) => [to, from]));
+}
+
+/** The name field's reason for the core refusing a rename; other failures keep the core message. */
+export function renameProblem(error) {
+  const message = error?.message ?? "";
+  const taken = /already in use: (\S+)/.exec(message);
+  if (taken) return `${taken[1]}이(가) 이미 쓰는 이름입니다. 대소문자만 다른 이름도 쓸 수 없습니다.`;
+  const length = /longer than (\d+)/.exec(message);
+  if (length) return `${length[1]}자 이하로 입력하세요.`;
+  if (/new ID is empty/.test(message)) return "이름을 입력하세요.";
+  if (/invalid new ID/.test(message)) return "영문자로 시작하고 영문자·숫자·밑줄(_)만 쓸 수 있습니다.";
+  return message || "이름을 바꾸지 못했습니다.";
+}
