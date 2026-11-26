@@ -3,6 +3,11 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
+/** A run's circuit folder: `directory`, or the parent folder of `file` (drive roots included). */
+export function startRequest({ file, ...payload }) {
+  return file === undefined ? payload : { ...payload, directory: path.dirname(file) };
+}
+
 export async function activate() {
   const executable = fileURLToPath(new URL("./bin/litzsim.exe", import.meta.url));
   const child = spawn(executable, ["serve"], {
@@ -99,7 +104,7 @@ export async function activate() {
         const response = await invoke("save", { ...payload, file });
         return response.ok ? { ...response, file } : response;
       },
-      start: payload => invoke("start", payload),
+      start: payload => invoke("start", startRequest(payload)),
       status: payload => invoke("status", payload),
       stop: payload => invoke("stop", payload),
       wave: payload => invoke("wave", payload),

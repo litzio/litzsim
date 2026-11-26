@@ -19,6 +19,8 @@ pub struct PartDefinition {
     pub measurement: Option<Measurement>,
     /// Schematic designator for new parts, numbered from 1 (R1, Q1, GND1).
     pub id_prefix: &'static str,
+    /// Forces the voltage between its two terminals; one net on both is a short.
+    pub voltage_source: bool,
 }
 
 pub fn part_definition(kind: &str) -> Option<PartDefinition> {
@@ -85,5 +87,6 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         defaults,
         measurement,
         id_prefix,
+        voltage_source: matches!(kind, "dc" | "sine" | "pwm"),
     })
 }

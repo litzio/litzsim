@@ -76,6 +76,8 @@ pub struct Receipt {
     pub modified: Vec<String>,
     pub deleted: Vec<String>,
     pub nets: BTreeMap<String, NetChange>,
+    /// Voltage sources whose two terminals share one net after, but not before.
+    pub shorted_sources: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -391,6 +393,7 @@ fn receipt(before: &Document, after: &Document, before_revision: String) -> Rece
         modified: Vec::new(),
         deleted: Vec::new(),
         nets: BTreeMap::new(),
+        shorted_sources: Vec::new(),
     };
     for (id, part) in &after.0.parts {
         match before.0.parts.get(id) {
@@ -436,5 +439,24 @@ fn receipt(before: &Document, after: &Document, before_revision: String) -> Rece
             );
         }
     }
+    receipt.shorted_sources = after
+        .0
+        .parts
+        .iter()
+        .filter(|(id, part)| {
+            let definition = part_definition(&part.kind).unwrap();
+            let shorted = |circuit: &CircuitV1| {
+                let [first, second] = definition.pins else {
+                    return false;
+                };
+                let net = |pin| circuit.net_of(&format!("{id}.{pin}")).map(str::to_owned);
+                net(first).is_some() && net(first) == net(second)
+            };
+            definition.voltage_source
+                && shorted(&after.0)
+                && !(before.0.parts.contains_key(*id) && shorted(&before.0))
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
     receipt
 }

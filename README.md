@@ -23,7 +23,7 @@ Litzio에서 폴더를 연 뒤 작업 막대의 **LitzSim**을 엽니다. 화면
 - 열었거나 새로 만든 상태에서 회로가 바뀌면(해석 설정만 바꾼 경우 포함) 저장하지 않은 변경으로 표시하고, **새 회로**·**열기** 전에 버릴지 확인합니다.
 - 새 회로는 폴더를 고르고 파일 이름을 정해 저장하며 기존 파일을 덮어쓰지 않습니다. 저장한 회로는 **실행**으로 회로 옆 `runs/`에 실행을 시작합니다. 실행 중에는 **실행**을 누를 수 없고 진행 시각과 **중지**가 표시됩니다. **파형 보기**는 다음 단계에서 제공합니다.
 
-도면은 코어 `layout` 결과만 그립니다. 화면은 선택, 끌기 미리보기, 마우스를 올린 가지, 라이브러리 접힘, 확대 비율 같은 화면 상태만 가지며 회로 변경은 모두 상주 코어의 `apply`와 `undo`를 호출합니다. 변경 표시·연결 추천·단락 확인 규칙은 `cargo build --release` 뒤 `node --test plugin/rules.test.mjs`로 상주 코어와 함께 시험합니다.
+도면은 코어 `layout` 결과만 그립니다. 화면은 선택, 끌기 미리보기, 마우스를 올린 가지, 라이브러리 접힘, 확대 비율 같은 화면 상태만 가지며 회로 변경은 모두 상주 코어의 `apply`와 `undo`를 호출합니다. 전압원 단락 확인은 코어가 receipt의 `shortedSources`로 알려 주며, 화면은 이 진단이 있으면 확인을 받은 뒤에만 결과를 작업본에 반영하고 취소하면 버립니다. 변경 표시·연결 추천 규칙, 단락 진단, Host 실행 폴더는 `cargo build --release` 뒤 `node --test plugin/rules.test.mjs`로 상주 코어와 함께 시험합니다.
 
 ## CLI로 회로 편집하기
 
@@ -42,7 +42,7 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 ```
 
 - `inspect`는 회로 문서, 정규화한 문서의 `revision`, 읽은 파일 바이트의 `diskRevision`, 단자별 네트와 격자 좌표, 계기 기준 방향을 반환합니다. 미접속 단자는 `missingPins`에서 확인할 수 있습니다.
-- `apply`와 `undo`는 문서와 receipt를 반환하고 파일을 교체합니다. receipt는 작업 전후 revision, 생성·수정·삭제된 소자 ID, 변경된 네트별 전후 단자 목록을 담습니다. 실패하면 JSON 오류와 0이 아닌 종료 코드를 반환합니다. 배치 연산 오류에는 1부터 시작하는 연산 번호와 대상 ID가 들어갑니다.
+- `apply`와 `undo`는 문서와 receipt를 반환하고 파일을 교체합니다. receipt는 작업 전후 revision, 생성·수정·삭제된 소자 ID, 변경된 네트별 전후 단자 목록, 이 작업으로 두 단자가 새로 같은 네트가 된 전압원(직류·사인 전압원, PWM) ID 목록 `shortedSources`를 담습니다. 실패하면 JSON 오류와 0이 아닌 종료 코드를 반환합니다. 배치 연산 오류에는 1부터 시작하는 연산 번호와 대상 ID가 들어갑니다.
 - `undo`는 현재 문서와 스냅샷의 revision을 각각 receipt의 `afterRevision`, `beforeRevision`과 대조합니다. 스냅샷이 다르면 `previousMismatch`를 반환합니다.
 - `layout`은 같은 문서 revision의 기호·단자·직각 배선·접속점·교차 점프·라벨과 겹침 진단을 반환합니다. 좌표와 라벨 치수는 [회로도 기하 규약](docs/layout.md)을 따릅니다.
 
@@ -111,7 +111,7 @@ $run = & $cli start buck.litzsim | ConvertFrom-Json
 
 | `op` | 필드 |
 | --- | --- |
-| `start` | 회로의 `directory`, 작업본 `document`, `expectedRevision` |
+| `start` | 회로의 `directory`, 작업본 `document`, `expectedRevision`. 플러그인 Host는 `directory` 대신 회로 `file`을 받으면 그 부모 폴더(드라이브 루트 포함)를 씁니다. |
 | `status`, `stop` | `runId`. 다른 세션에서 시작했다면 회로의 `directory`도 전달합니다. |
 | `wave` | `runId`, 이름 배열 `channels`, `from_s`, `to_s`, `pixels`. 다른 세션에서 시작했다면 `directory`도 전달합니다. |
 

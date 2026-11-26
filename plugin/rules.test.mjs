@@ -2,10 +2,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { isDirty, nearestPair, shortedSources } from "./rules.js";
+import { startRequest } from "./host.mjs";
+import { isDirty, nearestPair } from "./rules.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const executable = ["litzsim.exe", "litzsim"].map(name => `${root}target/release/${name}`).find(existsSync);
@@ -62,10 +64,23 @@ test("suggestions never merge two connected nets (review repro: R1 dragged to [1
   assert.deepEqual([suggestion.a, suggestion.b, suggestion.distance], ["R2.p", "C1.p", 0]);
 });
 
-test("connections that would short a voltage source are flagged before confirming", async () => {
-  const { document } = await rc();
-  assert.deepEqual(shortedSources(document, "R1.p", "V1.n"), ["V1"]);
-  assert.deepEqual(shortedSources(document, "V1.p", "V1.n"), ["V1"]);
-  assert.deepEqual(shortedSources(document, "R1.p", "C1.p"), []);
-  assert.deepEqual(shortedSources(document, "C1.n", "GND.ref"), []);
+test("the core reports a shorted voltage source before the screen keeps the connection", async () => {
+  const sheet = await rc();
+  const connect = (a, b) => call("apply", {
+    document: sheet.document, expectedRevision: sheet.revision, ops: [{ op: "connect", a, b }],
+  });
+  // The screen asks with these IDs and keeps `sheet` unless the user confirms.
+  assert.deepEqual((await connect("R1.p", "V1.n")).receipt.shortedSources, ["V1"]);
+  assert.deepEqual((await connect("V1.p", "V1.n")).receipt.shortedSources, ["V1"]);
+  assert.deepEqual((await connect("R1.p", "C1.p")).receipt.shortedSources, []);
+  assert.deepEqual((await connect("C1.n", "GND.ref")).receipt.shortedSources, []);
+});
+
+test("a run of a circuit at a drive root starts in that root, not a drive-relative path", () => {
+  const drive = path.parse(process.cwd()).root;
+  const payload = { document: {}, expectedRevision: "r" };
+  assert.deepEqual(startRequest({ ...payload, file: path.join(drive, "rc.litzsim") }), { ...payload, directory: drive });
+  const folder = path.join(drive, "work", "circuits");
+  assert.equal(startRequest({ ...payload, file: path.join(folder, "rc.litzsim") }).directory, folder);
+  assert.deepEqual(startRequest({ ...payload, directory: "." }), { ...payload, directory: "." });
 });

@@ -522,3 +522,49 @@ fn save_guards_raw_bytes_and_serializes_competing_writers() {
     assert_eq!(error.actual, Some(json!(actual)));
     only_circuit();
 }
+
+#[test]
+fn receipt_reports_voltage_sources_newly_shorted_by_the_edit() {
+    let rc = Document::from_bytes(RC).unwrap();
+    let connect = |a: &str, b: &str| Operation::Connect {
+        a: a.into(),
+        b: b.into(),
+    };
+    // Review repro: R1.p (input) to V1.n (ground) merges both V1 terminals.
+    let shorted = apply(&rc, &rc.revision(), &[connect("R1.p", "V1.n")]).unwrap();
+    assert_eq!(shorted.receipt.shorted_sources, ["V1"]);
+    assert_eq!(json!(shorted.receipt)["shortedSources"], json!(["V1"]));
+    // Merging input with output leaves V1 across input and ground.
+    let merged = apply(&rc, &rc.revision(), &[connect("R1.p", "C1.p")]).unwrap();
+    assert!(merged.receipt.shorted_sources.is_empty());
+    // An existing short is not reported again by an unrelated edit, nor on undo's way back.
+    let later = apply(
+        &shorted.document,
+        &shorted.receipt.after_revision,
+        &[Operation::Rotate { id: "R1".into() }],
+    )
+    .unwrap();
+    assert!(later.receipt.shorted_sources.is_empty());
+    let undone = undo(
+        &shorted.document,
+        &shorted.receipt.after_revision,
+        &rc.revision(),
+        &rc,
+    )
+    .unwrap();
+    assert!(undone.receipt.shorted_sources.is_empty());
+    // PWM forces its output too; a new source wired to itself is a short.
+    let pwm = apply(
+        &rc,
+        &rc.revision(),
+        &[
+            Operation::Add {
+                kind: "pwm".into(),
+                grid: None,
+            },
+            connect("PWM1.out", "PWM1.ref"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(pwm.receipt.shorted_sources, ["PWM1"]);
+}

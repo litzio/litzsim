@@ -1,7 +1,7 @@
 import React from "react";
 import { CATEGORIES, PARTS, PARAMETERS, formatSI, parseSI, shortcutOf } from "./parts.js";
 import { Schematic, sheetView, contentBounds } from "./schematic.jsx";
-import { isDirty, nearestPair, shortedSources } from "./rules.js";
+import { isDirty, nearestPair } from "./rules.js";
 
 // The editor owns only screen state: selection, drag previews, hover, the
 // collapsed library and the undo snapshots it hands back to the core. Every
@@ -350,10 +350,12 @@ export function Editor({ ui, adapter }) {
     return () => cancelAnimationFrame(id);
   }, [sheet]);
 
-  function edit(ops, { kind = ops[0].op, started = performance.now() } = {}) {
+  // `review` sees the core result before it replaces the working sheet; false discards it.
+  function edit(ops, { kind = ops[0].op, started = performance.now(), review } = {}) {
     return perform(async () => {
       const { sheet: before, history: undoable } = latest.current;
       const response = await adapter.call("apply", { document: before.document, expectedRevision: before.revision, ops });
+      if (review && !(await review(response))) return undefined;
       const next = sheetOf(response);
       frame.current = { kind, started, received: performance.now(), revision: next.revision };
       commit(next, [...undoable, { previous: before.document, receipt: response.receipt }]);
@@ -438,8 +440,7 @@ export function Editor({ ui, adapter }) {
   function startRun() {
     perform(async () => {
       const { sheet: current } = latest.current;
-      const directory = file.slice(0, Math.max(file.lastIndexOf("/"), file.lastIndexOf("\\")));
-      setRun(await adapter.call("start", { directory, document: current.document, expectedRevision: current.revision }));
+      setRun(await adapter.call("start", { file, document: current.document, expectedRevision: current.revision }));
     });
   }
 
@@ -497,14 +498,17 @@ export function Editor({ ui, adapter }) {
   }
 
   /** Connect two terminals; confirm first if a voltage source would end up shorted. */
-  async function connect(a, b, started) {
-    const shorted = shortedSources(latest.current.sheet.document, a, b);
-    if (shorted.length && !(await adapter.confirm({
-      title: "전압원을 단락할까요?",
-      message: `${shorted.join(", ")}의 두 단자가 같은 네트가 됩니다.`,
-      confirmLabel: "그래도 연결",
-    }))) return undefined;
-    return edit([{ op: "connect", a, b }], { kind: "connect", started });
+  /** Connect two terminals; if the core reports a newly shorted voltage source, ask first. */
+  function connect(a, b, started) {
+    return edit([{ op: "connect", a, b }], {
+      kind: "connect",
+      started,
+      review: ({ receipt }) => !receipt.shortedSources.length || adapter.confirm({
+        title: "전압원을 단락할까요?",
+        message: `${receipt.shortedSources.join(", ")}의 두 단자가 같은 네트가 됩니다.`,
+        confirmLabel: "그래도 연결",
+      }),
+    });
   }
 
   async function acceptSuggestion(started = performance.now()) {
