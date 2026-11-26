@@ -1,36 +1,25 @@
-async function checkCore(invoke) {
-  const start = performance.now();
-  const { version } = await invoke("ping", {});
-  return { version, roundTripMs: performance.now() - start };
-}
+import { Editor } from "./editor.jsx";
 
-export default function Screen({ React, ui, invoke }) {
-  const [result, setResult] = React.useState(null);
-  const [error, setError] = React.useState("");
-  const [busy, setBusy] = React.useState(false);
-
-  async function onCheck() {
-    setBusy(true);
-    setError("");
-    setResult(null);
-    try {
-      setResult(await checkCore(invoke));
-    } catch (error) {
-      setError(error.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <ui.ScreenLayout actions={
-      <ui.Button variant="default" disabled={busy} onClick={onCheck}>코어 확인</ui.Button>
-    }>
-      <p role="status">
-        {busy && "코어 확인 중…"}
-        {result && `코어 버전 ${result.version} · 왕복 ${result.roundTripMs.toFixed(1)} ms`}
-      </p>
-      {error && <ui.Notice tone="error">{error}</ui.Notice>}
-    </ui.ScreenLayout>
-  );
+// The only layer that touches Litzio: file pickers, confirmation, UI parts and
+// the plugin invoke channel. A standalone shell can supply the same adapter.
+export default function Screen({ React, ui, invoke, pickPath, confirm }) {
+  const adapter = React.useMemo(() => ({
+    async call(operation, input = {}) {
+      const response = await invoke(operation, input);
+      if (response?.ok !== true) {
+        const error = new Error(response?.error?.message ?? "LitzSim core did not complete the request.");
+        error.code = response?.error?.code;
+        throw error;
+      }
+      return response;
+    },
+    async pickCircuit() {
+      return (await pickPath({ kind: "file", extensions: [".litzsim"] }))?.path ?? null;
+    },
+    async pickFolder() {
+      return (await pickPath({ kind: "folder" }))?.path ?? null;
+    },
+    confirm,
+  }), [invoke, pickPath, confirm]);
+  return <Editor ui={ui} adapter={adapter} />;
 }

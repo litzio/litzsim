@@ -220,10 +220,20 @@ fn handle(runs: &mut Runs, request: Request<'_>) -> Result<Value, Value> {
             let after = required(request.expected_after, "expectedAfter")?;
             let before = required(request.expected_before, "expectedBefore")?;
             let previous = document(required(request.previous, "previous")?)?;
-            Ok(success(
-                circuit::undo(&current, after, before, &previous).map_err(core_error)?,
-            ))
+            let undone = circuit::undo(&current, after, before, &previous).map_err(core_error)?;
+            let layout = litzsim_core::layout::layout(&undone.document);
+            Ok(
+                json!({ "ok": true, "document": undone.document, "receipt": undone.receipt, "layout": layout }),
+            )
         }
+        "layout" => match (request.file, request.document) {
+            (Some(file), None) => {
+                let opened = circuit::open(&file).map_err(core_error)?;
+                Ok(success(litzsim_core::layout::layout(&opened.document)))
+            }
+            (None, Some(raw)) => Ok(success(litzsim_core::layout::layout(&document(raw)?))),
+            _ => Err(request_error("layout requires either file or document")),
+        },
         "save" => {
             let file = required(request.file, "file")?;
             let document = document(required(request.document, "document")?)?;

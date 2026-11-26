@@ -27,6 +27,11 @@ pub enum Operation {
         key: String,
         value: f64,
     },
+    /// `timeStep_s`, `stopTime_s` or `outputStep_s` in `simulation`.
+    SetSimulation {
+        key: String,
+        value: f64,
+    },
     Connect {
         a: String,
         b: String,
@@ -36,6 +41,16 @@ pub enum Operation {
     },
     Delete {
         id: String,
+    },
+    /// Cut one wire segment from `layout` and put a two-terminal part in series.
+    InsertInBranch {
+        #[serde(rename = "type")]
+        kind: String,
+        /// The segment's `terminals`; the part's first pin faces `terminals[0]`.
+        terminals: [String; 2],
+        /// The segment's scene endpoints, which tell apart cuts with equal terminals.
+        from: [i64; 2],
+        to: [i64; 2],
     },
 }
 
@@ -61,6 +76,8 @@ pub struct Receipt {
     pub modified: Vec<String>,
     pub deleted: Vec<String>,
     pub nets: BTreeMap<String, NetChange>,
+    /// Voltage sources whose two terminals share one net after, but not before.
+    pub shorted_sources: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,7 +94,16 @@ pub fn apply(
     let before = check_revision(document, expected_revision)?;
     let mut next = document.clone();
     for (index, op) in ops.iter().enumerate() {
-        next.0.apply(op).map_err(|mut error| {
+        let result = match op {
+            Operation::InsertInBranch {
+                kind,
+                terminals,
+                from,
+                to,
+            } => insert_in_branch(&mut next, kind, terminals, *from, *to),
+            _ => next.0.apply(op),
+        };
+        result.map_err(|mut error| {
             error.code = "operationFailed";
             error.operation = Some(index + 1);
             error
@@ -131,7 +157,7 @@ impl CircuitV1 {
             Operation::Add { kind, grid } => {
                 let definition = part_definition(kind)
                     .ok_or_else(|| Error::invalid(kind, "unknown part type"))?;
-                let id = next_id(kind, &self.parts);
+                let id = next_id(definition.id_prefix, &self.parts);
                 let parameters = definition
                     .defaults
                     .iter()
@@ -205,6 +231,21 @@ impl CircuitV1 {
                 }
                 *parameter = (*value).into();
             }
+            Operation::SetSimulation { key, value } => {
+                let simulation = &mut self.simulation;
+                match key.as_str() {
+                    "timeStep_s" => simulation.time_step_s = *value,
+                    "stopTime_s" => simulation.stop_time_s = *value,
+                    "outputStep_s" => simulation.output_step_s = Some(*value),
+                    _ => {
+                        return Err(Error::invalid(
+                            "simulation",
+                            format!("unknown simulation setting: {key}"),
+                        ));
+                    }
+                }
+                simulation.validate()?;
+            }
             Operation::Connect { a, b } => self.connect(a, b)?,
             Operation::Disconnect { pin } => {
                 self.require_pin(pin)?;
@@ -223,6 +264,7 @@ impl CircuitV1 {
                 self.parts.remove(id);
                 self.layout.remove(id);
             }
+            Operation::InsertInBranch { .. } => unreachable!("applied with the layout"),
         }
         Ok(())
     }
@@ -276,6 +318,66 @@ impl CircuitV1 {
     }
 }
 
+fn insert_in_branch(
+    document: &mut Document,
+    kind: &str,
+    terminals: &[String; 2],
+    from: [i64; 2],
+    to: [i64; 2],
+) -> Result<(), Error> {
+    let definition =
+        part_definition(kind).ok_or_else(|| Error::invalid(kind, "unknown part type"))?;
+    let &[first, second] = definition.pins else {
+        return Err(Error::invalid(kind, "expected a two-terminal part"));
+    };
+    let (net, far) = crate::layout::branch_cut(document, terminals, from, to)?;
+    let circuit = &mut document.0;
+    // Center the part on the segment and turn its first pin toward `from`.
+    let pitch = crate::layout::GRID_PITCH;
+    let center = |axis: usize| {
+        let grid = (from[axis] + to[axis] + pitch).div_euclid(2 * pitch);
+        i32::try_from(grid).map_err(|_| Error::invalid(&terminals[1], "segment out of range"))
+    };
+    let toward = [0, 1].map(|axis| (from[axis] - to[axis]).signum() as i32);
+    let mut placement = super::Placement {
+        x: center(0)?,
+        y: center(1)?,
+        ..Default::default()
+    };
+    placement.rotation = [0, 90, 180, 270]
+        .into_iter()
+        .find(|&rotation| {
+            let turned = super::Placement {
+                rotation: Some(rotation),
+                ..placement
+            };
+            turned.orient(definition.pin_offsets[0]) == toward
+        })
+        .filter(|&rotation| rotation != 0);
+    let id = next_id(definition.id_prefix, &circuit.parts);
+    circuit.layout.insert(id.clone(), placement);
+    circuit.parts.insert(
+        id.clone(),
+        Part {
+            kind: kind.into(),
+            parameters: definition
+                .defaults
+                .iter()
+                .map(|&(key, value)| (key.to_owned(), value.into()))
+                .collect(),
+        },
+    );
+    let pins = circuit.nets.get_mut(&net).expect("segment net");
+    pins.retain(|pin| !far.contains(pin));
+    pins.push(format!("{id}.{first}"));
+    let split = next_id("net", &circuit.nets);
+    let far_side = std::iter::once(format!("{id}.{second}"))
+        .chain(far)
+        .collect();
+    circuit.nets.insert(split, far_side);
+    Ok(())
+}
+
 fn next_id<T>(prefix: &str, entries: &BTreeMap<String, T>) -> String {
     (1..)
         .map(|index| format!("{prefix}{index}"))
@@ -291,6 +393,7 @@ fn receipt(before: &Document, after: &Document, before_revision: String) -> Rece
         modified: Vec::new(),
         deleted: Vec::new(),
         nets: BTreeMap::new(),
+        shorted_sources: Vec::new(),
     };
     for (id, part) in &after.0.parts {
         match before.0.parts.get(id) {
@@ -336,5 +439,24 @@ fn receipt(before: &Document, after: &Document, before_revision: String) -> Rece
             );
         }
     }
+    receipt.shorted_sources = after
+        .0
+        .parts
+        .iter()
+        .filter(|(id, part)| {
+            let definition = part_definition(&part.kind).unwrap();
+            let shorted = |circuit: &CircuitV1| {
+                let [first, second] = definition.pins else {
+                    return false;
+                };
+                let net = |pin| circuit.net_of(&format!("{id}.{pin}")).map(str::to_owned);
+                net(first).is_some() && net(first) == net(second)
+            };
+            definition.voltage_source
+                && shorted(&after.0)
+                && !(before.0.parts.contains_key(*id) && shorted(&before.0))
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
     receipt
 }

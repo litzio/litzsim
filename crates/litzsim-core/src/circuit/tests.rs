@@ -210,13 +210,58 @@ fn rejects_pfc_and_structural_errors_without_silent_data_loss() {
 }
 
 #[test]
+fn new_parts_take_short_designators_and_skip_used_numbers() {
+    let rc = Document::from_bytes(RC).unwrap();
+    let add = |kind: &str| Operation::Add {
+        kind: kind.into(),
+        grid: None,
+    };
+    let kinds = [
+        "resistor",
+        "dc",
+        "sine",
+        "inductor",
+        "capacitor",
+        "diode",
+        "nmos",
+        "pwm",
+        "voltmeter",
+        "ammeter",
+        "ground",
+    ];
+    let result = apply(&rc, &rc.revision(), &kinds.map(add)).unwrap();
+    // RC already has V1, R1, C1, GND and VC; those IDs stay and numbers are skipped.
+    assert_eq!(
+        result.receipt.created,
+        [
+            "AM1", "C2", "D1", "GND1", "L1", "PWM1", "Q1", "R2", "V2", "V3", "VM1"
+        ]
+    );
+    for id in ["V1", "R1", "C1", "GND", "VC"] {
+        assert_eq!(result.document.0.parts[id], rc.0.parts[id]);
+    }
+    let inserted = apply(
+        &rc,
+        &rc.revision(),
+        &[Operation::InsertInBranch {
+            kind: "ammeter".into(),
+            terminals: ["R1.n".into(), "C1.p".into()],
+            from: [160, 32],
+            to: [256, 32],
+        }],
+    )
+    .unwrap();
+    assert_eq!(inserted.receipt.created, ["AM1"]);
+}
+
+#[test]
 fn builds_archived_buck_topology_using_only_apply() {
     let buck = Document::from_bytes(BUCK).unwrap();
     let mut names = BTreeMap::new();
     let mut ops = Vec::new();
     for (old_id, part) in &buck.0.parts {
         let pos = buck.0.layout[old_id];
-        let new_id = format!("{}1", part.kind);
+        let new_id = format!("{}1", part_definition(&part.kind).unwrap().id_prefix);
         names.insert(old_id.as_str(), new_id.clone());
         ops.push(Operation::Add {
             kind: part.kind.clone(),
@@ -359,6 +404,31 @@ fn batch_is_atomic_and_receipt_tracks_net_merges_deletes_and_undo() {
         undone.receipt.nets["input"].after,
         edited.receipt.nets["input"].before
     );
+
+    let setting = |key: &str, value| Operation::SetSimulation {
+        key: key.into(),
+        value,
+    };
+    let timed = apply(
+        &document,
+        &revision,
+        &[setting("stopTime_s", 10.0), setting("outputStep_s", 1e-3)],
+    )
+    .unwrap();
+    let saved = Document::from_bytes(&timed.document.to_bytes()).unwrap();
+    assert_eq!(
+        json!(saved)["simulation"],
+        json!({ "timeStep_s": 1e-7, "stopTime_s": 10.0, "outputStep_s": 1e-3 })
+    );
+    for (ops, target) in [
+        (vec![setting("timeStep_s", 0.0)], "timeStep_s"),
+        (vec![setting("outputStep_s", 1.5e-7)], "outputStep_s"),
+        (vec![setting("model", 1.0)], "simulation"),
+    ] {
+        let error = apply(&document, &revision, &ops).unwrap_err();
+        assert_eq!(error.code, "operationFailed");
+        assert_eq!(error.target_id.as_deref(), Some(target));
+    }
 }
 
 #[test]
@@ -451,4 +521,50 @@ fn save_guards_raw_bytes_and_serializes_competing_writers() {
     assert_eq!(error.code, "diskRevisionConflict");
     assert_eq!(error.actual, Some(json!(actual)));
     only_circuit();
+}
+
+#[test]
+fn receipt_reports_voltage_sources_newly_shorted_by_the_edit() {
+    let rc = Document::from_bytes(RC).unwrap();
+    let connect = |a: &str, b: &str| Operation::Connect {
+        a: a.into(),
+        b: b.into(),
+    };
+    // Review repro: R1.p (input) to V1.n (ground) merges both V1 terminals.
+    let shorted = apply(&rc, &rc.revision(), &[connect("R1.p", "V1.n")]).unwrap();
+    assert_eq!(shorted.receipt.shorted_sources, ["V1"]);
+    assert_eq!(json!(shorted.receipt)["shortedSources"], json!(["V1"]));
+    // Merging input with output leaves V1 across input and ground.
+    let merged = apply(&rc, &rc.revision(), &[connect("R1.p", "C1.p")]).unwrap();
+    assert!(merged.receipt.shorted_sources.is_empty());
+    // An existing short is not reported again by an unrelated edit, nor on undo's way back.
+    let later = apply(
+        &shorted.document,
+        &shorted.receipt.after_revision,
+        &[Operation::Rotate { id: "R1".into() }],
+    )
+    .unwrap();
+    assert!(later.receipt.shorted_sources.is_empty());
+    let undone = undo(
+        &shorted.document,
+        &shorted.receipt.after_revision,
+        &rc.revision(),
+        &rc,
+    )
+    .unwrap();
+    assert!(undone.receipt.shorted_sources.is_empty());
+    // PWM forces its output too; a new source wired to itself is a short.
+    let pwm = apply(
+        &rc,
+        &rc.revision(),
+        &[
+            Operation::Add {
+                kind: "pwm".into(),
+                grid: None,
+            },
+            connect("PWM1.out", "PWM1.ref"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(pwm.receipt.shorted_sources, ["PWM1"]);
 }

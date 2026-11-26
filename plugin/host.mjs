@@ -1,6 +1,12 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+
+/** A run's circuit folder: `directory`, or the parent folder of `file` (drive roots included). */
+export function startRequest({ file, ...payload }) {
+  return file === undefined ? payload : { ...payload, directory: path.dirname(file) };
+}
 
 export async function activate() {
   const executable = fileURLToPath(new URL("./bin/litzsim.exe", import.meta.url));
@@ -83,11 +89,26 @@ export async function activate() {
     }),
     operations: {
       ping: () => invoke("ping"),
-      start: payload => invoke("start", payload),
+      new: () => invoke("new"),
+      inspect: payload => invoke("inspect", payload),
+      layout: payload => invoke("layout", payload),
+      apply: payload => invoke("apply", payload),
+      undo: payload => invoke("undo", payload),
+      save: async ({ folder, name, ...payload }) => {
+        if (folder === undefined) return invoke("save", payload);
+        if (typeof name !== "string" || !name || path.basename(name) !== name) {
+          return { ok: false, error: { code: "invalidRequest", message: "Expected a file name without folders." } };
+        }
+        // New circuits are saved without an expected revision, which refuses existing files.
+        const file = path.join(folder, name);
+        const response = await invoke("save", { ...payload, file });
+        return response.ok ? { ...response, file } : response;
+      },
+      start: payload => invoke("start", startRequest(payload)),
       status: payload => invoke("status", payload),
       stop: payload => invoke("stop", payload),
       wave: payload => invoke("wave", payload),
     },
-    dispose,
+    dispose: () => dispose(),
   };
 }

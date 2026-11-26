@@ -1,9 +1,9 @@
 mod routing;
 mod symbols;
 
-use crate::circuit::{Document, part_definition};
+use crate::circuit::{Document, Error, part_definition};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const GRID_PITCH: i64 = 32;
 pub const JUMP_RADIUS: i64 = 8;
@@ -276,6 +276,60 @@ pub fn layout(document: &Document) -> Layout<'_> {
     }
     routing::route(document, &obstacles, &mut result);
     result
+}
+
+/// Split a net at one routed segment of this document's layout. Returns the
+/// net and, in file order, its terminals on the `terminals[1]` (`to`) side.
+/// Terminals whose branch failed to route stay on the `terminals[0]` side.
+pub(crate) fn branch_cut(
+    document: &Document,
+    terminals: &[String; 2],
+    from: Point,
+    to: Point,
+) -> Result<(String, Vec<String>), Error> {
+    let result = layout(document);
+    let Some(cut) = result.segments.iter().position(|segment| {
+        segment.from == from
+            && segment.to == to
+            && segment.terminals == [&terminals[0], &terminals[1]]
+    }) else {
+        return Err(Error::invalid(
+            &terminals[1],
+            "no segment with these terminals and endpoints in the current layout",
+        ));
+    };
+    let net = result.segments[cut].net_id;
+    let mut far = BTreeSet::from([to]);
+    let mut grown = true;
+    while grown {
+        grown = false;
+        for (index, segment) in result.segments.iter().enumerate() {
+            if index != cut
+                && segment.net_id == net
+                && far.contains(&segment.from) != far.contains(&segment.to)
+            {
+                far.extend([segment.from, segment.to]);
+                grown = true;
+            }
+        }
+    }
+    // A terminal whose branch failed can sit on a routed point without being
+    // attached there; it stays with the root side as documented.
+    let unrouted: BTreeSet<&str> = result
+        .issues
+        .iter()
+        .filter(|issue| issue.code == "routeFailed")
+        .map(|issue| issue.targets[0].id.as_str())
+        .collect();
+    let pins: Vec<String> = document.layout_nets()[net]
+        .iter()
+        .filter(|pin| {
+            !unrouted.contains(pin.as_str()) && far.contains(&result.pins[pin.as_str()].at)
+        })
+        .cloned()
+        .collect();
+    debug_assert!(pins.contains(&terminals[1]) && !pins.contains(&terminals[0]));
+    Ok((net.to_owned(), pins))
 }
 
 #[cfg(test)]

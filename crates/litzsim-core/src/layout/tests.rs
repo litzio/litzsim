@@ -487,3 +487,143 @@ fn measurement_marks_follow_terminal_identity_after_rotation_and_mirror() {
         }
     }
 }
+
+#[test]
+fn insert_in_branch_cuts_the_chosen_segment_and_faces_the_first_pin_toward_from() {
+    let rc = Document::from_bytes(RC).unwrap();
+    let revision = rc.revision();
+    let insert = |terminals: [&str; 2], from, to| Operation::InsertInBranch {
+        kind: "ammeter".into(),
+        terminals: terminals.map(str::to_owned),
+        from,
+        to,
+    };
+    // Both ground segments report [GND.ref, C1.n]; only the endpoints separate
+    // cutting V1.n off with the capacitor side from leaving it on the root side.
+    let ground = |result: &Layout<'_>| {
+        result
+            .segments
+            .iter()
+            .filter(|segment| segment.terminals == ["GND.ref", "C1.n"])
+            .map(|segment| (segment.from, segment.to))
+            .collect::<Vec<_>>()
+    };
+    let cuts = ground(&layout(&rc));
+    assert_eq!(cuts, [([128, 160], [128, 96]), ([128, 96], [256, 96])]);
+    for ((from, to), near, far) in [
+        (cuts[0], vec!["GND.ref"], vec!["C1.n", "VC.n", "V1.n"]),
+        (cuts[1], vec!["GND.ref", "V1.n"], vec!["C1.n", "VC.n"]),
+    ] {
+        let edited = apply(&rc, &revision, &[insert(["GND.ref", "C1.n"], from, to)]).unwrap();
+        assert_eq!(edited.receipt.created, ["AM1"]);
+        let nets = edited.document.layout_nets();
+        let sorted = |pins: &[String]| pins.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = |mut pins: Vec<&str>, pin| {
+            pins.push(pin);
+            pins.into_iter().map(str::to_owned).collect::<BTreeSet<_>>()
+        };
+        assert_eq!(sorted(&nets["ground"]), expected(near, "AM1.p"));
+        assert_eq!(sorted(&nets["net1"]), expected(far, "AM1.n"));
+        let pins = edited.document.inspect().pin_positions;
+        let distance = |pin: &str, [x, y]: Point| {
+            let [px, py] = scene(pins[pin]);
+            (px - x).abs() + (py - y).abs()
+        };
+        assert!(distance("AM1.p", from) < distance("AM1.n", from));
+        let redrawn = layout(&edited.document);
+        assert!(
+            !redrawn
+                .issues
+                .iter()
+                .any(|issue| issue.code == "routeFailed"),
+            "{:?}",
+            redrawn.issues
+        );
+        check_geometry(&edited.document, &redrawn);
+        let undone = undo(
+            &edited.document,
+            &edited.receipt.after_revision,
+            &revision,
+            &rc,
+        )
+        .unwrap();
+        assert_eq!(undone.document.to_bytes(), rc.to_bytes());
+    }
+
+    // The inserted meter reads the charging current from R1.n toward C1.p.
+    let charging = apply(
+        &rc,
+        &revision,
+        &[insert(["R1.n", "C1.p"], [160, 32], [256, 32])],
+    )
+    .unwrap()
+    .document;
+    let wave = crate::solver::simulate(&charging, || false).unwrap();
+    let column = |name: &str| {
+        wave.channels()
+            .iter()
+            .position(|channel| channel.name == name)
+            .unwrap()
+    };
+    let (current, voltage) = (column("AM1_A"), column("VC_V"));
+    let mut checked = 0;
+    for row in wave.rows() {
+        assert!((row[current] - (5.0 - row[voltage]) / 1000.0).abs() < 1e-12);
+        checked += usize::from(row[current] > 1e-3);
+    }
+    assert!(checked > 0);
+
+    // A stale segment, a reversed pair or a non two-terminal part changes nothing.
+    for (op, target) in [
+        (insert(["GND.ref", "C1.n"], [128, 96], [384, 96]), "C1.n"),
+        (insert(["C1.n", "GND.ref"], [128, 96], [256, 96]), "GND.ref"),
+        (
+            Operation::InsertInBranch {
+                kind: "nmos".into(),
+                terminals: ["R1.n".into(), "C1.p".into()],
+                from: [160, 32],
+                to: [256, 32],
+            },
+            "nmos",
+        ),
+    ] {
+        let error =
+            apply(&rc, &revision, &[Operation::Rotate { id: "R1".into() }, op]).unwrap_err();
+        assert_eq!(
+            (error.code, error.operation, error.target_id.as_deref()),
+            ("operationFailed", Some(2), Some(target))
+        );
+    }
+}
+
+#[test]
+fn insert_in_branch_leaves_unrouted_terminals_on_the_original_net() {
+    // Review repro: G2 shares GND's position but its unmet bend fails to route.
+    let mut fixture: Value = serde_json::from_slice(RC).unwrap();
+    fixture["parts"]["G2"] = fixture["parts"]["GND"].clone();
+    fixture["layout"]["G2"] = fixture["layout"]["GND"].clone();
+    fixture["nets"]["ground"] = json!(["V1.n", "GND.ref", "G2.ref"]);
+    fixture["bends"] = json!({"G2.ref":{"x":2,"y":5}});
+    let doc = document(&fixture);
+    let drawn = layout(&doc);
+    assert!(
+        drawn
+            .issues
+            .iter()
+            .any(|issue| { issue.code == "routeFailed" && issue.targets[0].id == "G2.ref" })
+    );
+    let edited = apply(
+        &doc,
+        &doc.revision(),
+        &[Operation::InsertInBranch {
+            kind: "ammeter".into(),
+            terminals: ["V1.n".into(), "GND.ref".into()],
+            from: [0, 96],
+            to: [0, 160],
+        }],
+    )
+    .unwrap();
+    let nets = edited.document.layout_nets();
+    assert_eq!(nets["ground"], ["V1.n", "G2.ref", "AM1.p"]);
+    assert_eq!(nets["net1"], ["AM1.n", "GND.ref"]);
+}

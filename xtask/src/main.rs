@@ -46,7 +46,14 @@ fn package_plugin() -> Result<(), Box<dyn Error>> {
     let output = target.join("plugin/litzsim");
     let bin = output.join("bin");
     fs::create_dir_all(&bin)?;
-    for file in ["host.mjs", "screen.jsx"] {
+    for file in [
+        "host.mjs",
+        "screen.jsx",
+        "editor.jsx",
+        "schematic.jsx",
+        "rules.js",
+        "parts.js",
+    ] {
         fs::copy(source.join(file), output.join(file))?;
     }
     let manifest = "litzio-plugin.json";
