@@ -171,6 +171,7 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename }) {
     </>;
   }
   const own = pins.filter(([, pin]) => pin.partId === selectedId);
+  const recordable = sheet.layout.symbols.find(symbol => symbol.id === selectedId)?.recordable ?? [];
   return <>
     <h3 style={{ margin: 0 }}>{label(part.type)}</h3>
     <div style={styles.group}>
@@ -181,6 +182,13 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename }) {
       {Object.entries(part.parameters).map(([name, value]) => <NumberField key={name} ui={ui} owner={selectedId}
         name={name} text={(PARAMETERS[name] ?? [name])[0]} unit={(PARAMETERS[name] ?? [name, ""])[1]} value={value}
         disabled={busy} onCommit={(key, next) => edit([{ op: "setParameter", id: selectedId, key, value: next }])} />)}
+    </div>}
+    {recordable.length > 0 && <div style={styles.group}>
+      {recordable.map(quantity => <label key={quantity} style={styles.fact}>
+        <span>{quantity === "voltage" ? "전압 기록" : "전류 기록"}</span>
+        <input type="checkbox" checked={part.record?.[quantity] ?? false} disabled={busy}
+          onChange={event => edit([{ op: "setRecording", id: selectedId, quantity, enabled: event.target.checked }])} />
+      </label>)}
     </div>}
     <div style={styles.group}>
       <h4 style={{ margin: 0 }}>배치</h4>

@@ -1,4 +1,20 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordQuantity {
+    Voltage,
+    Current,
+}
+
+impl RecordQuantity {
+    pub(crate) fn unit(self) -> &'static str {
+        match self {
+            Self::Voltage => "V",
+            Self::Current => "A",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +34,8 @@ pub struct PartDefinition {
     pub pin_offsets: &'static [[i32; 2]],
     pub defaults: &'static [(&'static str, f64)],
     pub measurement: Option<Measurement>,
+    /// Terminals in recording polarity. None means there are no optional signals.
+    pub recording_pins: Option<[&'static str; 2]>,
     /// Schematic designator for new parts, numbered from 1 (R1, Q1, GND1).
     pub id_prefix: &'static str,
     /// Forces the voltage between its two terminals; one net on both is a short.
@@ -25,6 +43,14 @@ pub struct PartDefinition {
 }
 
 impl PartDefinition {
+    pub(crate) fn recordable(self) -> &'static [RecordQuantity] {
+        if self.recording_pins.is_some() {
+            &[RecordQuantity::Voltage, RecordQuantity::Current]
+        } else {
+            &[]
+        }
+    }
+
     pub(crate) fn series_resistance(self) -> Option<(&'static str, f64)> {
         self.defaults
             .iter()
@@ -113,6 +139,13 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         pin_offsets,
         defaults,
         measurement,
+        recording_pins: match kind {
+            "nmos" => Some(["d", "s"]),
+            "dc" | "sine" | "resistor" | "inductor" | "capacitor" | "diode" => {
+                Some([pins[0], pins[1]])
+            }
+            _ => None,
+        },
         id_prefix,
         voltage_source: matches!(kind, "dc" | "sine" | "pwm"),
     })

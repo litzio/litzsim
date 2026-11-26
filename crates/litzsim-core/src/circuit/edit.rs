@@ -1,4 +1,4 @@
-use super::{CircuitV1, Document, Error, Mirror, Part, part_definition};
+use super::{CircuitV1, Document, Error, Mirror, Part, RecordQuantity, part_definition};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -26,6 +26,11 @@ pub enum Operation {
         id: String,
         key: String,
         value: f64,
+    },
+    SetRecording {
+        id: String,
+        quantity: RecordQuantity,
+        enabled: bool,
     },
     /// `timeStep_s`, `stopTime_s` or `outputStep_s` in `simulation`.
     SetSimulation {
@@ -216,6 +221,7 @@ impl CircuitV1 {
                     Part {
                         kind: kind.clone(),
                         parameters,
+                        record: Default::default(),
                     },
                 );
             }
@@ -269,6 +275,25 @@ impl CircuitV1 {
                     ));
                 }
                 *parameter = (*value).into();
+            }
+            Operation::SetRecording {
+                id,
+                quantity,
+                enabled,
+            } => {
+                let part = self.require_part(id)?;
+                let definition = part_definition(&part.kind).expect("validated part");
+                if definition.recording_pins.is_none() {
+                    return Err(Error::invalid(
+                        id,
+                        "part does not support waveform recording",
+                    ));
+                }
+                let record = &mut self.parts.get_mut(id).unwrap().record;
+                match quantity {
+                    RecordQuantity::Voltage => record.voltage = *enabled,
+                    RecordQuantity::Current => record.current = *enabled,
+                }
             }
             Operation::SetSimulation { key, value } => {
                 let simulation = &mut self.simulation;
@@ -526,6 +551,7 @@ fn insert_in_branch(
         id.clone(),
         Part {
             kind: kind.into(),
+            record: Default::default(),
             parameters: definition
                 .defaults
                 .iter()

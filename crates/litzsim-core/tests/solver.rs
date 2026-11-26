@@ -18,6 +18,85 @@ fn channel(wave: &litzsim_core::waves::Waveform, name: &str) -> usize {
 }
 
 #[test]
+fn buck_records_only_the_installed_meters_by_default() {
+    let mut value: Value = serde_json::from_str(BUCK).unwrap();
+    value["parts"]["AM1"] = json!({"type": "ammeter", "parameters": {}});
+    let pins = value["nets"]["sw"].as_array_mut().unwrap();
+    *pins.iter_mut().find(|pin| **pin == "L1.p").unwrap() = json!("AM1.p");
+    value["nets"]["meter"] = json!(["AM1.n", "L1.p"]);
+    let wave = simulate(&document(&value), || false).unwrap();
+    let channels: Vec<_> = wave.channels().iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(channels, ["time", "AM1_A", "VC_V"]);
+}
+
+#[test]
+fn optional_signals_match_meters_in_terminal_direction_at_each_row() {
+    let buck: Value = serde_json::from_str(BUCK).unwrap();
+    let mut sine: Value = serde_json::from_str(RC).unwrap();
+    sine["parts"]["V1"] = json!({"type": "sine", "parameters": {
+        "amplitude_V": 5.0, "frequency_Hz": 50.0, "internalResistance_ohm": 0.5
+    }});
+    let cases = [
+        (&buck, "V1", "p", "n", "input", "ground"),
+        (&buck, "R1", "p", "n", "output", "ground"),
+        (&buck, "C1", "p", "n", "output", "ground"),
+        (&buck, "L1", "p", "n", "sw", "output"),
+        (&buck, "D1", "a", "k", "ground", "sw"),
+        (&buck, "Q1", "d", "s", "input", "sw"),
+        (&sine, "V1", "p", "n", "input", "ground"),
+    ];
+    for (example, id, p, n, from, to) in cases {
+        let mut value = example.clone();
+        value["parts"][id]["record"] = json!({"voltage": true, "current": true});
+        value["parts"]["AM1"] = json!({"type": "ammeter", "parameters": {}});
+        value["parts"]["VM1"] = json!({"type": "voltmeter", "parameters": {}});
+        let first = format!("{id}.{p}");
+        let pins = value["nets"][from].as_array_mut().unwrap();
+        *pins.iter_mut().find(|pin| **pin == first).unwrap() = json!("AM1.p");
+        value["nets"][to]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("VM1.n"));
+        value["nets"]["meter"] = json!(["AM1.n", first, "VM1.p"]);
+        assert!(
+            value["nets"][to]
+                .as_array()
+                .unwrap()
+                .contains(&json!(format!("{id}.{n}")))
+        );
+        let wave = simulate(&document(&value), || false).unwrap();
+        let [voltage, current, vm, am] = [
+            format!("{id}_V"),
+            format!("{id}_A"),
+            "VM1_V".into(),
+            "AM1_A".into(),
+        ]
+        .map(|name| channel(&wave, &name));
+        let mut nonzero = [false; 2];
+        for row in wave.rows() {
+            assert_eq!(
+                row[voltage].to_bits(),
+                row[vm].to_bits(),
+                "{id} at {}",
+                row[0]
+            );
+            // A series meter adds MNA rows. Allow roundoff in the current
+            // from the separate branch equation (or Ohm's law for a resistor).
+            assert!(
+                (row[current] - row[am]).abs() <= 1e-12,
+                "{id} at {}: {} vs {}",
+                row[0],
+                row[current],
+                row[am]
+            );
+            nonzero[0] |= row[voltage].abs() > 1e-12;
+            nonzero[1] |= row[current].abs() > 1e-12;
+        }
+        assert_eq!(nonzero, [true, true], "both quantities exercised for {id}");
+    }
+}
+
+#[test]
 fn buck_probe_matches_a_two_pin_voltmeter_without_changing_existing_samples() {
     let original = simulate(&Document::from_bytes(BUCK.as_bytes()).unwrap(), || false).unwrap();
     let mut value: Value =
@@ -295,6 +374,12 @@ fn stiff_buck(initial: f64) -> Value {
     value
 }
 
+fn record_buck_currents(value: &mut Value) {
+    for id in ["L1", "D1"] {
+        value["parts"][id]["record"] = json!({"current": true});
+    }
+}
+
 #[test]
 fn buck_matches_ccm_and_dcm_through_two_pwm_periods() {
     const STEP: f64 = 0.37e-6;
@@ -302,6 +387,7 @@ fn buck_matches_ccm_and_dcm_through_two_pwm_periods() {
     const FALLING: f64 = PERIOD / 2.0;
     for (initial, reference_peak) in [(0.2, 0.30), (0.0, 0.10)] {
         let mut value = stiff_buck(initial);
+        record_buck_currents(&mut value);
         for cycles in [1, 2] {
             value["simulation"]["stopTime_s"] = json!(cycles as f64 * PERIOD);
             let circuit = document(&value);
@@ -470,6 +556,7 @@ fn stops_between_samples_and_rejects_an_unsupported_gate_driver_before_sampling(
 #[test]
 fn switching_edges_are_recorded_on_both_sides_and_measured_as_discontinuities() {
     let mut value: Value = serde_json::from_str(BUCK).unwrap();
+    record_buck_currents(&mut value);
     value["parts"]["VG"] = json!({"type": "voltmeter", "parameters": {}});
     value["nets"]["gate"]
         .as_array_mut()
