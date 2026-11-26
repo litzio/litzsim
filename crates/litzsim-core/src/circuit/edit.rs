@@ -42,6 +42,12 @@ pub enum Operation {
     Delete {
         id: String,
     },
+    /// Give a part a new ID, updating its terminals in `nets`, `layout` and `bends`.
+    Rename {
+        id: String,
+        #[serde(rename = "newId")]
+        new_id: String,
+    },
     /// Cut one wire segment from `layout` without inserting a part.
     RemoveBranch {
         terminals: [String; 2],
@@ -82,6 +88,9 @@ pub struct Receipt {
     pub modified: Vec<String>,
     pub deleted: Vec<String>,
     pub nets: BTreeMap<String, NetChange>,
+    /// Parts that kept their data under a new ID, as old ID → new ID.
+    /// They are not listed in `created` or `deleted`.
+    pub renamed: BTreeMap<String, String>,
     /// Voltage sources whose two terminals share one net after, but not before.
     pub shorted_sources: Vec<String>,
 }
@@ -99,6 +108,8 @@ pub fn apply(
 ) -> Result<EditResult, Error> {
     let before = check_revision(document, expected_revision)?;
     let mut next = document.clone();
+    // Current ID → ID before the batch, for parts renamed in this batch.
+    let mut origins = BTreeMap::new();
     let mut remaining = ops.iter().enumerate().peekable();
     while let Some((index, op)) = remaining.next() {
         let result = match op {
@@ -116,12 +127,23 @@ pub fn apply(
                 from,
                 to,
             } => insert_in_branch(&mut next, kind, terminals, *from, *to),
+            Operation::Rename { id, new_id } => next.0.rename(id, new_id).map(|()| {
+                let origin = origins.remove(id).unwrap_or_else(|| id.clone());
+                origins.insert(new_id.clone(), origin);
+            }),
             _ => next.0.apply(op),
         };
         result.map_err(|error| operation_failed(error, index))?;
     }
+    let renamed = origins
+        .into_iter()
+        .filter(|(id, origin)| {
+            id != origin && document.0.parts.contains_key(origin) && next.0.parts.contains_key(id)
+        })
+        .map(|(id, origin)| (origin, id))
+        .collect();
     Ok(EditResult {
-        receipt: receipt(document, &next, before),
+        receipt: receipt(document, &next, before, renamed),
         document: next,
     })
 }
@@ -152,7 +174,7 @@ pub fn undo(
     }
     Ok(EditResult {
         document: previous.clone(),
-        receipt: receipt(current, previous, before),
+        receipt: receipt(current, previous, before, BTreeMap::new()),
     })
 }
 
@@ -281,8 +303,68 @@ impl CircuitV1 {
                 self.parts.remove(id);
                 self.layout.remove(id);
             }
-            Operation::RemoveBranch { .. } | Operation::InsertInBranch { .. } => {
-                unreachable!("applied with the layout")
+            Operation::RemoveBranch { .. }
+            | Operation::InsertInBranch { .. }
+            | Operation::Rename { .. } => {
+                unreachable!("applied by `apply`")
+            }
+        }
+        Ok(())
+    }
+
+    fn rename(&mut self, id: &str, new_id: &str) -> Result<(), Error> {
+        let part = self.require_part(id)?;
+        let pins = part_definition(&part.kind).expect("validated part").pins;
+        if new_id == id {
+            return Err(Error::invalid(id, "new ID is the same as the current ID"));
+        }
+        if new_id.is_empty() {
+            return Err(Error::invalid(id, "new ID is empty"));
+        }
+        if new_id.len() > MAX_PART_ID_LENGTH {
+            return Err(Error::invalid(
+                id,
+                format!("new ID is longer than {MAX_PART_ID_LENGTH} characters: {new_id}"),
+            ));
+        }
+        // Waveform channels are named `<ID>_<unit>`, so keep to channel-safe characters.
+        let mut bytes = new_id.bytes();
+        if !(bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+        {
+            return Err(Error::invalid(
+                id,
+                format!(
+                    "invalid new ID: {new_id} (use letters, digits and underscores, starting with a letter)"
+                ),
+            ));
+        }
+        if let Some(existing) = self
+            .parts
+            .keys()
+            .find(|other| *other != id && other.eq_ignore_ascii_case(new_id))
+        {
+            return Err(Error::invalid(
+                id,
+                format!("part ID already in use: {existing}"),
+            ));
+        }
+        let part = self.parts.remove(id).expect("required part");
+        self.parts.insert(new_id.into(), part);
+        if let Some(placement) = self.layout.remove(id) {
+            self.layout.insert(new_id.into(), placement);
+        }
+        for pin in pins {
+            let (old, new) = (format!("{id}.{pin}"), format!("{new_id}.{pin}"));
+            for terminal in self.nets.values_mut().flatten() {
+                if *terminal == old {
+                    terminal.clone_from(&new);
+                }
+            }
+            if let Some(bends) = &mut self.bends
+                && let Some(bend) = bends.remove(&old)
+            {
+                bends.insert(new, bend);
             }
         }
         Ok(())
@@ -462,14 +544,31 @@ fn insert_in_branch(
     Ok(())
 }
 
+/// Renamed parts may use any case, so skip numbers taken in another case too.
 fn next_id<T>(prefix: &str, entries: &BTreeMap<String, T>) -> String {
     (1..)
         .map(|index| format!("{prefix}{index}"))
-        .find(|id| !entries.contains_key(id))
+        .find(|id| !entries.keys().any(|used| used.eq_ignore_ascii_case(id)))
         .expect("available ID")
 }
 
-fn receipt(before: &Document, after: &Document, before_revision: String) -> Receipt {
+const MAX_PART_ID_LENGTH: usize = 32;
+
+fn receipt(
+    before: &Document,
+    after: &Document,
+    before_revision: String,
+    renamed: BTreeMap<String, String>,
+) -> Receipt {
+    let origins: BTreeMap<&str, &str> = renamed
+        .iter()
+        .map(|(old, new)| (new.as_str(), old.as_str()))
+        .collect();
+    // The ID a part of `after` had in `before`; none for a part new to this edit.
+    let origin = |id: &str| match origins.get(id) {
+        Some(old) => Some((*old).to_owned()),
+        None => (!renamed.contains_key(id)).then(|| id.to_owned()),
+    };
     let mut receipt = Receipt {
         before_revision,
         after_revision: after.revision(),
@@ -477,19 +576,21 @@ fn receipt(before: &Document, after: &Document, before_revision: String) -> Rece
         modified: Vec::new(),
         deleted: Vec::new(),
         nets: BTreeMap::new(),
+        renamed: BTreeMap::new(),
         shorted_sources: Vec::new(),
     };
     for (id, part) in &after.0.parts {
-        match before.0.parts.get(id) {
+        match origin(id).and_then(|old| Some((before.0.parts.get(&old)?, old))) {
             None => receipt.created.push(id.clone()),
-            Some(prior)
+            Some((prior, old))
                 if prior != part
-                    || before.0.layout.get(id) != after.0.layout.get(id)
+                    || before.0.layout.get(&old) != after.0.layout.get(id)
                     || part_definition(&part.kind).unwrap().pins.iter().any(|pin| {
-                        let pin = format!("{id}.{pin}");
-                        let old = before.0.bends.as_ref().and_then(|bends| bends.get(&pin));
-                        let new = after.0.bends.as_ref().and_then(|bends| bends.get(&pin));
-                        old != new
+                        let bend = |document: &Document, id: &str| {
+                            let bends = document.0.bends.as_ref()?;
+                            bends.get(&format!("{id}.{pin}")).cloned()
+                        };
+                        bend(before, &old) != bend(after, id)
                     }) =>
             {
                 receipt.modified.push(id.clone())
@@ -501,7 +602,7 @@ fn receipt(before: &Document, after: &Document, before_revision: String) -> Rece
         .0
         .parts
         .keys()
-        .filter(|id| !after.0.parts.contains_key(*id))
+        .filter(|id| !renamed.contains_key(*id) && !after.0.parts.contains_key(*id))
         .cloned()
         .collect();
     for id in before.0.nets.keys().chain(
@@ -529,7 +630,7 @@ fn receipt(before: &Document, after: &Document, before_revision: String) -> Rece
         .iter()
         .filter(|(id, part)| {
             let definition = part_definition(&part.kind).unwrap();
-            let shorted = |circuit: &CircuitV1| {
+            let shorted = |circuit: &CircuitV1, id: &str| {
                 let [first, second] = definition.pins else {
                     return false;
                 };
@@ -537,10 +638,13 @@ fn receipt(before: &Document, after: &Document, before_revision: String) -> Rece
                 net(first).is_some() && net(first) == net(second)
             };
             definition.voltage_source
-                && shorted(&after.0)
-                && !(before.0.parts.contains_key(*id) && shorted(&before.0))
+                && shorted(&after.0, id)
+                && !origin(id).is_some_and(|old| {
+                    before.0.parts.contains_key(&old) && shorted(&before.0, &old)
+                })
         })
         .map(|(id, _)| id.clone())
         .collect();
+    receipt.renamed = renamed;
     receipt
 }

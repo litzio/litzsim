@@ -477,18 +477,22 @@ fn file_commands_round_trip_and_reject_failed_batches() {
         &ops,
         r#"[
         {"op":"mirror","id":"Q1","axis":"horizontal"},
-        {"op":"setParameter","id":"R1","key":"resistance_ohm","value":47}
+        {"op":"setParameter","id":"R1","key":"resistance_ohm","value":47},
+        {"op":"rename","id":"VC","newId":"Vout"}
     ]"#,
     )
     .unwrap();
     let edited = apply(true);
     assert_eq!(edited["receipt"]["beforeRevision"], before);
+    assert_eq!(edited["receipt"]["renamed"], json!({"VC": "Vout"}));
     let after = edited["receipt"]["afterRevision"].as_str().unwrap();
     let stored = run(&["inspect", "buck.litzsim", "--json"], true);
     assert_eq!(stored["revision"], after);
     assert_eq!(stored["diskRevision"], edited["diskRevision"]);
     assert_eq!(stored["document"]["layout"]["Q1"]["mirror"], "horizontal");
     assert_eq!(stored["pinPositions"]["Q1.g"], json!([9, 2]));
+    assert_eq!(stored["pinNets"]["Vout.p"], "output");
+    assert_eq!(stored["measurements"]["Vout"]["fromPin"], "p");
     assert_eq!(
         stored["document"]["parts"]["R1"]["parameters"]["resistance_ohm"].as_f64(),
         Some(47.0)

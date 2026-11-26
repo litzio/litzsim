@@ -1,7 +1,10 @@
 import React from "react";
 import { CATEGORIES, PARTS, PARAMETERS, ROTATE_SHORTCUT, formatSI, parseSI, shortcutOf } from "./parts.js";
 import { Schematic, sheetView, contentBounds } from "./schematic.jsx";
-import { EMPTY_SELECTION, deleteSelection, isDirty, nearestPair, selectInBox, selectedSegmentIndex, selectionBox } from "./rules.js";
+import {
+  EMPTY_SELECTION, deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex,
+  selectionBox, undoRenamed,
+} from "./rules.js";
 import { Waveform } from "./waveform.jsx";
 
 // The editor owns only screen state: selection, drag previews, hover, the
@@ -108,13 +111,40 @@ function NumberField({ ui, owner, name, text, unit, value, placeholder, disabled
   </label>;
 }
 
+/** Enter or leaving the field renames the part; Esc restores its ID. A refused name keeps the text and shows why. */
+function NameField({ ui, id, disabled, onRename }) {
+  const [draft, setDraft] = React.useState(id);
+  const [problem, setProblem] = React.useState(null);
+  const owner = React.useRef(id);
+  const sending = React.useRef(null);
+  React.useEffect(() => { owner.current = id; setDraft(id); setProblem(null); }, [id]);
+  async function commit() {
+    // Disabling the field while the edit runs blurs it; do not send the same name twice.
+    if (sending.current === draft) return;
+    sending.current = draft;
+    const reason = await onRename(id, draft);
+    sending.current = null;
+    if (owner.current === id) setProblem(reason);
+  }
+  return <label style={styles.field}>
+    <span>이름</span>
+    <ui.Input value={draft} disabled={disabled} aria-invalid={problem ? true : undefined} data-name={id}
+      spellCheck={false} autoComplete="off" onChange={event => setDraft(event.target.value)} onBlur={commit}
+      onKeyDown={event => {
+        if (event.key === "Enter") { event.preventDefault(); commit(); }
+        if (event.key === "Escape") { setDraft(id); setProblem(null); }
+      }} />
+    {problem && <span role="alert" style={{ color: "var(--id-color-danger)", fontSize: "var(--font-size-xs)" }}>{problem}</span>}
+  </label>;
+}
+
 const SIMULATION = [
   ["timeStep_s", "해석 간격", "s"],
   ["stopTime_s", "종료 시각", "s"],
   ["outputStep_s", "저장 간격", "s", "모든 스텝"],
 ];
 
-function Properties({ ui, sheet, selectedId, busy, edit }) {
+function Properties({ ui, sheet, selectedId, busy, edit, rename }) {
   const part = selectedId && sheet.document.parts[selectedId];
   const pins = Object.entries(sheet.layout.pins);
   if (!part) {
@@ -142,9 +172,9 @@ function Properties({ ui, sheet, selectedId, busy, edit }) {
   }
   const own = pins.filter(([, pin]) => pin.partId === selectedId);
   return <>
-    <h3 style={{ margin: 0 }}>{selectedId}</h3>
+    <h3 style={{ margin: 0 }}>{label(part.type)}</h3>
     <div style={styles.group}>
-      <div style={styles.fact}><span>종류</span><span>{label(part.type)}</span></div>
+      <NameField ui={ui} id={selectedId} disabled={busy} onRename={rename} />
     </div>
     {Object.keys(part.parameters).length > 0 && <div style={styles.group}>
       <h4 style={{ margin: 0 }}>값</h4>
@@ -372,26 +402,42 @@ export function Editor({ ui, adapter }) {
     return () => cancelAnimationFrame(id);
   }, [sheet]);
 
-  function keepSelection(next, createdId) {
+  function keepSelection(next, createdId, renamed) {
     setSelected(current => createdId ? { ...EMPTY_SELECTION, parts: [createdId] } : {
-      parts: current.parts.filter(id => next.document.parts[id]),
+      parts: renamedIds(current.parts, renamed).filter(id => next.document.parts[id]),
       wires: current.wires.map(wire => next.layout.segments[selectedSegmentIndex(next.layout, wire)]).filter(Boolean),
     });
   }
 
   // `review` sees the core result before it replaces the working sheet; false discards it.
-  function edit(ops, { kind = ops[0].op, started = performance.now(), review } = {}) {
+  function edit(ops, options) {
+    return perform(() => applyNow(ops, options));
+  }
+
+  async function applyNow(ops, { kind = ops[0].op, started = performance.now(), review } = {}) {
+    const { sheet: before, history: undoable } = latest.current;
+    const response = await adapter.call("apply", { document: before.document, expectedRevision: before.revision, ops });
+    if (review && !(await review(response))) return undefined;
+    const next = sheetOf(response);
+    frame.current = { kind, started, received: performance.now(), revision: next.revision };
+    commit(next, [...undoable, { previous: before.document, receipt: response.receipt }]);
+    if (!Object.keys(before.document.parts).length && Object.keys(next.document.parts).length) fitPending.current = true;
+    setHoverSegment(null);
+    keepSelection(next, response.receipt.created[0], response.receipt.renamed);
+    return { ...next, created: response.receipt.created };
+  }
+
+  /** Resolves to the name field's reason when the core refuses the name, else null. */
+  function rename(id, text) {
+    const ops = renameOps(id, text);
+    if (!ops.length) return Promise.resolve(null);
     return perform(async () => {
-      const { sheet: before, history: undoable } = latest.current;
-      const response = await adapter.call("apply", { document: before.document, expectedRevision: before.revision, ops });
-      if (review && !(await review(response))) return undefined;
-      const next = sheetOf(response);
-      frame.current = { kind, started, received: performance.now(), revision: next.revision };
-      commit(next, [...undoable, { previous: before.document, receipt: response.receipt }]);
-      if (!Object.keys(before.document.parts).length && Object.keys(next.document.parts).length) fitPending.current = true;
-      setHoverSegment(null);
-      keepSelection(next, response.receipt.created[0]);
-      return { ...next, created: response.receipt.created };
+      try {
+        await applyNow(ops);
+        return null;
+      } catch (failure) {
+        return renameProblem(failure);
+      }
     });
   }
 
@@ -409,7 +455,7 @@ export function Editor({ ui, adapter }) {
       setSuggestion(null);
       setPendingPin(null);
       setHoverSegment(null);
-      keepSelection(next);
+      keepSelection(next, undefined, undoRenamed(last.receipt));
     });
   }
 
@@ -916,7 +962,7 @@ export function Editor({ ui, adapter }) {
             </div>
           </div>
           <aside aria-label="속성" style={styles.panel}>
-            <Properties ui={ui} sheet={sheet} selectedId={selectedId} busy={busy} edit={edit} />
+            <Properties ui={ui} sheet={sheet} selectedId={selectedId} busy={busy} edit={edit} rename={rename} />
           </aside>
         </div>
         <footer style={styles.status} aria-live="polite">
