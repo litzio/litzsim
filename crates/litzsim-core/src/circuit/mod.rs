@@ -5,6 +5,7 @@ mod library;
 mod tests;
 
 pub use edit::{EditResult, MirrorAxis, NetChange, Operation, Receipt, apply, undo};
+pub(crate) use file::StagedFile;
 pub use file::{Opened, SaveMode, open, save};
 pub use library::{Measurement, PartDefinition, part_definition};
 
@@ -32,7 +33,7 @@ pub struct Error {
 }
 
 impl Error {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -43,7 +44,7 @@ impl Error {
         }
     }
 
-    fn invalid(target: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(target: &str, message: impl Into<String>) -> Self {
         let mut error = Self::new("invalidCircuit", message);
         error.target_id = Some(target.into());
         error
@@ -77,13 +78,13 @@ pub struct Document(CircuitV1);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CircuitV1 {
+pub(crate) struct CircuitV1 {
     #[serde(deserialize_with = "integer")]
     version: i32,
     #[serde(deserialize_with = "unique_map")]
-    parts: BTreeMap<String, Part>,
+    pub(crate) parts: BTreeMap<String, Part>,
     #[serde(deserialize_with = "unique_map")]
-    nets: BTreeMap<String, Vec<String>>,
+    pub(crate) nets: BTreeMap<String, Vec<String>>,
     #[serde(deserialize_with = "unique_map")]
     layout: BTreeMap<String, Placement>,
     #[serde(
@@ -92,16 +93,16 @@ struct CircuitV1 {
         deserialize_with = "optional_map"
     )]
     bends: Option<BTreeMap<String, Point>>,
-    simulation: Simulation,
+    pub(crate) simulation: Simulation,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Part {
+pub(crate) struct Part {
     #[serde(rename = "type")]
-    kind: String,
+    pub(crate) kind: String,
     #[serde(deserialize_with = "unique_map")]
-    parameters: BTreeMap<String, Value>,
+    pub(crate) parameters: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -180,18 +181,18 @@ struct Point {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Simulation {
+pub(crate) struct Simulation {
     #[serde(rename = "timeStep_s")]
-    time_step_s: f64,
+    pub(crate) time_step_s: f64,
     #[serde(rename = "stopTime_s")]
-    stop_time_s: f64,
+    pub(crate) stop_time_s: f64,
     #[serde(
         rename = "outputStep_s",
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "present"
     )]
-    output_step_s: Option<f64>,
+    pub(crate) output_step_s: Option<f64>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -278,9 +279,13 @@ impl Document {
         revision(&self.to_bytes())
     }
 
+    pub(crate) fn circuit(&self) -> &CircuitV1 {
+        &self.0
+    }
+
     /// Missing terminals are diagnosed separately from file/operation validation.
     pub fn inspect(&self) -> Inspection<'_> {
-        let mut pin_nets = BTreeMap::new();
+        let pin_nets = self.0.pin_nets();
         let mut pin_positions = BTreeMap::new();
         let mut measurements = BTreeMap::new();
         for (id, part) in &self.0.parts {
@@ -288,16 +293,10 @@ impl Document {
             let position = self.0.layout.get(id).copied().unwrap_or_default();
             for (pin, offset) in definition.pins.iter().zip(definition.pin_offsets) {
                 let terminal = format!("{id}.{pin}");
-                pin_positions.insert(terminal.clone(), position.pin_position(*offset));
-                pin_nets.insert(terminal, None);
+                pin_positions.insert(terminal, position.pin_position(*offset));
             }
             if let Some(measurement) = definition.measurement {
                 measurements.insert(id.as_str(), measurement);
-            }
-        }
-        for (net, pins) in &self.0.nets {
-            for pin in pins {
-                *pin_nets.get_mut(pin).expect("validated terminal") = Some(net.as_str());
             }
         }
         let missing_pins = pin_nets
@@ -323,6 +322,22 @@ impl Default for Document {
 }
 
 impl CircuitV1 {
+    pub(crate) fn pin_nets(&self) -> BTreeMap<String, Option<&str>> {
+        let mut pin_nets = BTreeMap::new();
+        for (id, part) in &self.parts {
+            let definition = part_definition(&part.kind).expect("validated part");
+            for pin in definition.pins {
+                pin_nets.insert(format!("{id}.{pin}"), None);
+            }
+        }
+        for (net, pins) in &self.nets {
+            for pin in pins {
+                *pin_nets.get_mut(pin).expect("validated terminal") = Some(net.as_str());
+            }
+        }
+        pin_nets
+    }
+
     fn validate(&self) -> Result<(), Error> {
         if self.version != 1 {
             return Err(Error::invalid(

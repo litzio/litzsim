@@ -54,7 +54,7 @@ pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<Stri
 
     check_destination(&path, &mode)?;
     let bytes = document.to_bytes();
-    let staged = StagedFile::write(&path, &bytes).map_err(io_error)?;
+    let staged = StagedFile::write(&path, |file| file.write_all(&bytes)).map_err(io_error)?;
     match mode {
         SaveMode::New => {
             // Publish a complete file atomically, with no overwrite even if a
@@ -124,10 +124,19 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
-struct StagedFile(PathBuf);
+pub(crate) struct StagedFile(pub(crate) PathBuf);
 
 impl StagedFile {
-    fn write(path: &Path, bytes: &[u8]) -> io::Result<Self> {
+    pub(crate) fn write(
+        path: &Path,
+        write: impl FnOnce(&mut File) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        if path.file_name().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Expected a file path",
+            ));
+        }
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let (staged, mut file): (Self, File) = loop {
             let count = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -142,7 +151,7 @@ impl StagedFile {
                 Err(error) => return Err(error),
             }
         };
-        let result = file.write_all(bytes).and_then(|()| file.sync_all());
+        let result = write(&mut file).and_then(|()| file.sync_all());
         drop(file);
         result?;
         Ok(staged)

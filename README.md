@@ -57,6 +57,14 @@ RC·RLC·벅 예제는 [examples](examples/)에 있습니다. PFC 예제는 지�
 | `undo` | `document`, `expectedAfter`, `expectedBefore`, `previous`(편집 전 문서) |
 | `save` | `file`, `document`, 기존 파일의 `expectedDiskRevision`. revision을 생략하면 신규 저장을 요청합니다. |
 
+## CLI로 회로 해석하기
+
+`litzsim run FILE OUT`은 RC·RLC·이상 벅의 과도응답을 계산하고 지정한 새 파일에 원본 파형을 저장합니다. 성공하면 행 수, 채널 이름과 단위, 종료 시각을 JSON으로 출력합니다. 실행 예시는 `litzsim run examples/rc.litzsim rc.litzwave`입니다. 출력 경로는 하드 링크를 지원하는 파일시스템의 기존 폴더에 지정합니다. 기존 파일은 보존합니다.
+
+`timeStep_s`는 적분 간격입니다. PWM 에지가 스텝 사이에 있으면 그 시각에서 스텝을 나눕니다. `outputStep_s`를 생략하면 PWM 에지를 포함한 모든 적분 결과를 저장합니다. 적분 간격의 정수배를 지정하면 해당 시간 격자에서만 저장합니다. 두 경우 모두 시각 0과 `stopTime_s`의 표본을 포함합니다. 전압계는 p−n, 전류계는 p→n 방향을 사용합니다. 인덕터 전류는 p→n, 다이오드 전류는 애노드에서 캐소드 방향입니다. 미접속 단자와 지원 범위 밖 모델은 실행 전에 진단합니다.
+
+`.litzwave` 파일은 8바이트 서명 `LITZWV02`, 행 수(u64), 채널 메타데이터의 바이트 길이(u32), UTF-8 JSON 채널 배열, 원본 데이터 순서로 저장합니다. 채널 배열의 첫 항목은 `{"name":"time","unit":"s"}`입니다. 이어지는 항목은 `VC_V` 같은 채널 이름과 `V` 또는 `A` 단위를 담습니다. 원본 데이터는 시간순 고정 폭 행으로 구성되며, 각 행에 채널 배열 순서대로 IEEE 754 binary64 값이 들어갑니다. 모든 바이너리 숫자는 리틀엔디언입니다.
+
 ## 외부 PC에서 설치하기
 
 Windows x64에 Rust가 없다면 [rustup](https://rustup.rs/)을 설치합니다. PowerShell에서 저장소를 복제하고 기본 Rust 툴체인으로 플러그인을 빌드합니다.
