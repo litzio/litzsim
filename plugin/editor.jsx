@@ -12,10 +12,19 @@ const POLL_MS = 250;
 const ZOOM = { min: 0.25, max: 4, fitMax: 1.25, step: 1.25, margin: 48 };
 const ACTIVE = ["running", "stopping"];
 const BY_KEY = Object.fromEntries(Object.values(PARTS).map(part => [part.key, part]));
+const TABS = [["circuit", "회로"], ["wave", "파형"]];
 
 const border = "var(--border-width) solid var(--id-color-border)";
 const styles = {
   body: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0, gap: "var(--space-2)" },
+  // Litzio offers plugins one screen, so the circuit and waveform tabs live inside it.
+  // Both stay mounted in one grid cell; the hidden one keeps its layout and scroll.
+  tabs: { display: "flex", flex: "none", height: "calc(var(--layout-document-tab-height) + var(--border-width))", borderBottom: border },
+  tab: { display: "flex", alignItems: "center", padding: "0 var(--space-3)", border: "none", background: "transparent", color: "var(--id-color-text-muted)", font: "inherit", fontSize: "var(--font-size-sm)", fontWeight: "var(--font-weight-medium)", cursor: "pointer" },
+  tabSelected: { color: "var(--id-color-text)", fontWeight: "var(--font-weight-semibold)", boxShadow: "inset 0 calc(-1 * var(--size-current-marker)) var(--id-color-interaction)" },
+  stack: { flex: 1, minHeight: 0, display: "grid", gridTemplate: "minmax(0, 1fr) / minmax(0, 1fr)" },
+  pane: { gridArea: "1 / 1", minWidth: 0 },
+  hidden: { visibility: "hidden" },
   frame: { display: "flex", flex: 1, minHeight: 0, border, borderRadius: "var(--id-radius-md)", overflow: "hidden", background: "var(--id-color-surface)" },
   rail: { width: "var(--layout-activity-bar-width-icons)", flex: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: "var(--space-1)", padding: "var(--space-2) 0", borderRight: border, background: "var(--id-color-surface-subtle)" },
   library: { width: "var(--layout-sidebar-width-narrow)", flex: "none", overflow: "auto", borderRight: border, padding: "var(--space-3)", display: "flex", flexDirection: "column", gap: "var(--space-3)" },
@@ -191,8 +200,9 @@ export function Editor({ ui, adapter }) {
   const [canvasSize, setCanvasSize] = useState([0, 0]);
   const [, setAnchorTick] = useState(0);
   const [panning, setPanning] = useState(false);
-  // The waveform window replaces the drawing; the circuit and its undo history stay here.
-  const [screen, setScreen] = useState("editor");
+  // Tabs only switch what is shown: the circuit, its undo history and the waveform
+  // window's graphs, axes and cursors all stay as they were.
+  const [tab, setTab] = useState("circuit");
   const svgRef = useRef(null);
   const anchor = useRef(null);
   const geometry = useRef(null);
@@ -277,7 +287,7 @@ export function Editor({ ui, adapter }) {
     };
     pane.addEventListener("wheel", onWheel, { passive: false });
     return () => { observer.disconnect(); pane.removeEventListener("wheel", onWheel); };
-  }, [ready, screen]);
+  }, [ready]);
 
   // After a zoom change keep the anchored scene point under the same pane pixel.
   useLayoutEffect(() => {
@@ -749,12 +759,6 @@ export function Editor({ ui, adapter }) {
     </ui.ScreenLayout>;
   }
 
-  if (screen === "wave") {
-    return <Waveform ui={ui} adapter={adapter} file={file} revision={sheet.revision}
-      preferredRun={run?.state === "completed" ? run.runId : null}
-      onBack={() => { fitPending.current = true; setScreen("editor"); }} />;
-  }
-
   const view = sheetView(sheet.layout, canvasSize.map(value => value / zoom));
   geometry.current = { view, zoom };
   const scaled = value => value * zoom;
@@ -796,6 +800,16 @@ export function Editor({ ui, adapter }) {
               : selection ? `${selectedId} 선택 · ${ROTATE_SHORTCUT} 회전 · F 좌우 반전 · Shift+F 상하 반전 · Delete 삭제 · 끌어서 이동`
                 : "빈 곳 끌기 영역 선택 · 가운데 버튼 또는 Space+끌기 이동 · R 저항 · Ctrl+' 격자 보기 · Ctrl+Z 되돌리기";
 
+  // Without a saved file there are no runs to show.
+  const shownTab = file ? tab : "circuit";
+  function onTabKey(event) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const next = shownTab === "circuit" && file ? "wave" : "circuit";
+    setTab(next);
+    document.getElementById(`litzsim-tab-${next}`)?.focus();
+  }
+
   const menu = [
     { id: "rotate", label: `회전 (${ROTATE_SHORTCUT})`, icon: null, visible: Boolean(selection), disabled: busy, run: () => edit([{ op: "rotate", id: selectedId }]) },
     { id: "mirror-h", label: "좌우 반전 (F)", icon: null, visible: Boolean(selection), disabled: busy, run: () => edit([{ op: "mirror", id: selectedId, axis: "horizontal" }]) },
@@ -808,7 +822,7 @@ export function Editor({ ui, adapter }) {
   return <ui.ScreenLayout fillHeight
     description={`${fileName}${dirty ? " · 저장하지 않은 변경" : ""}`}
     status={runStatus}
-    actions={<>
+    actions={shownTab === "circuit" && <>
       <ui.Button disabled={busy} onClick={newCircuit}>새 회로</ui.Button>
       <ui.Button disabled={busy} onClick={openCircuit}>열기</ui.Button>
       <ui.Button disabled={busy} onClick={save}>저장</ui.Button>
@@ -816,93 +830,110 @@ export function Editor({ ui, adapter }) {
       <ui.Button variant="default" disabled={busy || Boolean(runReason)} title={runReason || undefined}
         aria-describedby={runReason ? "litzsim-run-reason" : undefined} onClick={startRun}>실행</ui.Button>
       <ui.Button disabled={!running || run.state === "stopping"} onClick={stopRun}>중지</ui.Button>
-      <ui.Button disabled={!file} title={file ? "이 회로 폴더의 완료된 실행 파형을 봅니다." : "저장한 회로의 실행 결과를 볼 수 있습니다."}
-        onClick={() => setScreen("wave")}>파형 보기</ui.Button>
     </>}>
-    <section aria-label="LitzSim 회로 편집기" style={styles.body} onKeyDown={onKeyDown} onKeyUp={onKeyUp}>
-      {error && <ui.Notice tone="error">{error}</ui.Notice>}
-      {run?.state === "failed" && run.error && <ui.Notice tone="error">{`실행 실패 — ${run.error.message ?? run.error.code}`}</ui.Notice>}
-      {saving && <ui.Toolbar label="새 회로 저장">
-        <label style={styles.field}>
-          <span>파일 이름</span>
-          <ui.Input value={saving.name} autoFocus onChange={event => setSaving({ name: event.target.value })}
-            onKeyDown={event => { if (event.key === "Enter") saveAs(); if (event.key === "Escape") setSaving(null); }} />
-        </label>
-        <ui.Button disabled={busy || !saving.name.trim()} onClick={saveAs}>폴더를 고르고 저장</ui.Button>
-        <ui.Button variant="ghost" onClick={() => setSaving(null)}>취소</ui.Button>
-      </ui.Toolbar>}
-      <div style={styles.frame}>
-        <nav aria-label="부품 분류" style={styles.rail}>
-          <button type="button" style={styles.railButton} aria-pressed={libraryOpen} aria-label={libraryOpen ? "부품 라이브러리 접기" : "부품 라이브러리 펼치기"}
-            title={libraryOpen ? "부품 라이브러리 접기" : "부품 라이브러리 펼치기"} onClick={() => setLibraryOpen(open => !open)}>
-            <Icon name="library" />
-          </button>
-          {CATEGORIES.map(group => <button key={group.id} type="button" style={styles.railButton} aria-label={group.label} title={group.label}
-            onClick={() => {
-              setLibraryOpen(true);
-              setQuery("");
-              requestAnimationFrame(() => groups.current[group.id]?.scrollIntoView({ block: "start" }));
-            }}><Icon name={group.id} /></button>)}
-        </nav>
-        {libraryOpen && <aside aria-label="부품 라이브러리" style={styles.library}>
-          <ui.Input value={query} placeholder="부품 검색" aria-label="부품 검색" onChange={event => setQuery(event.target.value)} />
-          {categories.map(group => <div key={group.id} ref={node => { groups.current[group.id] = node; }} style={styles.group}>
-            <h4 style={styles.groupTitle}>{group.label}</h4>
-            {group.parts.map(part => <button key={part.type} type="button" style={styles.item} data-library={part.type}
-              title={`${part.label} — 누르면 빈 자리에, 끌면 놓은 자리에 배치`}
-              onPointerDown={event => onLibraryDown(part.type, event)} onPointerMove={onLibraryMove} onPointerUp={onLibraryUp}
-              onClick={event => { if (event.detail === 0) place(part.type, freeSpot(sheet.layout, visibleCenter())); }}>
-              <span>{part.label}</span><kbd style={styles.kbd}>{part.key}</kbd>
-            </button>)}
-          </div>)}
-          {!categories.length && <span style={{ fontSize: "var(--font-size-sm)", color: "var(--id-color-text-muted)" }}>맞는 부품이 없습니다.</span>}
-        </aside>}
-        <div style={styles.stage}>
-        <ui.ContextMenu actions={menu} trigger={
-          <div ref={scrollRef} tabIndex={0} role="application" aria-label="회로도 편집 영역"
-            style={{ ...styles.canvas, cursor: panning ? "grab" : undefined }}
-            onPointerLeave={() => { pointer.current = null; setHoverSegment(null); }}>
-            <div style={{ position: "relative", width: scaled(view.width), height: scaled(view.height) }}>
-              <Schematic layout={sheet.layout} view={view} zoom={zoom} svgRef={svgRef} selectedIds={selected.parts} pendingPin={pendingPin}
-                hoverSegment={hoverSegment} selectedWires={selectedWires} showGrid={showGrid} marquee={marquee}
-                preview={preview} ghost={ghost} suggestion={suggestion}
-                onSegmentDown={onSegmentDown}
-                onSymbolDown={onSymbolDown} onPinDown={onPinDown} onSegmentEnter={index => {
-                  if (!drag.current && !area.current && !pan.current) setHoverSegment(index);
-                }}
-                onBackgroundDown={onBackgroundDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} />
-              {segment && !preview && <div style={{
-                ...styles.hint,
-                left: scaled((segment.from[0] + segment.to[0]) / 2 - view.x),
-                top: scaled((segment.from[1] + segment.to[1]) / 2 - view.y) - 10,
-              }}>
-                <ui.Button size="sm" disabled={busy} onClick={() => insertAmmeter(hoverSegment)}>이 가지에 전류계 끼우기 (A)</ui.Button>
-              </div>}
-              {suggestion && !preview && <div style={{ ...styles.hint, transform: "none", left: scaled(suggestion.to[0] - view.x) + 12, top: scaled(suggestion.to[1] - view.y) + 12 }}>
-                <ui.Button size="sm" disabled={busy} onClick={() => acceptSuggestion()}>{`${suggestion.a} ↔ ${suggestion.b} 연결 (Enter)`}</ui.Button>
-              </div>}
+    <div role="tablist" aria-label="LitzSim 보기" style={styles.tabs} onKeyDown={onTabKey}>
+      {TABS.map(([id, text]) => {
+        const selected = shownTab === id;
+        const disabled = id === "wave" && !file;
+        return <button key={id} id={`litzsim-tab-${id}`} type="button" role="tab" aria-selected={selected}
+          aria-controls={`litzsim-panel-${id}`} tabIndex={selected ? 0 : -1} disabled={disabled}
+          title={disabled ? "저장한 회로의 실행 결과를 볼 수 있습니다." : id === "wave" ? "이 회로 폴더의 완료된 실행 파형을 봅니다." : undefined}
+          style={{ ...styles.tab, ...(selected ? styles.tabSelected : null), ...(disabled ? { cursor: "default", opacity: 0.5 } : null) }}
+          onClick={() => setTab(id)}>{text}</button>;
+      })}
+    </div>
+    <div style={styles.stack}>
+      <section id="litzsim-panel-circuit" role="tabpanel" aria-label="LitzSim 회로 편집기"
+        style={{ ...styles.body, ...styles.pane, ...(shownTab === "circuit" ? null : styles.hidden) }} onKeyDown={onKeyDown} onKeyUp={onKeyUp}>
+        {error && <ui.Notice tone="error">{error}</ui.Notice>}
+        {run?.state === "failed" && run.error && <ui.Notice tone="error">{`실행 실패 — ${run.error.message ?? run.error.code}`}</ui.Notice>}
+        {saving && <ui.Toolbar label="새 회로 저장">
+          <label style={styles.field}>
+            <span>파일 이름</span>
+            <ui.Input value={saving.name} autoFocus onChange={event => setSaving({ name: event.target.value })}
+              onKeyDown={event => { if (event.key === "Enter") saveAs(); if (event.key === "Escape") setSaving(null); }} />
+          </label>
+          <ui.Button disabled={busy || !saving.name.trim()} onClick={saveAs}>폴더를 고르고 저장</ui.Button>
+          <ui.Button variant="ghost" onClick={() => setSaving(null)}>취소</ui.Button>
+        </ui.Toolbar>}
+        <div style={styles.frame}>
+          <nav aria-label="부품 분류" style={styles.rail}>
+            <button type="button" style={styles.railButton} aria-pressed={libraryOpen} aria-label={libraryOpen ? "부품 라이브러리 접기" : "부품 라이브러리 펼치기"}
+              title={libraryOpen ? "부품 라이브러리 접기" : "부품 라이브러리 펼치기"} onClick={() => setLibraryOpen(open => !open)}>
+              <Icon name="library" />
+            </button>
+            {CATEGORIES.map(group => <button key={group.id} type="button" style={styles.railButton} aria-label={group.label} title={group.label}
+              onClick={() => {
+                setLibraryOpen(true);
+                setQuery("");
+                requestAnimationFrame(() => groups.current[group.id]?.scrollIntoView({ block: "start" }));
+              }}><Icon name={group.id} /></button>)}
+          </nav>
+          {libraryOpen && <aside aria-label="부품 라이브러리" style={styles.library}>
+            <ui.Input value={query} placeholder="부품 검색" aria-label="부품 검색" onChange={event => setQuery(event.target.value)} />
+            {categories.map(group => <div key={group.id} ref={node => { groups.current[group.id] = node; }} style={styles.group}>
+              <h4 style={styles.groupTitle}>{group.label}</h4>
+              {group.parts.map(part => <button key={part.type} type="button" style={styles.item} data-library={part.type}
+                title={`${part.label} — 누르면 빈 자리에, 끌면 놓은 자리에 배치`}
+                onPointerDown={event => onLibraryDown(part.type, event)} onPointerMove={onLibraryMove} onPointerUp={onLibraryUp}
+                onClick={event => { if (event.detail === 0) place(part.type, freeSpot(sheet.layout, visibleCenter())); }}>
+                <span>{part.label}</span><kbd style={styles.kbd}>{part.key}</kbd>
+              </button>)}
+            </div>)}
+            {!categories.length && <span style={{ fontSize: "var(--font-size-sm)", color: "var(--id-color-text-muted)" }}>맞는 부품이 없습니다.</span>}
+          </aside>}
+          <div style={styles.stage}>
+          <ui.ContextMenu actions={menu} trigger={
+            <div ref={scrollRef} tabIndex={0} role="application" aria-label="회로도 편집 영역"
+              style={{ ...styles.canvas, cursor: panning ? "grab" : undefined }}
+              onPointerLeave={() => { pointer.current = null; setHoverSegment(null); }}>
+              <div style={{ position: "relative", width: scaled(view.width), height: scaled(view.height) }}>
+                <Schematic layout={sheet.layout} view={view} zoom={zoom} svgRef={svgRef} selectedIds={selected.parts} pendingPin={pendingPin}
+                  hoverSegment={hoverSegment} selectedWires={selectedWires} showGrid={showGrid} marquee={marquee}
+                  preview={preview} ghost={ghost} suggestion={suggestion}
+                  onSegmentDown={onSegmentDown}
+                  onSymbolDown={onSymbolDown} onPinDown={onPinDown} onSegmentEnter={index => {
+                    if (!drag.current && !area.current && !pan.current) setHoverSegment(index);
+                  }}
+                  onBackgroundDown={onBackgroundDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} />
+                {segment && !preview && <div style={{
+                  ...styles.hint,
+                  left: scaled((segment.from[0] + segment.to[0]) / 2 - view.x),
+                  top: scaled((segment.from[1] + segment.to[1]) / 2 - view.y) - 10,
+                }}>
+                  <ui.Button size="sm" disabled={busy} onClick={() => insertAmmeter(hoverSegment)}>이 가지에 전류계 끼우기 (A)</ui.Button>
+                </div>}
+                {suggestion && !preview && <div style={{ ...styles.hint, transform: "none", left: scaled(suggestion.to[0] - view.x) + 12, top: scaled(suggestion.to[1] - view.y) + 12 }}>
+                  <ui.Button size="sm" disabled={busy} onClick={() => acceptSuggestion()}>{`${suggestion.a} ↔ ${suggestion.b} 연결 (Enter)`}</ui.Button>
+                </div>}
+              </div>
+            </div>} />
+            <div role="toolbar" aria-label="확대" style={styles.zoom}>
+              <ui.Button size="sm" variant="ghost" aria-label="축소" title="축소 (-)" onClick={() => zoomCenter(1 / ZOOM.step)}>−</ui.Button>
+              <span style={styles.zoomValue} data-zoom={zoom}>{`${Math.round(zoom * 100)}%`}</span>
+              <ui.Button size="sm" variant="ghost" aria-label="확대" title="확대 (+)" onClick={() => zoomCenter(ZOOM.step)}>+</ui.Button>
+              <ui.Button size="sm" variant="ghost" title="전체 보기 (Home, Ctrl+0)" onClick={fitAll}>전체 보기</ui.Button>
             </div>
-          </div>} />
-          <div role="toolbar" aria-label="확대" style={styles.zoom}>
-            <ui.Button size="sm" variant="ghost" aria-label="축소" title="축소 (-)" onClick={() => zoomCenter(1 / ZOOM.step)}>−</ui.Button>
-            <span style={styles.zoomValue} data-zoom={zoom}>{`${Math.round(zoom * 100)}%`}</span>
-            <ui.Button size="sm" variant="ghost" aria-label="확대" title="확대 (+)" onClick={() => zoomCenter(ZOOM.step)}>+</ui.Button>
-            <ui.Button size="sm" variant="ghost" title="전체 보기 (Home, Ctrl+0)" onClick={fitAll}>전체 보기</ui.Button>
           </div>
+          <aside aria-label="속성" style={styles.panel}>
+            <Properties ui={ui} sheet={sheet} selectedId={selectedId} busy={busy} edit={edit} />
+          </aside>
         </div>
-        <aside aria-label="속성" style={styles.panel}>
-          <Properties ui={ui} sheet={sheet} selectedId={selectedId} busy={busy} edit={edit} />
-        </aside>
+        <footer style={styles.status} aria-live="polite">
+          <span data-hint="">{hint}</span>
+          <span style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+            {issues && <span style={{ color: "var(--id-color-warning)" }}>{issues}</span>}
+            {running && <span style={{ width: "8rem" }}><ui.Progress value={timed ? progress : undefined} label="해석 진행" /></span>}
+            {running && timed && <span>{`${formatTime(run.simulatedTime)} / ${formatTime(run.stopTime)}`}</span>}
+            {runReason && <span id="litzsim-run-reason">{runReason}</span>}
+          </span>
+        </footer>
+      </section>
+      <div id="litzsim-panel-wave" role="tabpanel" aria-labelledby="litzsim-tab-wave"
+        style={{ ...styles.pane, display: "flex", flexDirection: "column", ...(shownTab === "wave" ? null : styles.hidden) }}>
+        <Waveform ui={ui} adapter={adapter} file={file} revision={sheet.revision}
+          completedRun={run?.state === "completed" ? run.runId : null} active={shownTab === "wave"} />
       </div>
-      <footer style={styles.status} aria-live="polite">
-        <span data-hint="">{hint}</span>
-        <span style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
-          {issues && <span style={{ color: "var(--id-color-warning)" }}>{issues}</span>}
-          {running && <span style={{ width: "8rem" }}><ui.Progress value={timed ? progress : undefined} label="해석 진행" /></span>}
-          {running && timed && <span>{`${formatTime(run.simulatedTime)} / ${formatTime(run.stopTime)}`}</span>}
-          {runReason && <span id="litzsim-run-reason">{runReason}</span>}
-        </span>
-      </footer>
-    </section>
+    </div>
   </ui.ScreenLayout>;
 }
