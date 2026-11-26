@@ -1,7 +1,7 @@
 use crate::circuit::StagedFile;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::Path;
 
@@ -110,6 +110,89 @@ mod tests {
                 .all(|point| point.row >= 256)
         );
     }
+
+    fn wave(values: impl Fn(usize) -> f64, rows: usize) -> Waveform {
+        let mut wave = Waveform::new([Channel {
+            name: "probe".into(),
+            unit: "V".into(),
+        }]);
+        for row in 0..rows {
+            wave.push(row as f64, [values(row)].into_iter());
+        }
+        wave
+    }
+
+    #[test]
+    fn measures_the_lines_joining_original_rows_between_two_cursors() {
+        let channels = ["probe".to_string()];
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+
+        // v = t: the mean of t over 2.5..7.5 is 5 and the mean of t^2 is
+        // (7.5^3 - 2.5^3) / 3 / 5 = 27.083..., independent of the rows.
+        let ramp = wave(|row| row as f64, 11);
+        let measured = ramp.measure(&channels, 2.5, 7.5).unwrap();
+        let stats = &measured.channels[0];
+        assert!(close(stats.average.unwrap(), 5.0));
+        assert!(close(stats.rms.unwrap(), (406.25_f64 / 15.0).sqrt()));
+        assert_eq!((stats.minimum, stats.maximum), (Some(2.5), Some(7.5)));
+        // Cursors report the nearest original rows, the earlier one on a tie.
+        assert_eq!((stats.from.row, stats.from.value), (2, 2.0));
+        assert_eq!((stats.to.row, stats.to.value), (7, 7.0));
+        assert_eq!(
+            ramp.measure(&channels, 2.6, 2.6).unwrap().channels[0]
+                .from
+                .row,
+            3
+        );
+
+        // Alternating 0, 1 rows join into a triangle wave: mean 1/2, RMS sqrt(1/3).
+        let triangle = wave(|row| (row % 2) as f64, 101);
+        let stats = &triangle.measure(&channels, 0.0, 100.0).unwrap().channels[0];
+        assert!(close(stats.average.unwrap(), 0.5));
+        assert!(close(stats.rms.unwrap(), (1.0_f64 / 3.0).sqrt()));
+
+        // A single-row peak inside the interval sets the maximum.
+        let peak = wave(|row| if row == 256 { 23.0 } else { 0.0 }, 512);
+        let stats = &peak.measure(&channels, 100.5, 400.5).unwrap().channels[0];
+        assert_eq!((stats.minimum, stats.maximum), (Some(0.0), Some(23.0)));
+        assert!(close(stats.average.unwrap(), 23.0 / 300.0));
+
+        // One cursor time: the interpolated value. Outside the result: no statistics,
+        // and the cursors clamp to the first or last row.
+        let stats = &ramp.measure(&channels, 4.25, 4.25).unwrap().channels[0];
+        assert_eq!((stats.average, stats.rms), (Some(4.25), Some(4.25)));
+        let outside = &ramp.measure(&channels, 20.0, 30.0).unwrap().channels[0];
+        assert_eq!((outside.average, outside.maximum), (None, None));
+        assert_eq!((outside.from.row, outside.to.row), (10, 10));
+        let clipped = &ramp.measure(&channels, -10.0, 2.0).unwrap().channels[0];
+        assert!(close(clipped.average.unwrap(), 1.0));
+        assert_eq!(clipped.from.row, 0);
+
+        assert!(ramp.measure(&channels, 3.0, 2.0).is_err());
+        assert!(ramp.measure(&["missing".into()], 0.0, 1.0).is_err());
+        assert!(ramp.measure(&[], 0.0, 1.0).is_err());
+    }
+
+    #[test]
+    fn summary_reads_rows_time_range_and_signals_without_the_samples() {
+        let path =
+            std::env::temp_dir().join(format!("litzsim-summary-{}.litzwave", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut ramp = wave(|row| row as f64, 11);
+        ramp.push(12.5, [1.0].into_iter());
+        stage(&path, &ramp).unwrap();
+        let summary = summary(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(summary.rows, 12);
+        assert_eq!(summary.time_range, [0.0, 12.5]);
+        assert_eq!(
+            summary.channels,
+            [Channel {
+                name: "probe".into(),
+                unit: "V".into()
+            }]
+        );
+    }
 }
 
 /// Publish a complete result at a new path. An existing file is preserved.
@@ -140,32 +223,43 @@ fn encode(file: &mut File, wave: &Waveform) -> io::Result<()> {
     out.flush()
 }
 
-/// Read all original rows. Signal values remain in their stored order.
-pub fn read(path: &Path) -> io::Result<Waveform> {
-    let file = File::open(path)?;
-    let file_size = file.metadata()?.len();
-    let mut input = BufReader::new(file);
-    if &read_bytes::<8>(&mut input)? != MAGIC {
+struct Header {
+    rows: u64,
+    channels: Vec<Channel>,
+}
+
+/// Check the signature, sizes and time channel, leaving `input` at the first sample.
+fn read_header(input: &mut impl Read, file_size: u64) -> io::Result<Header> {
+    if &read_bytes::<8>(input)? != MAGIC {
         return Err(invalid("invalid waveform signature"));
     }
-    let rows = u64::from_le_bytes(read_bytes(&mut input)?);
-    let length = u32::from_le_bytes(read_bytes(&mut input)?) as u64;
+    let rows = u64::from_le_bytes(read_bytes(input)?);
+    let length = u32::from_le_bytes(read_bytes(input)?) as u64;
     let data_size = file_size
         .checked_sub(HEADER_SIZE + length)
         .filter(|size| rows > 0 && *size / 8 >= rows)
         .ok_or_else(|| invalid("invalid waveform length"))?;
-    let channels: Vec<Channel> = serde_json::from_reader((&mut input).take(length))?;
+    let channels: Vec<Channel> = serde_json::from_reader(input.take(length))?;
     if !channels
         .first()
         .is_some_and(|time| time.name == "time" && time.unit == "s")
     {
         return Err(invalid("invalid time channel"));
     }
-    let count = rows
-        .checked_mul(channels.len() as u64)
+    rows.checked_mul(channels.len() as u64)
         .filter(|count| count.checked_mul(8) == Some(data_size))
-        .and_then(|count| usize::try_from(count).ok())
         .ok_or_else(|| invalid("invalid waveform row size"))?;
+    Ok(Header { rows, channels })
+}
+
+/// Read all original rows. Signal values remain in their stored order.
+pub fn read(path: &Path) -> io::Result<Waveform> {
+    let file = File::open(path)?;
+    let file_size = file.metadata()?.len();
+    let mut input = BufReader::new(file);
+    let Header { rows, channels } = read_header(&mut input, file_size)?;
+    let count = usize::try_from(rows * channels.len() as u64)
+        .map_err(|_| invalid("waveform too large to read into memory"))?;
     let mut samples = Vec::new();
     samples
         .try_reserve_exact(count)
@@ -186,6 +280,34 @@ pub fn read(path: &Path) -> io::Result<Waveform> {
         last_time = row[0];
     }
     Ok(wave)
+}
+
+/// Rows, time range and signals of a result, read from its header and first and last rows only.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Summary {
+    pub rows: u64,
+    pub time_range: [f64; 2],
+    pub channels: Vec<Channel>,
+}
+
+pub fn summary(path: &Path) -> io::Result<Summary> {
+    let mut file = File::open(path)?;
+    let file_size = file.metadata()?.len();
+    let mut input = BufReader::new(&mut file);
+    let Header { rows, mut channels } = read_header(&mut input, file_size)?;
+    let first = f64::from_le_bytes(read_bytes(&mut input)?);
+    drop(input);
+    let row_size = channels.len() as u64 * 8;
+    // The last row ends the file.
+    file.seek(SeekFrom::Start(file_size - row_size))?;
+    let last = f64::from_le_bytes(read_bytes(&mut file)?);
+    channels.remove(0);
+    Ok(Summary {
+        rows,
+        time_range: [first, last],
+        channels,
+    })
 }
 
 fn read_bytes<const N: usize>(input: &mut impl Read) -> io::Result<[u8; N]> {
@@ -215,6 +337,27 @@ pub struct Series<'a> {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Measurement<'a> {
+    pub time_range: [f64; 2],
+    pub channels: Vec<Statistics<'a>>,
+}
+
+/// Cursor rows and interval statistics; the statistics are null when the
+/// interval lies outside the result.
+#[derive(Serialize)]
+pub struct Statistics<'a> {
+    pub name: &'a str,
+    pub unit: &'a str,
+    pub from: Point,
+    pub to: Point,
+    pub average: Option<f64>,
+    pub rms: Option<f64>,
+    pub minimum: Option<f64>,
+    pub maximum: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct Point {
     pub row: usize,
     pub t_s: f64,
@@ -237,27 +380,17 @@ impl Waveform {
         }
         let start = self.time_bound(|t| t < from);
         let end = self.time_bound(|t| t <= to);
-        let mut columns = Vec::with_capacity(channels.len());
-        let mut series = Vec::with_capacity(channels.len());
-        for name in channels {
-            let column = self
-                .channels
-                .iter()
-                .position(|ch| &ch.name == name)
-                .ok_or_else(|| invalid("Unknown waveform channel"))?;
-            if columns.contains(&column) {
-                return Err(invalid("Duplicate waveform channel"));
-            }
-            columns.push(column);
-            let channel = &self.channels[column];
-            series.push(Series {
-                name: &channel.name,
-                unit: &channel.unit,
+        let columns = self.columns(channels)?;
+        let mut series: Vec<_> = columns
+            .iter()
+            .map(|&column| Series {
+                name: &self.channels[column].name,
+                unit: &self.channels[column].unit,
                 minimum: None,
                 maximum: None,
                 points: Vec::new(),
-            });
-        }
+            })
+            .collect();
 
         let pixel_width = width / f64::from(pixels);
         let edge = |pixel| from + f64::from(pixel) * pixel_width;
@@ -312,6 +445,121 @@ impl Waveform {
             time_range: [from, to],
             channels: series,
         })
+    }
+
+    /// Values at two cursor times and statistics of the interval between them.
+    ///
+    /// Each cursor reports the original row nearest to its time (the earlier
+    /// row on a tie). The statistics treat the signal as the straight lines
+    /// joining original rows, as the plot draws it, over the part of
+    /// `from..=to` covered by the result: the time average, RMS, minimum and
+    /// maximum, with interpolated values at both ends of the interval.
+    pub fn measure(&self, channels: &[String], from: f64, to: f64) -> io::Result<Measurement<'_>> {
+        if !from.is_finite() || !to.is_finite() || from > to || channels.is_empty() {
+            return Err(invalid(
+                "Expected finite cursor times in order and channels",
+            ));
+        }
+        let last = self.rows().len() - 1;
+        let (low, high) = (from.max(self.row(0)[0]), to.min(self.row(last)[0]));
+        let (from_row, to_row) = (self.nearest(from), self.nearest(to));
+        let channels = self
+            .columns(channels)?
+            .into_iter()
+            .map(|column| {
+                let point = |row| Point {
+                    row,
+                    t_s: self.row(row)[0],
+                    value: self.row(row)[column],
+                };
+                let interval = (low <= high).then(|| self.interval(column, low, high));
+                Statistics {
+                    name: &self.channels[column].name,
+                    unit: &self.channels[column].unit,
+                    from: point(from_row),
+                    to: point(to_row),
+                    average: interval.map(|stats| stats.0),
+                    rms: interval.map(|stats| stats.1),
+                    minimum: interval.map(|stats| stats.2),
+                    maximum: interval.map(|stats| stats.3),
+                }
+            })
+            .collect();
+        Ok(Measurement {
+            time_range: [from, to],
+            channels,
+        })
+    }
+
+    fn columns(&self, names: &[String]) -> io::Result<Vec<usize>> {
+        let mut columns = Vec::with_capacity(names.len());
+        for name in names {
+            let column = self
+                .channels
+                .iter()
+                .position(|ch| &ch.name == name)
+                .ok_or_else(|| invalid("Unknown waveform channel"))?;
+            if columns.contains(&column) {
+                return Err(invalid("Duplicate waveform channel"));
+            }
+            columns.push(column);
+        }
+        Ok(columns)
+    }
+
+    fn nearest(&self, time: f64) -> usize {
+        let after = self.time_bound(|t| t < time);
+        if after == 0 {
+            return 0;
+        }
+        if after == self.rows().len() {
+            return after - 1;
+        }
+        let before = after - 1;
+        if time - self.row(before)[0] <= self.row(after)[0] - time {
+            before
+        } else {
+            after
+        }
+    }
+
+    /// The value on the line between the original rows around `time`, inside the result.
+    fn value_at(&self, column: usize, time: f64) -> f64 {
+        let after = self.time_bound(|t| t <= time);
+        if after == self.rows().len() {
+            return self.row(after - 1)[column];
+        }
+        let (a, b) = (self.row(after - 1), self.row(after));
+        a[column] + (b[column] - a[column]) * (time - a[0]) / (b[0] - a[0])
+    }
+
+    /// Average, RMS, minimum and maximum of the joined rows over `low..=high`.
+    fn interval(&self, column: usize, low: f64, high: f64) -> (f64, f64, f64, f64) {
+        let first = self.value_at(column, low);
+        if low == high {
+            return (first, first.abs(), first, first);
+        }
+        let inside = self.time_bound(|t| t <= low)..self.time_bound(|t| t < high);
+        let knots = std::iter::once((low, first))
+            .chain(inside.map(|row| (self.row(row)[0], self.row(row)[column])))
+            .chain(std::iter::once((high, self.value_at(column, high))));
+        let (mut area, mut square, mut minimum, mut maximum) = (0.0, 0.0, first, first);
+        let mut previous = (low, first);
+        for (t, value) in knots.skip(1) {
+            let (h, a, b) = (t - previous.0, previous.1, value);
+            area += h * (a + b) / 2.0;
+            square += h * (a * a + a * b + b * b) / 3.0;
+            minimum = minimum.min(value);
+            maximum = maximum.max(value);
+            previous = (t, value);
+        }
+        let width = high - low;
+        (
+            area / width,
+            (square / width).max(0.0).sqrt(),
+            minimum,
+            maximum,
+        )
     }
 
     fn row(&self, row: usize) -> &[f64] {

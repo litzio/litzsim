@@ -3,7 +3,10 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-/** A run's circuit folder: `directory`, or the parent folder of `file` (drive roots included). */
+/**
+ * Run requests name the circuit folder: `directory`, or the parent folder of the
+ * circuit `file` (drive roots included).
+ */
 export function startRequest({ file, ...payload }) {
   return file === undefined ? payload : { ...payload, directory: path.dirname(file) };
 }
@@ -105,9 +108,11 @@ export async function activate() {
         return response.ok ? { ...response, file } : response;
       },
       start: payload => invoke("start", startRequest(payload)),
-      status: payload => invoke("status", payload),
-      stop: payload => invoke("stop", payload),
-      wave: payload => invoke("wave", payload),
+      status: payload => invoke("status", startRequest(payload)),
+      stop: payload => invoke("stop", startRequest(payload)),
+      runs: payload => invoke("runs", startRequest(payload)),
+      wave: payload => invoke("wave", startRequest(payload)),
+      measure: payload => invoke("measure", startRequest(payload)),
     },
     dispose: () => dispose(),
   };
