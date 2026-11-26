@@ -445,6 +445,10 @@ fn file_commands_round_trip_and_reject_failed_batches() {
     assert_eq!(original["pinNets"]["Q1.g"], "gate");
     assert_eq!(original["pinPositions"]["Q1.g"], json!([7, 2]));
     assert_eq!(original["measurements"]["VC"]["fromPin"], "p");
+    let original_document = litzsim_core::circuit::open(&directory.join("buck.litzsim"))
+        .unwrap()
+        .document;
+    let canonical_before = original_document.to_bytes();
 
     let apply = |ok| {
         run(
@@ -472,12 +476,23 @@ fn file_commands_round_trip_and_reject_failed_batches() {
     assert_eq!(failure["error"]["operation"], 2);
     assert_eq!(failure["error"]["targetId"], "Q1.missing");
     assert_eq!(std::fs::read(directory.join("buck.litzsim")).unwrap(), BUCK);
+    std::fs::write(
+        &ops,
+        r#"[{"op":"setRecording","id":"PWM","quantity":"current","enabled":true}]"#,
+    )
+    .unwrap();
+    let unsupported = apply(false);
+    assert_eq!(unsupported["error"]["operation"], 1);
+    assert_eq!(unsupported["error"]["targetId"], "PWM");
+    assert_eq!(std::fs::read(directory.join("buck.litzsim")).unwrap(), BUCK);
 
     std::fs::write(
         &ops,
         r#"[
         {"op":"mirror","id":"Q1","axis":"horizontal"},
-        {"op":"setParameter","id":"R1","key":"resistance_ohm","value":47}
+        {"op":"setParameter","id":"R1","key":"resistance_ohm","value":47},
+        {"op":"setRecording","id":"L1","quantity":"voltage","enabled":true},
+        {"op":"setRecording","id":"L1","quantity":"current","enabled":true}
     ]"#,
     )
     .unwrap();
@@ -488,6 +503,11 @@ fn file_commands_round_trip_and_reject_failed_batches() {
     assert_eq!(stored["revision"], after);
     assert_eq!(stored["diskRevision"], edited["diskRevision"]);
     assert_eq!(stored["document"]["layout"]["Q1"]["mirror"], "horizontal");
+    assert_eq!(stored["document"]["version"], 1);
+    assert_eq!(
+        stored["document"]["parts"]["L1"]["record"],
+        json!({"voltage": true, "current": true})
+    );
     assert_eq!(stored["pinPositions"]["Q1.g"], json!([9, 2]));
     assert_eq!(
         stored["document"]["parts"]["R1"]["parameters"]["resistance_ohm"].as_f64(),
@@ -512,6 +532,10 @@ fn file_commands_round_trip_and_reject_failed_batches() {
     assert_eq!(final_read["document"], original["document"]);
     assert_eq!(final_read["pinPositions"], original["pinPositions"]);
     assert_eq!(final_read["diskRevision"], before);
+    assert_eq!(
+        std::fs::read(directory.join("buck.litzsim")).unwrap(),
+        canonical_before
+    );
     assert_eq!(
         run(&["layout", "buck.litzsim", "--json"], true),
         original_layout
@@ -876,8 +900,10 @@ fn long_run_snapshots_and_releases_the_directory_after_stop() {
 #[test]
 fn managed_buck_wave_matches_the_original_rows_and_failed_runs_have_no_wave() {
     let folder = TestDirectory::new("managed-buck");
-    let buck = include_bytes!("../../../examples/buck.litzsim");
-    std::fs::write(folder.0.join("buck.litzsim"), buck).unwrap();
+    let mut buck: Value =
+        serde_json::from_str(include_str!("../../../examples/buck.litzsim")).unwrap();
+    buck["parts"]["L1"]["record"] = json!({"current": true});
+    std::fs::write(folder.0.join("buck.litzsim"), buck.to_string()).unwrap();
     let started = folder.run(&["start", "buck.litzsim"], true);
     let run = started["runDirectory"].as_str().unwrap();
     let completed = terminal(&folder, run, "completed");
@@ -886,7 +912,7 @@ fn managed_buck_wave_matches_the_original_rows_and_failed_runs_have_no_wave() {
     let wave = litzsim_core::waves::read(&result).unwrap();
     let rows: Vec<_> = wave.rows().collect();
     let peak = (0..rows.len())
-        .max_by(|&a, &b| rows[a][2].total_cmp(&rows[b][2]))
+        .max_by(|&a, &b| rows[a][1].total_cmp(&rows[b][1]))
         .unwrap();
     for (from, to, pixels) in [(0, rows.len() - 1, "80"), (peak - 20, peak + 20, "5")] {
         let (from_time, to_time) = (rows[from][0], rows[to][0]);
@@ -899,7 +925,7 @@ fn managed_buck_wave_matches_the_original_rows_and_failed_runs_have_no_wave() {
             pixels,
         );
         assert_eq!(envelope["timeRange"], json!([from_time, to_time]));
-        for (channel, column, name, unit) in [(0, 2, "L1_A", "A"), (1, 3, "VC_V", "V")] {
+        for (channel, column, name, unit) in [(0, 1, "L1_A", "A"), (1, 2, "VC_V", "V")] {
             let series = &envelope["channels"][channel];
             assert_eq!(series["name"], name);
             assert_eq!(series["unit"], unit);
@@ -941,7 +967,7 @@ fn managed_buck_wave_matches_the_original_rows_and_failed_runs_have_no_wave() {
                     );
                 }
             }
-            if column == 2 {
+            if column == 1 {
                 // The current peak sits on a switching edge, recorded as left and
                 // right limit rows at one time with the same (continuous) value.
                 let tops: Vec<_> = (from..=to)
@@ -988,7 +1014,7 @@ fn managed_buck_wave_matches_the_original_rows_and_failed_runs_have_no_wave() {
             })
             .unwrap()
     };
-    for (channel, column) in [(0, 2), (1, 3)] {
+    for (channel, column) in [(0, 1), (1, 2)] {
         let stats = &measured["channels"][channel];
         assert_eq!(
             stats["delta"].as_f64().unwrap(),
@@ -1033,9 +1059,9 @@ fn managed_buck_wave_matches_the_original_rows_and_failed_runs_have_no_wave() {
         assert_eq!(stats["maximum"], maximum);
         assert_eq!(stats["minimum"], minimum);
     }
-    assert_eq!(measured["channels"][0]["maximum"], rows[peak][2]);
+    assert_eq!(measured["channels"][0]["maximum"], rows[peak][1]);
 
-    let mut broken: Value = serde_json::from_slice(buck).unwrap();
+    let mut broken = buck;
     broken["nets"]["output"]
         .as_array_mut()
         .unwrap()

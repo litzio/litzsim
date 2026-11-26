@@ -377,6 +377,7 @@ pub(super) fn geometry<'a>(
         },
         bounds,
         strokes,
+        recordable: definition.recordable(),
         current_arrow,
         meter_mark,
     };

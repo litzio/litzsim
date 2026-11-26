@@ -9,7 +9,7 @@ pub use edit::{EditResult, MirrorAxis, NetChange, Operation, Receipt, apply, und
 pub use file::REPLACE_RETRY_DELAYS;
 pub(crate) use file::StagedFile;
 pub use file::{Opened, SaveMode, open, save};
-pub use library::{Measurement, PartDefinition, part_definition};
+pub use library::{Measurement, PartDefinition, RecordQuantity, part_definition};
 
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -105,6 +105,30 @@ pub(crate) struct Part {
     pub(crate) kind: String,
     #[serde(deserialize_with = "unique_map")]
     pub(crate) parameters: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Record::is_off")]
+    pub(crate) record: Record,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Record {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) voltage: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) current: bool,
+}
+
+impl Record {
+    fn is_off(&self) -> bool {
+        !self.voltage && !self.current
+    }
+
+    pub(crate) fn enabled(self, quantity: RecordQuantity) -> bool {
+        match quantity {
+            RecordQuantity::Voltage => self.voltage,
+            RecordQuantity::Current => self.current,
+        }
+    }
 }
 
 impl Part {
@@ -388,6 +412,12 @@ impl CircuitV1 {
             let definition = part_definition(&part.kind).ok_or_else(|| {
                 Error::invalid(id, format!("unsupported part type: {}", part.kind))
             })?;
+            if !part.record.is_off() && definition.recording_pins.is_none() {
+                return Err(Error::invalid(
+                    id,
+                    "part does not support waveform recording",
+                ));
+            }
             for (key, value) in &part.parameters {
                 if !definition.defaults.iter().any(|(name, _)| name == key) {
                     return Err(Error::invalid(id, format!("unknown parameter: {key}")));

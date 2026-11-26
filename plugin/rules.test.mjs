@@ -245,7 +245,12 @@ test("the waveform window opens the newest completed run of the circuit folder a
     copyFileSync(`${root}examples/buck.litzsim`, file);
     const opened = await call("inspect", { file });
     assert.deepEqual((await call("runs", startRequest({ file }))).runs, []);
-    const started = await call("start", startRequest({ file, document: opened.document, expectedRevision: opened.revision }));
+    const recording = { op: "setRecording", id: "L1", quantity: "current" };
+    const sheet = await apply(opened, [{ ...recording, enabled: true }]);
+    const disabled = await apply(sheet, [{ ...recording, enabled: false }]);
+    assert.equal(disabled.document.parts.L1.record, undefined);
+    assert.equal(disabled.revision, opened.revision);
+    const started = await call("start", startRequest({ file, document: sheet.document, expectedRevision: sheet.revision }));
     let status = started;
     while (["running", "stopping"].includes(status.state)) {
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -257,8 +262,8 @@ test("the waveform window opens the newest completed run of the circuit folder a
     assert.equal(defaultRun(runs, null), started.runId);
     assert.equal(defaultRun([{ runId: "new", state: "failed" }, ...runs], "missing"), started.runId);
     const [run] = runs;
-    assert.equal(run.revision, opened.revision);
-    assert.deepEqual(run.channels.map(channel => channel.name), ["D1_A", "L1_A", "VC_V"]);
+    assert.equal(run.revision, sheet.revision);
+    assert.deepEqual(run.channels.map(channel => channel.name), ["L1_A", "VC_V"]);
     assert.equal(run.timeRange[0], 0);
 
     // Requests name the circuit file, so a core that did not start the run (after reopening Litzio) finds it.
