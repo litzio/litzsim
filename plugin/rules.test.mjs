@@ -164,6 +164,24 @@ test("suggestions never merge two connected nets (review repro: R1 dragged to [1
   assert.deepEqual([suggestion.a, suggestion.b, suggestion.distance], ["R2.p", "C1.p", 0]);
 });
 
+test("a nearby terminal is suggested by distance and the core validates its net", async () => {
+  const opened = await call("inspect", { file: `${root}examples/control-signals.litzsim` });
+  const sheet = await apply(opened, [{ op: "add", type: "constant", grid: [2, 3] }]);
+  const { a, b, distance } = nearestPair(sheet.layout, "CONST2");
+  assert.deepEqual([a, b, distance], ["CONST2.out", "SUM1.in1", 32]);
+  const refused = await send("apply", {
+    document: sheet.document, expectedRevision: sheet.revision,
+    ops: [{ op: "connect", a, b }],
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.message, "Signal net has multiple outputs: CONST2.out, CONST1.out");
+
+  // Moving the same terminal beside an output changes the nearest candidate,
+  // even though the core would also refuse that connection.
+  const nearOutput = await apply(opened, [{ op: "add", type: "constant", grid: [0, 1] }]);
+  assert.equal(nearestPair(nearOutput.layout, "CONST2")?.b, "CONST1.out");
+});
+
 test("the core reports a shorted voltage source before the screen keeps the connection", async () => {
   const sheet = await rc();
   const connect = (a, b) => call("apply", {

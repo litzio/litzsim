@@ -50,6 +50,7 @@ export function deleteSelection({ parts, wires }) {
 /**
  * Closest terminal of another part for a part moved by offset. A suggestion only
  * attaches a free terminal: merging two existing nets is left to explicit clicks.
+ * The core validates the connection when the candidate is accepted.
  */
 export function nearestPair(layout, partId, [dx, dy] = [0, 0]) {
   const pins = Object.entries(layout.pins);
@@ -58,8 +59,6 @@ export function nearestPair(layout, partId, [dx, dy] = [0, 0]) {
     const from = [pin.at[0] + dx, pin.at[1] + dy];
     for (const [b, other] of pins) {
       if (other.partId === partId || (pin.netId !== null && other.netId !== null)) continue;
-      if (Boolean(pin.signalDirection) !== Boolean(other.signalDirection)
-        || (pin.signalDirection === "output" && other.signalDirection === "output")) continue;
       const distance = Math.hypot(from[0] - other.at[0], from[1] - other.at[1]);
       if (distance <= SUGGEST_DISTANCE && (!best || distance < best.distance)) best = { a, b, from, to: other.at, distance };
     }
