@@ -8,6 +8,7 @@
 | [1차 MVP 범위와 PR 계획](mvp.md) | 보관 · C++·Qt MVP 계획 | 회로 작성·해석 검증·대용량 파형 탐색을 어떤 순서와 기준으로 구현하는가? |
 | [리치오와 LitzSim 화면 검토](reviews/desktop-shell.md) | 보관 · Qt 화면 비교 | 탐색기·탭·글꼴·아이콘을 실제 렌더링에서 어떻게 계승했는가? |
 | [MVP 검증 기록](reviews/pfc-validation.md) | 보관 · 검증 기준값 | 해석해, 스위칭·평균 비교, 대용량 파형 성능은 어떤 조건에서 측정했는가? |
+| [이중루프 벅 검증 기록](reviews/buck-dual-loop.md) | Rust · 수치·Host 검증 | 소프트스타트와 CCM 부하 계단에서 이중루프 벅이 사전 합격 기준을 충족하는가? |
 | [Rust 플러그인 아키텍처](spikes/2026-11-26-rust-plugin-architecture.md) | 1차 구현 설계 | 코어를 어떻게 싣고 편집·실행·파형과 로컬 설치를 어떻게 검증하는가? |
 | [피드백 제어](spikes/2026-11-26-feedback-control.md) | 현황 진단 · 설계 결정 | 이중루프 벅 제어에 무엇이 부족하고, 센서·샘플 갱신을 어떤 순서로 만드는가? |
 | [웹 회로 편집기 아키텍처](spikes/2026-11-26-web-editor-architecture.md) | 전환 설계 | 단독 앱과 Litzio에서 편집 연산·실행·파형 화면을 어떻게 공유하는가? |

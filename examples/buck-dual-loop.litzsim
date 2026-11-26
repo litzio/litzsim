@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "simulation": {"timeStep_s": 1e-7, "stopTime_s": 0.012, "controlSamplePeriod_s": 1e-5},
+  "parts": {
+    "V1": {"type": "dc", "parameters": {"voltage_V": 12}},
+    "Q1": {"type": "nmos", "parameters": {}},
+    "D1": {"type": "diode", "parameters": {}},
+    "L1": {
+      "type": "inductor",
+      "parameters": {"inductance_H": 0.0001, "initialCurrent_A": 0.25},
+      "record": {"current": true}
+    },
+    "C1": {
+      "type": "capacitor",
+      "parameters": {"capacitance_F": 0.00022, "initialVoltage_V": 0, "esr_ohm": 0},
+      "record": {"voltage": true}
+    },
+    "R1": {"type": "resistor", "parameters": {"resistance_ohm": 2.5}},
+    "R2": {"type": "resistor", "parameters": {"resistance_ohm": 5}},
+    "SW1": {"type": "timedSwitch", "parameters": {"initiallyClosed": 0, "switchTime_s": 0.006}},
+    "GND": {"type": "ground", "parameters": {}},
+    "VS": {"type": "voltageSensor", "parameters": {"gain": 1}},
+    "CS": {"type": "currentSensor", "parameters": {"gain": 1}},
+    "REF": {
+      "type": "ramp",
+      "parameters": {"startTime_s": 0, "slope_per_s": 2500, "finalValue": 5}
+    },
+    "ERR_V": {"type": "sum", "parameters": {"sign1": 1, "sign2": -1}},
+    "PI_V": {
+      "type": "pi",
+      "parameters": {"kp": 2.212, "ki": 8338, "initialIntegral": 0, "min": 0.25, "max": 4}
+    },
+    "I_REF": {"type": "limiter", "parameters": {"min": 0.25, "max": 4}},
+    "ERR_I": {"type": "sum", "parameters": {"sign1": 1, "sign2": -1}},
+    "PI_I": {
+      "type": "pi",
+      "parameters": {"kp": 0.262, "ki": 823, "initialIntegral": 0, "min": 0, "max": 0.9},
+      "record": {"output": true}
+    },
+    "PWM": {"type": "dutyPwm", "parameters": {"frequency_Hz": 100000, "high_V": 10}}
+  },
+  "nets": {
+    "input": ["V1.p", "Q1.d"],
+    "gate": ["PWM.out", "Q1.g"],
+    "sw": ["Q1.s", "PWM.ref", "D1.k", "L1.p"],
+    "inductor_sense": ["L1.n", "CS.p"],
+    "output": ["CS.n", "C1.p", "R1.p", "R2.p", "VS.p"],
+    "load_step": ["R2.n", "SW1.p"],
+    "ground": ["GND.ref", "V1.n", "D1.a", "C1.n", "R1.n", "SW1.n", "VS.n"],
+    "ramp": ["REF.out", "ERR_V.in1"],
+    "voltage_feedback": ["VS.out", "ERR_V.in2"],
+    "voltage_error": ["ERR_V.out", "PI_V.in"],
+    "current_command": ["PI_V.out", "I_REF.in"],
+    "current_reference": ["I_REF.out", "ERR_I.in1"],
+    "current_feedback": ["CS.out", "ERR_I.in2"],
+    "current_error": ["ERR_I.out", "PI_I.in"],
+    "duty": ["PI_I.out", "PWM.duty"]
+  },
+  "layout": {
+    "V1": {"x": 0, "y": 5},
+    "PWM": {"x": 4, "y": 3},
+    "Q1": {"x": 8, "y": 2},
+    "D1": {"x": 10, "y": 5},
+    "L1": {"x": 13, "y": 3},
+    "CS": {"x": 18, "y": 3, "rotation": 0},
+    "C1": {"x": 23, "y": 5},
+    "R1": {"x": 27, "y": 5, "rotation": 90},
+    "R2": {"x": 32, "y": 5, "rotation": 90},
+    "SW1": {"x": 32, "y": 8},
+    "VS": {"x": 37, "y": 5},
+    "GND": {"x": 10, "y": 10},
+    "REF": {"x": 0, "y": 13},
+    "ERR_V": {"x": 6, "y": 14},
+    "PI_V": {"x": 12, "y": 14},
+    "I_REF": {"x": 18, "y": 14},
+    "ERR_I": {"x": 24, "y": 14},
+    "PI_I": {"x": 30, "y": 14}
+  },
+  "bends": {
+    "Q1.d": {"x": 0, "y": 1}
+  }
+}
