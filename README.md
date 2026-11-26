@@ -48,8 +48,6 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 
 RC·RLC·벅 예제는 [examples](examples/)에 있습니다. PFC 예제는 지원 범위 밖 제어 설정이 있어 읽기를 거절합니다. 회로 파일에는 revision이나 Undo 기록을 저장하지 않습니다. 저장 중에는 시스템 임시 폴더의 경로별 OS 잠금을 사용합니다. 신규 저장은 하드 링크를 지원하는 파일시스템에서 완성된 파일을 원자적으로 게시합니다.
 
-Windows에서 교체 저장할 때는 디스크 revision을 확인한 뒤 대상 파일의 삭제 권한을 가진 핸들을 열고, 원자적 교체가 끝날 때까지 유지합니다. 기존 핸들이 삭제 공유를 차단하면 `ioError`를 반환하고 기존 파일을 보존합니다.
-
 `litzsim serve`는 요청 한 줄마다 JSON 한 줄을 반환합니다. `ping`은 버전을, `new`는 빈 v1 문서와 revision을 반환합니다. 성공한 `apply` 응답에는 `document`, `receipt`, 같은 revision의 `layout`이 함께 들어갑니다. 실패 응답의 `error` 객체에는 `code`와 `message`가 들어갑니다. 편집과 파일 요청의 필드는 다음과 같습니다.
 
 | `op` | 필드 |

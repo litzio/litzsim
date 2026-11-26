@@ -213,6 +213,51 @@ fn serves_json_lines_until_stdin_closes() {
     assert!(child.wait().unwrap().success());
 }
 
+#[cfg(windows)]
+#[test]
+fn replacing_a_readonly_circuit_reports_the_destination() {
+    use litzsim_core::circuit::{Document, SaveMode, save};
+    use std::fs;
+
+    let directory = TestDirectory::new("readonly-save");
+    let path = directory.0.join("circuit.litzsim");
+    let original = include_bytes!("../../../examples/rc.litzsim");
+    let disk_revision = save(
+        &path,
+        &Document::from_bytes(original).unwrap(),
+        SaveMode::New,
+    )
+    .unwrap();
+    let path = path.canonicalize().unwrap();
+    let permissions = fs::metadata(&path).unwrap().permissions();
+    let mut readonly = permissions.clone();
+    readonly.set_readonly(true);
+    fs::set_permissions(&path, readonly).unwrap();
+
+    let result = save(
+        &path,
+        &Document::new(),
+        SaveMode::Replace {
+            expected_disk_revision: &disk_revision,
+        },
+    );
+    fs::set_permissions(&path, permissions).unwrap();
+
+    let error = result.unwrap_err();
+    assert_eq!(error.code, "ioError");
+    assert!(
+        error
+            .message
+            .starts_with(&format!("Could not replace {}: ", path.display())),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        litzsim_core::circuit::open(&path).unwrap().disk_revision,
+        disk_revision
+    );
+}
+
 #[test]
 fn file_commands_round_trip_and_reject_failed_batches() {
     const BUCK: &[u8] = include_bytes!("../../../examples/buck.litzsim");
