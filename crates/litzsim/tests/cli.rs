@@ -129,17 +129,22 @@ fn serves_json_lines_until_stdin_closes() {
         output.read_line(&mut line).unwrap();
         assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), expected);
     }
-    let mut request = |request: Value| -> Value {
+    let mut request = |request: Value, expected_ok: bool| -> Value {
         writeln!(input, "{request}").unwrap();
         let mut line = String::new();
         output.read_line(&mut line).unwrap();
-        serde_json::from_str(&line).unwrap()
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["ok"], expected_ok, "{}: {response}", request["op"]);
+        response
     };
-    let blank = request(json!({ "op": "new" }));
-    let edited = request(json!({
-        "op": "apply", "document": blank["document"], "expectedRevision": blank["revision"],
-        "ops": [{"op": "add", "type": "ammeter", "grid": [8, 4]}]
-    }));
+    let blank = request(json!({ "op": "new" }), true);
+    let edited = request(
+        json!({
+            "op": "apply", "document": blank["document"], "expectedRevision": blank["revision"],
+            "ops": [{"op": "add", "type": "ammeter", "grid": [8, 4]}]
+        }),
+        true,
+    );
     assert_eq!(edited["receipt"]["created"], json!(["ammeter1"]));
     assert_eq!(
         edited["layout"]["revision"],
@@ -153,7 +158,10 @@ fn serves_json_lines_until_stdin_closes() {
         edited["layout"]["symbols"][0]["currentArrow"]["to"],
         json!([266, 137])
     );
-    let inspection = request(json!({ "op": "inspect", "document": edited["document"] }));
+    let inspection = request(
+        json!({ "op": "inspect", "document": edited["document"] }),
+        true,
+    );
     assert_eq!(inspection["pinPositions"]["ammeter1.p"], json!([7, 4]));
     assert_eq!(
         inspection["measurements"]["ammeter1"],
@@ -170,33 +178,37 @@ fn serves_json_lines_until_stdin_closes() {
         "expectedBefore": edited["receipt"]["beforeRevision"],
         "previous": blank["document"]
     });
-    let undone = request(undo.clone());
+    let undone = request(undo.clone(), true);
     assert_eq!(undone["document"], blank["document"]);
     assert_eq!(undone["receipt"]["afterRevision"], blank["revision"]);
     undo["previous"] = edited["document"].clone();
-    let rejected = request(undo);
-    assert_eq!(rejected["ok"], false);
+    let rejected = request(undo, false);
     assert_eq!(rejected["error"]["code"], "previousMismatch");
     assert_eq!(rejected["error"]["targetId"], "previous");
     assert_eq!(rejected["error"]["actual"], inspection["revision"]);
 
     let directory = TestDirectory::new("serve");
     let file = directory.0.join("circuit.litzsim");
-    let saved = request(json!({ "op": "save", "file": file, "document": edited["document"] }));
-    let opened = request(json!({ "op": "inspect", "file": file }));
+    let saved = request(
+        json!({ "op": "save", "file": file, "document": edited["document"] }),
+        true,
+    );
+    let opened = request(json!({ "op": "inspect", "file": file }), true);
     assert_eq!(opened["diskRevision"], saved["diskRevision"]);
     assert_eq!(opened["document"], edited["document"]);
     let mut from_file = directory.run(&["layout", "circuit.litzsim", "--json"], true);
     from_file.as_object_mut().unwrap().remove("ok");
     assert_eq!(from_file, edited["layout"]);
-    request(json!({
-        "op": "save", "file": file, "document": undone["document"],
-        "expectedDiskRevision": opened["diskRevision"]
-    }));
-    assert_eq!(
-        request(json!({ "op": "inspect", "file": file }))["document"],
-        blank["document"]
+    let replaced = request(
+        json!({
+            "op": "save", "file": file, "document": undone["document"],
+            "expectedDiskRevision": opened["diskRevision"]
+        }),
+        true,
     );
+    let reopened = request(json!({ "op": "inspect", "file": file }), true);
+    assert_eq!(reopened["diskRevision"], replaced["diskRevision"]);
+    assert_eq!(reopened["document"], blank["document"]);
     drop(input);
     assert!(child.wait().unwrap().success());
 }

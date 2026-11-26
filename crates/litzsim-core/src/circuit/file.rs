@@ -53,6 +53,32 @@ pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<Stri
     lock.lock().map_err(io_error)?;
 
     check_destination(&path, &mode)?;
+    #[cfg(windows)]
+    let _replace_guard = match mode {
+        SaveMode::New => None,
+        SaveMode::Replace {
+            expected_disk_revision,
+        } => {
+            use std::os::windows::fs::OpenOptionsExt;
+
+            // Keep DELETE access while staging and publishing so new handles
+            // must share deletion.
+            const DELETE_ACCESS: u32 = 0x0001_0000;
+            Some(
+                OpenOptions::new()
+                    .access_mode(DELETE_ACCESS)
+                    .open(&path)
+                    .map_err(|error| match error.kind() {
+                        io::ErrorKind::NotFound => Error::conflict(
+                            "diskRevisionConflict",
+                            Some(expected_disk_revision),
+                            None,
+                        ),
+                        _ => io_error(error),
+                    })?,
+            )
+        }
+    };
     let bytes = document.to_bytes();
     let staged = StagedFile::write(&path, |file| file.write_all(&bytes)).map_err(io_error)?;
     match mode {
