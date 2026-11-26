@@ -2,6 +2,7 @@
 
 use crate::circuit::{Document, Error, Part, part_definition};
 use crate::waves::{Channel, Waveform};
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 type Node = Option<usize>; // Ground has no row or column.
@@ -149,6 +150,10 @@ impl Device<'_> {
             Kind::Pulse(pulse) => Some(pulse),
             _ => None,
         }
+    }
+
+    fn is_open_switch(&self) -> bool {
+        matches!(self.kind, Kind::Diode | Kind::Nmos(_)) && !self.driven && !self.conducting
     }
 
     fn signal_unit(&self) -> Option<&'static str> {
@@ -312,7 +317,7 @@ fn solve_sample(
         for device in devices.iter() {
             stamp(system, device, time, interior, h);
         }
-        if !system.solve() {
+        if let Err(column) = system.solve() {
             // A newly driven channel can short a voltage source through a
             // previously conducting ideal diode. Release that state once.
             if turned_on && iteration == 0 && devices.iter().any(|d| d.conducting) {
@@ -321,10 +326,7 @@ fn solve_sample(
                 }
                 continue;
             }
-            return Err(Error::new(
-                "simulationFailed",
-                format!("Singular circuit at {time} s"),
-            ));
+            return Err(diagnose_zero_pivot(devices, column, time, h));
         }
         if system.rhs.iter().any(|v| !v.is_finite()) {
             return Err(Error::new(
@@ -343,6 +345,113 @@ fn solve_sample(
         "simulationFailed",
         format!("Ideal switch states did not converge at {time} s"),
     ))
+}
+
+fn diagnose_zero_pivot(devices: &[Device<'_>], column: usize, time: f64, h: f64) -> Error {
+    let failed_branch = devices.iter().find(|device| device.branch == Some(column));
+    let initial_current =
+        |device: &Device<'_>| h == 0.0 && matches!(device.kind, Kind::Inductor(..));
+    let ideal_voltage = |device: &Device<'_>| {
+        !device.is_open_switch()
+            && match device.kind {
+                Kind::Resistance(_) | Kind::Voltmeter | Kind::Inductor(..) => false,
+                Kind::Capacitor(..) => h == 0.0,
+                _ => true,
+            }
+    };
+
+    // For a branch column, look for a second path of ideal voltage constraints.
+    // For a node column, find all nodes whose voltages are coupled to it.
+    let mut connections = BTreeMap::<Node, Vec<(Node, &str)>>::new();
+    for device in devices {
+        let connects = if failed_branch.is_some() {
+            device.branch != Some(column) && ideal_voltage(device)
+        } else {
+            !device.is_open_switch()
+                && !initial_current(device)
+                && !matches!(device.kind, Kind::Voltmeter)
+        };
+        if !connects {
+            continue;
+        }
+        connections
+            .entry(device.p)
+            .or_default()
+            .push((device.n, device.id));
+        connections
+            .entry(device.n)
+            .or_default()
+            .push((device.p, device.id));
+    }
+    let start = failed_branch.map_or(Some(column), |device| device.p);
+    let mut paths = BTreeMap::from([(start, None)]);
+    let mut pending = vec![start];
+    while let Some(node) = pending.pop() {
+        for &(next, id) in connections.get(&node).into_iter().flatten() {
+            if let Entry::Vacant(entry) = paths.entry(next) {
+                entry.insert(Some((node, id)));
+                pending.push(next);
+            }
+        }
+    }
+
+    let report = |reason: &str, target: &str, ids: &[&str]| {
+        let mut error = Error::new(
+            "singularCircuit",
+            format!("{reason} at {time} s: {}", ids.join(", ")),
+        );
+        error.target_id = Some(target.into());
+        error
+    };
+    if let Some(device) = failed_branch {
+        if ideal_voltage(device) && paths.contains_key(&device.n) {
+            let mut ids = vec![device.id];
+            let mut node = device.n;
+            while let Some((previous, id)) = paths[&node] {
+                ids.push(id);
+                node = previous;
+            }
+            return report("Ideal voltage constraint loop", device.id, &ids);
+        }
+    } else if !paths.contains_key(&None) {
+        let boundary: Vec<_> = devices
+            .iter()
+            .filter(|device| {
+                (device.is_open_switch() || initial_current(device))
+                    && paths.contains_key(&device.p) != paths.contains_key(&device.n)
+            })
+            .collect();
+        let ids: Vec<_> = boundary.iter().map(|device| device.id).collect();
+        if let Some(inductor) = boundary.iter().find(|device| initial_current(device)) {
+            return report(
+                "Initial inductor current cutset with no voltage-defined return path",
+                inductor.id,
+                &ids,
+            );
+        }
+        if let Some(id) = ids.first() {
+            return report(
+                "Floating node or island isolated by open switches",
+                id,
+                &ids,
+            );
+        }
+        let ids: Vec<_> = devices
+            .iter()
+            .filter(|device| paths.contains_key(&device.p) || paths.contains_key(&device.n))
+            .map(|device| device.id)
+            .collect();
+        if let Some(id) = ids.first() {
+            return report("Floating node or island with no ground reference", id, &ids);
+        }
+    }
+
+    let mut error = Error::new(
+        "simulationFailed",
+        format!("Circuit matrix has a zero pivot at {time} s"),
+    );
+    error.target_id = failed_branch.map(|device| device.id.into());
+    error
 }
 
 fn update_switch(device: &mut Device<'_>, x: &[f64]) -> bool {
@@ -380,7 +489,7 @@ fn stamp(system: &mut System, device: &Device<'_>, time: f64, interior: f64, h: 
     system.add(p, k, 1.0);
     system.add(n, k, -1.0);
     let (voltage, coefficient, rhs) = match device.kind {
-        Kind::Diode | Kind::Nmos(_) if !device.driven && !device.conducting => (false, 1.0, 0.0),
+        Kind::Diode | Kind::Nmos(_) if device.is_open_switch() => (false, 1.0, 0.0),
         Kind::Inductor(_, current) if h == 0.0 => (false, 1.0, current),
         Kind::Inductor(inductance, current) => {
             let z = inductance / h;
@@ -444,7 +553,8 @@ impl System {
     }
 
     /// Gaussian elimination with partial pivoting. The solution replaces rhs.
-    fn solve(&mut self) -> bool {
+    /// A zero pivot returns its column in the original unknown ordering.
+    fn solve(&mut self) -> Result<(), usize> {
         let size = self.rhs.len();
         for k in 0..size {
             let mut pivot = k;
@@ -454,7 +564,7 @@ impl System {
                 }
             }
             if self.matrix[pivot][k] == 0.0 {
-                return false;
+                return Err(k);
             }
             self.matrix.swap(k, pivot);
             self.rhs.swap(k, pivot);
@@ -475,6 +585,6 @@ impl System {
             }
             self.rhs[i] /= self.matrix[i][i];
         }
-        true
+        Ok(())
     }
 }
