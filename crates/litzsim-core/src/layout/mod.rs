@@ -127,6 +127,8 @@ pub struct Pin<'a> {
     pub part_id: &'a str,
     pub at: Point,
     pub net_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_direction: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -233,7 +235,8 @@ pub fn layout(document: &Document) -> Layout<'_> {
     for part in document.layout_parts() {
         let measurement = inspection.measurements.get(part.id);
         let (symbol, labels) = symbols::geometry(part, measurement);
-        for pin in part_definition(symbol.kind).expect("validated part").pins {
+        let definition = part_definition(symbol.kind).expect("validated part");
+        for pin in definition.pins {
             let id = format!("{}.{pin}", symbol.id);
             let at = scene(inspection.pin_positions[&id]);
             let net_id = inspection.pin_nets[&id];
@@ -243,6 +246,11 @@ pub fn layout(document: &Document) -> Layout<'_> {
                     part_id: symbol.id,
                     at,
                     net_id,
+                    signal_direction: match definition.pin_kind(pin) {
+                        crate::circuit::PinKind::Electrical => None,
+                        crate::circuit::PinKind::SignalInput => Some("input"),
+                        crate::circuit::PinKind::SignalOutput => Some("output"),
+                    },
                 },
             );
         }
@@ -339,17 +347,18 @@ pub(crate) fn branch_cut(
     Ok((net.to_owned(), pins))
 }
 
-pub(crate) fn ammeter_overlap(
-    document: &Document,
+pub(crate) fn series_part_overlap<'a>(
+    document: &'a Document,
+    kind: &str,
     placement: crate::circuit::Placement,
     endpoints: [Point; 2],
-) -> Option<&str> {
-    let meter: Vec<_> = symbols::ink_bounds("ammeter", placement).collect();
+) -> Option<&'a str> {
+    let inserted: Vec<_> = symbols::ink_bounds(kind, placement).collect();
     document
         .layout_parts()
         .find(|part| {
             symbols::ink_bounds(part.kind, part.placement).any(|neighbor| {
-                meter.iter().any(|&stroke| {
+                inserted.iter().any(|&stroke| {
                     // A lead may meet its neighbor at the end of the cut.
                     stroke.intersection(neighbor).is_some_and(|contact| {
                         contact.min != contact.max || !endpoints.contains(&contact.min)

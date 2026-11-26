@@ -660,6 +660,28 @@ fn insert_in_branch_cuts_the_chosen_segment_and_faces_the_first_pin_toward_from(
     }
     assert!(checked > 0);
 
+    let sensor = apply(
+        &rc,
+        &revision,
+        &[Operation::InsertInBranch {
+            kind: "currentSensor".into(),
+            terminals: ["R1.n".into(), "C1.p".into()],
+            from: [160, 32],
+            to: [256, 32],
+        }],
+    )
+    .unwrap();
+    assert_eq!(sensor.receipt.created, ["CS1"]);
+    let drawn = layout(&sensor.document);
+    for (ammeter, current_sensor) in [("AM1.p", "CS1.p"), ("AM1.n", "CS1.n")] {
+        assert_eq!(
+            charging.inspect().pin_nets[ammeter],
+            drawn.pins[current_sensor].net_id
+        );
+    }
+    assert_eq!(drawn.pins["CS1.out"].net_id, None);
+    assert_eq!(drawn.pins["CS1.out"].signal_direction, Some("output"));
+
     // A stale segment, a reversed pair or a non two-terminal part changes nothing.
     for (op, target) in [
         (insert(["V1.n", "C1.n"], [128, 96], [384, 96]), "C1.n"),

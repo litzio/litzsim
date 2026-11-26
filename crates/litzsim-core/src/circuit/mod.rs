@@ -9,6 +9,7 @@ pub use edit::{EditResult, MirrorAxis, NetChange, Operation, Receipt, apply, und
 pub use file::REPLACE_RETRY_DELAYS;
 pub(crate) use file::StagedFile;
 pub use file::{Opened, SaveMode, open, save, save_snapshot};
+pub(crate) use library::PinKind;
 pub use library::{Measurement, PartDefinition, RecordQuantity, part_definition};
 
 use serde::de::{Error as _, MapAccess, Visitor};
@@ -116,17 +117,28 @@ pub(crate) struct Record {
     pub(crate) voltage: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) current: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) output: bool,
 }
 
 impl Record {
     fn is_off(&self) -> bool {
-        !self.voltage && !self.current
+        !self.voltage && !self.current && !self.output
     }
 
     pub(crate) fn enabled(self, quantity: RecordQuantity) -> bool {
         match quantity {
             RecordQuantity::Voltage => self.voltage,
             RecordQuantity::Current => self.current,
+            RecordQuantity::Output => self.output,
+        }
+    }
+
+    fn set(&mut self, quantity: RecordQuantity, enabled: bool) {
+        match quantity {
+            RecordQuantity::Voltage => self.voltage = enabled,
+            RecordQuantity::Current => self.current = enabled,
+            RecordQuantity::Output => self.output = enabled,
         }
     }
 }
@@ -227,6 +239,13 @@ pub(crate) struct Simulation {
     )]
     pub(crate) output_step_s: Option<f64>,
     #[serde(
+        rename = "controlSamplePeriod_s",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub(crate) control_sample_period_s: Option<f64>,
+    #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "present"
@@ -282,6 +301,7 @@ impl Document {
                 time_step_s: 1e-6,
                 stop_time_s: 0.001,
                 output_step_s: None,
+                control_sample_period_s: None,
                 model: None,
             },
         })
@@ -412,7 +432,15 @@ impl CircuitV1 {
             let definition = part_definition(&part.kind).ok_or_else(|| {
                 Error::invalid(id, format!("unsupported part type: {}", part.kind))
             })?;
-            if !part.record.is_off() && definition.recording_pins.is_none() {
+            if [
+                RecordQuantity::Voltage,
+                RecordQuantity::Current,
+                RecordQuantity::Output,
+            ]
+            .into_iter()
+            .any(|quantity| {
+                part.record.enabled(quantity) && !definition.recordable().contains(&quantity)
+            }) {
                 return Err(Error::invalid(
                     id,
                     "part does not support waveform recording",
@@ -447,6 +475,7 @@ impl CircuitV1 {
                     return Err(Error::invalid(pin, "multiply connected terminal"));
                 }
             }
+            self.validate_net(pins.iter().map(String::as_str))?;
         }
         for (id, pos) in &self.layout {
             self.require_part(id)?;
@@ -468,17 +497,46 @@ impl CircuitV1 {
             .ok_or_else(|| Error::invalid(id, "unknown part"))
     }
 
-    fn require_pin(&self, terminal: &str) -> Result<(), Error> {
+    pub(crate) fn require_pin(&self, terminal: &str) -> Result<PinKind, Error> {
         if let Some((id, pin)) = terminal.split_once('.')
-            && self
+            && let Some(definition) = self
                 .parts
                 .get(id)
                 .and_then(|part| part_definition(&part.kind))
-                .is_some_and(|definition| definition.pins.contains(&pin))
+            && definition.pins.contains(&pin)
         {
-            return Ok(());
+            return Ok(definition.pin_kind(pin));
         }
         Err(Error::invalid(terminal, "unknown terminal"))
+    }
+
+    fn validate_net<'a>(&self, terminals: impl Iterator<Item = &'a str>) -> Result<(), Error> {
+        let mut domain: Option<(&str, bool)> = None;
+        let mut output = None;
+        for terminal in terminals {
+            let kind = self.require_pin(terminal)?;
+            if let Some((first, signal)) = domain
+                && kind.is_signal() != signal
+            {
+                return Err(Error::invalid(
+                    terminal,
+                    format!("Cannot connect signal and electrical terminals: {first}, {terminal}"),
+                ));
+            }
+            domain.get_or_insert((terminal, kind.is_signal()));
+            if kind == PinKind::SignalOutput {
+                if let Some(previous) = output
+                    && previous != terminal
+                {
+                    return Err(Error::invalid(
+                        terminal,
+                        format!("Signal net has multiple outputs: {previous}, {terminal}"),
+                    ));
+                }
+                output = Some(terminal);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -512,6 +570,14 @@ impl Simulation {
                     "must be a positive integer multiple of timeStep_s",
                 ));
             }
+        }
+        if let Some(period) = self.control_sample_period_s
+            && (!period.is_finite() || period <= 0.0)
+        {
+            return Err(Error::invalid(
+                "controlSamplePeriod_s",
+                "expected positive finite control sample period",
+            ));
         }
         Ok(())
     }

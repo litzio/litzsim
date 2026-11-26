@@ -1,7 +1,10 @@
 //! Transient modified nodal analysis for the v1 circuit document.
 
+mod control;
+
 use crate::circuit::{Document, Error, Part, Record, RecordQuantity, part_definition};
 use crate::waves::{Channel, Waveform};
+use control::Control;
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -55,6 +58,7 @@ pub fn simulate_with_warnings(
     document: &Document,
     mut should_stop: impl FnMut(f64) -> bool,
 ) -> Result<(Waveform, Vec<Warning>), Error> {
+    let mut control = Control::compile(document)?;
     let (mut devices, size) = assemble(document)?;
     let mut system = System::new(size);
     let settings = &document.circuit().simulation;
@@ -75,13 +79,15 @@ pub fn simulate_with_warnings(
         })
         .collect();
     let clocks: Vec<_> = devices.iter().filter_map(Device::pulse).collect();
-    let mut wave = Waveform::new(probes.iter().map(|&(index, quantity)| {
+    let electrical_channels = probes.iter().map(|&(index, quantity)| {
         let unit = quantity.unit();
         Channel {
             name: format!("{}_{unit}", devices[index].id),
             unit: unit.into(),
         }
-    }));
+    });
+    let mut wave =
+        Waveform::new(electrical_channels.chain(control.iter().flat_map(Control::channels)));
 
     let (mut tick, mut time, mut previous) = (0_u64, 0.0, 0.0);
     loop {
@@ -106,8 +112,24 @@ pub fn simulate_with_warnings(
         }
         let on_grid = time == tick as f64 * step;
         let record = stride.is_none_or(|stride| on_grid && tick % stride == 0) || time == stop;
-        if record {
-            push_row(&mut wave, &devices, &probes, time, x)?;
+        // A control tick uses the electrical left limit. Record the held
+        // outputs first, except at zero where there is no previous value.
+        if record && time != 0.0 {
+            push_row(&mut wave, &devices, &probes, control.as_ref(), time, x)?;
+        }
+        let mut control_changed = false;
+        if let Some(control) = &mut control
+            && control.due(time)
+        {
+            control_changed = control.sample(|id, quantity| {
+                let index = devices
+                    .binary_search_by_key(&id, |device| device.id)
+                    .expect("sensor has an electrical device");
+                devices[index].signal(quantity, x)
+            })?;
+        }
+        if record && (time == 0.0 || (time == stop && control_changed)) {
+            push_row(&mut wave, &devices, &probes, control.as_ref(), time, x)?;
         }
         if time == stop {
             return Ok((wave, warnings));
@@ -119,6 +141,9 @@ pub fn simulate_with_warnings(
         let edge = clocks
             .iter()
             .fold(boundary, |next, pulse| next.min(pulse.next_edge(time)));
+        let edge = control
+            .as_ref()
+            .map_or(edge, |control| edge.min(control.next_sample()));
         // Merge clocks separated only by floating-point roundoff.
         let next = if boundary - edge <= CLOCK_EPSILON * boundary {
             boundary
@@ -141,12 +166,13 @@ pub fn simulate_with_warnings(
         // inductor currents stay, and the circuit is solved with the switch
         // states of the next interval. Switch states are restored afterwards so
         // the following steps are computed exactly as without this row.
+        // Include any updated control outputs in this same right-limit row.
         let right = (time + next) / 2.0;
-        if record
+        let switching = record
             && clocks
                 .iter()
-                .any(|pulse| pulse.is_high(time - h / 2.0) != pulse.is_high(right))
-        {
+                .any(|pulse| pulse.is_high(time - h / 2.0) != pulse.is_high(right));
+        if switching {
             let switches: Vec<_> = devices.iter().map(|d| (d.driven, d.conducting)).collect();
             let limit = Sample {
                 time,
@@ -163,10 +189,19 @@ pub fn simulate_with_warnings(
             };
             solve_sample(&mut devices, &mut system, settle)?;
             solve_sample(&mut devices, &mut system, limit)?;
-            push_row(&mut wave, &devices, &probes, time, &system.rhs)?;
+            push_row(
+                &mut wave,
+                &devices,
+                &probes,
+                control.as_ref(),
+                time,
+                &system.rhs,
+            )?;
             for (device, (driven, conducting)) in devices.iter_mut().zip(switches) {
                 (device.driven, device.conducting) = (driven, conducting);
             }
+        } else if record && time != 0.0 && control_changed {
+            push_row(&mut wave, &devices, &probes, control.as_ref(), time, x)?;
         }
         previous = time;
         time = next;
@@ -177,12 +212,14 @@ fn push_row(
     wave: &mut Waveform,
     devices: &[Device<'_>],
     probes: &[(usize, RecordQuantity)],
+    control: Option<&Control<'_>>,
     time: f64,
     x: &[f64],
 ) -> Result<(), Error> {
     let signals = probes
         .iter()
-        .map(|&(index, quantity)| devices[index].signal(quantity, x));
+        .map(|&(index, quantity)| devices[index].signal(quantity, x))
+        .chain(control.into_iter().flat_map(Control::recorded_values));
     if signals.clone().any(|value| !value.is_finite()) {
         return Err(Error::new("simulationFailed", "Non-finite waveform value"));
     }
@@ -297,6 +334,7 @@ impl Device<'_> {
             (RecordQuantity::Voltage, _) => self.voltage(x),
             (RecordQuantity::Current, Kind::Resistance(ohm)) => self.voltage(x) / ohm,
             (RecordQuantity::Current, _) => x[self.branch()],
+            (RecordQuantity::Output, _) => unreachable!("control output is evaluated separately"),
         }
     }
 }
@@ -325,7 +363,14 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
     let pin_nets = circuit.pin_nets();
     let missing: Vec<_> = pin_nets
         .iter()
-        .filter_map(|(pin, net)| net.is_none().then_some(pin.as_str()))
+        .filter_map(|(pin, net)| {
+            (net.is_none()
+                && !circuit
+                    .require_pin(pin)
+                    .expect("validated terminal")
+                    .is_signal())
+            .then_some(pin.as_str())
+        })
         .collect();
     if let Some(first) = missing.first() {
         return Err(Error::invalid(
@@ -340,7 +385,12 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
         .filter(|(_, part)| part.kind == "ground")
         .map(|(id, _)| pin_net(id.as_str(), "ref"))
         .collect();
-    if grounds.is_empty() {
+    let signal_only = !circuit.parts.is_empty()
+        && circuit.parts.values().all(|part| {
+            let definition = part_definition(&part.kind).expect("validated part");
+            definition.is_control() && definition.measurement.is_none()
+        });
+    if grounds.is_empty() && !signal_only {
         return Err(Error::invalid("ground", "Missing reference ground"));
     }
 
@@ -348,7 +398,14 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
     let nodes: BTreeMap<_, _> = circuit
         .nets
         .iter()
-        .filter(|(_, pins)| !pins.is_empty())
+        .filter(|(_, pins)| {
+            pins.first().is_some_and(|pin| {
+                !circuit
+                    .require_pin(pin)
+                    .expect("validated terminal")
+                    .is_signal()
+            })
+        })
         .map(|(net, _)| {
             (
                 net.as_str(),
@@ -363,6 +420,10 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
             continue;
         }
         let definition = part_definition(&part.kind).expect("validated part");
+        let is_control = definition.is_control();
+        if is_control && definition.measurement.is_none() {
+            continue;
+        }
         let mut series_resistance = 0.0;
         if let Some((key, _)) = definition.series_resistance() {
             series_resistance = part.parameters[key].as_f64().expect("validated parameter");
@@ -383,8 +444,9 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
         let branch =
             (!matches!(kind, Kind::Resistance(_) | Kind::Voltmeter)).then(|| take_index(&mut size));
         let record = Record {
-            voltage: part.record.voltage || matches!(kind, Kind::Voltmeter),
-            current: part.record.current || matches!(kind, Kind::Ammeter),
+            voltage: part.record.voltage || (!is_control && matches!(kind, Kind::Voltmeter)),
+            current: part.record.current || (!is_control && matches!(kind, Kind::Ammeter)),
+            ..Default::default()
         };
         devices.push(Device {
             id,
@@ -525,8 +587,8 @@ fn device_kind(id: &str, part: &Part) -> Result<Kind, Error> {
         }
         "diode" => Kind::Diode,
         "nmos" => Kind::Nmos(None),
-        "voltmeter" | "voltageProbe" => Kind::Voltmeter,
-        "ammeter" => Kind::Ammeter,
+        "voltmeter" | "voltageProbe" | "voltageSensor" => Kind::Voltmeter,
+        "ammeter" | "currentSensor" => Kind::Ammeter,
         kind => {
             return Err(Error::invalid(
                 id,

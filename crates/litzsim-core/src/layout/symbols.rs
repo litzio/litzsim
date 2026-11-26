@@ -89,6 +89,34 @@ fn strokes(kind: &str) -> Vec<Stroke> {
             }));
             strokes
         }
+        "voltageSensor" | "currentSensor" => {
+            let (meter, lead) = if kind == "voltageSensor" {
+                ("voltmeter", [[20, 0], [32, 0]])
+            } else {
+                ("ammeter", [[0, -20], [0, -32]])
+            };
+            let mut body = strokes(meter);
+            body.push(line(&lead));
+            body
+        }
+        "constant" | "step" | "ramp" | "sum" | "gain" | "limiter" => {
+            let height = if kind == "sum" { 38 } else { 16 };
+            let mut body = vec![line(&[
+                [-20, -height],
+                [20, -height],
+                [20, height],
+                [-20, height],
+                [-20, -height],
+            ])];
+            let definition = part_definition(kind).expect("validated control block");
+            body.extend(
+                definition
+                    .pin_offsets
+                    .iter()
+                    .map(|&[x, y]| line(&[[x * 20, y * 32], [x * 32, y * 32]])),
+            );
+            body
+        }
         "ammeter" => vec![
             Stroke::Circle {
                 center: [0, 0],
