@@ -1,0 +1,203 @@
+{
+  "version": 1,
+  "simulation": {
+    "timeStep_s": 5e-07,
+    "stopTime_s": 0.01,
+    "controlSamplePeriod_s": 0.0001
+  },
+  "parts": {
+    "V1": {
+      "type": "dc",
+      "parameters": {
+        "voltage_V": 5
+      }
+    },
+    "R1": {
+      "type": "resistor",
+      "parameters": {
+        "resistance_ohm": 10
+      }
+    },
+    "C1": {
+      "type": "capacitor",
+      "parameters": {
+        "capacitance_F": 0.0001,
+        "initialVoltage_V": 0
+      }
+    },
+    "GND": {
+      "type": "ground",
+      "parameters": {}
+    },
+    "VC": {
+      "type": "voltmeter",
+      "parameters": {}
+    },
+    "Q1": {
+      "type": "nmos",
+      "parameters": {}
+    },
+    "D1": {
+      "type": "diode",
+      "parameters": {}
+    },
+    "L1": {
+      "type": "inductor",
+      "parameters": {
+        "inductance_H": 0.001,
+        "initialCurrent_A": 0
+      }
+    },
+    "PWM": {
+      "type": "dutyPwm",
+      "parameters": {
+        "frequency_Hz": 10000,
+        "high_V": 10
+      }
+    },
+    "REF": {
+      "type": "constant",
+      "parameters": {
+        "value": 2.5
+      }
+    },
+    "VS": {
+      "type": "voltageSensor",
+      "parameters": {
+        "gain": 1
+      }
+    },
+    "ERR": {
+      "type": "sum",
+      "parameters": {
+        "sign1": 1,
+        "sign2": -1
+      },
+      "record": {
+        "output": true
+      }
+    },
+    "PI": {
+      "type": "pi",
+      "parameters": {
+        "kp": 0.025,
+        "ki": 125,
+        "initialIntegral": 0,
+        "min": 0,
+        "max": 1
+      },
+      "record": {
+        "output": true
+      }
+    }
+  },
+  "nets": {
+    "input": [
+      "V1.p",
+      "Q1.d"
+    ],
+    "gate": [
+      "PWM.out",
+      "Q1.g"
+    ],
+    "sw": [
+      "Q1.s",
+      "PWM.ref",
+      "D1.k",
+      "L1.p"
+    ],
+    "output": [
+      "L1.n",
+      "C1.p",
+      "R1.p",
+      "VC.p",
+      "VS.p"
+    ],
+    "ground": [
+      "GND.ref",
+      "V1.n",
+      "D1.a",
+      "C1.n",
+      "R1.n",
+      "VC.n",
+      "VS.n"
+    ],
+    "reference": [
+      "REF.out",
+      "ERR.in1"
+    ],
+    "feedback": [
+      "VS.out",
+      "ERR.in2"
+    ],
+    "error": [
+      "ERR.out",
+      "PI.in"
+    ],
+    "duty": [
+      "PI.out",
+      "PWM.duty"
+    ]
+  },
+  "layout": {
+    "V1": {
+      "x": 0,
+      "y": 5
+    },
+    "Q1": {
+      "x": 8,
+      "y": 2
+    },
+    "PWM": {
+      "x": 4,
+      "y": 3
+    },
+    "D1": {
+      "x": 11,
+      "y": 5
+    },
+    "L1": {
+      "x": 13,
+      "y": 4
+    },
+    "C1": {
+      "x": 16,
+      "y": 5
+    },
+    "R1": {
+      "x": 20,
+      "y": 5,
+      "rotation": 90
+    },
+    "VC": {
+      "x": 24,
+      "y": 5
+    },
+    "GND": {
+      "x": 11,
+      "y": 7
+    },
+    "REF": {
+      "x": -3,
+      "y": 10
+    },
+    "VS": {
+      "x": 24,
+      "y": 10
+    },
+    "ERR": {
+      "x": 2,
+      "y": 11
+    },
+    "PI": {
+      "x": 7,
+      "y": 11
+    }
+  },
+  "bends": {
+    "Q1.d": {
+      "x": 0,
+      "y": 1
+    }
+  }
+}
