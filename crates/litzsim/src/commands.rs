@@ -10,6 +10,7 @@ pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
         [cmd, file, flag] if cmd == "inspect" && flag == "--json" => {
             return inspect_file(Path::new(file));
         }
+        [cmd, file, out] if cmd == "run" => return run(Path::new(file), Path::new(out)),
         [cmd, file, expect, revision, option, input]
             if cmd == "apply" && expect == "--expect" && option == "--ops" =>
         {
@@ -69,6 +70,19 @@ pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
     .map_err(core_error)?;
     Ok(json!({
         "ok": true, "document": result.document, "receipt": result.receipt, "diskRevision": disk_revision
+    }))
+}
+
+fn run(path: &Path, out: &Path) -> Result<Value, Value> {
+    let opened = circuit::open(path).map_err(core_error)?;
+    let wave = litzsim_core::solver::simulate(&opened.document, || false).map_err(core_error)?;
+    litzsim_core::waves::write(out, &wave)
+        .map_err(|error| json!({ "code": "ioError", "message": error.to_string() }))?;
+    Ok(json!({
+        "ok": true,
+        "rows": wave.rows().len(),
+        "channels": wave.channels(),
+        "stopTime_s": wave.rows().last().expect("initial sample")[0],
     }))
 }
 
@@ -203,6 +217,6 @@ fn request_error(message: impl Into<String>) -> Value {
 
 fn usage() -> Value {
     request_error(
-        "Usage: litzsim --version | serve | inspect FILE --json | apply FILE --expect REV --ops OPS.json | undo FILE --expect AFTER --before BEFORE --previous SNAPSHOT",
+        "Usage: litzsim --version | serve | inspect FILE --json | apply FILE --expect REV --ops OPS.json | undo FILE --expect AFTER --before BEFORE --previous SNAPSHOT | run FILE OUT",
     )
 }

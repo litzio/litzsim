@@ -32,6 +32,76 @@ impl Drop for TestDirectory {
 }
 
 #[test]
+fn run_publishes_ordered_original_rows_and_rejects_invalid_circuits() {
+    use litzsim_core::{circuit::Document, solver, waves};
+
+    let directory = TestDirectory::new("run");
+    let rc = include_bytes!("../../../examples/rc.litzsim");
+    std::fs::write(directory.0.join("rc.litzsim"), rc).unwrap();
+    let summary = directory.run(&["run", "rc.litzsim", "rc.litzwave"], true);
+    let out = directory.0.join("rc.litzwave");
+    let wave = waves::read(&out).unwrap();
+    let expected = solver::simulate(&Document::from_bytes(rc).unwrap(), || false).unwrap();
+    assert_eq!(summary["rows"], 501);
+    assert_eq!(summary["stopTime_s"], 0.005);
+    assert_eq!(
+        summary["channels"],
+        json!([{"name":"time","unit":"s"},{"name":"VC_V","unit":"V"}])
+    );
+    assert_eq!(wave.channels(), expected.channels());
+    assert!(wave.rows().eq(expected.rows()));
+
+    let bytes = std::fs::read(&out).unwrap();
+    directory.run(&["run", "rc.litzsim", "rc.litzwave"], false);
+    assert_eq!(std::fs::read(&out).unwrap(), bytes);
+    let truncated = directory.0.join("truncated.litzwave");
+    std::fs::write(&truncated, &bytes[..bytes.len() - 1]).unwrap();
+    assert!(waves::read(&truncated).is_err());
+
+    let mut broken: Value = serde_json::from_slice(rc).unwrap();
+    broken["nets"]["output"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|pin| pin != "VC.p");
+    std::fs::write(
+        directory.0.join("broken.litzsim"),
+        serde_json::to_vec(&broken).unwrap(),
+    )
+    .unwrap();
+    let missing = directory.run(&["run", "broken.litzsim", "missing.litzwave"], false);
+    assert_eq!(missing["error"]["targetId"], "VC.p");
+    assert!(!directory.0.join("missing.litzwave").exists());
+
+    broken["parts"]["R1"]["type"] = json!("sink");
+    std::fs::write(
+        directory.0.join("broken.litzsim"),
+        serde_json::to_vec(&broken).unwrap(),
+    )
+    .unwrap();
+    let unsupported = directory.run(&["run", "broken.litzsim", "unsupported.litzwave"], false);
+    assert_eq!(unsupported["error"]["targetId"], "R1");
+    assert!(
+        unsupported["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sink")
+    );
+    assert!(!directory.0.join("unsupported.litzwave").exists());
+
+    let pfc = include_bytes!("../../../examples/pfc.litzsim");
+    std::fs::write(directory.0.join("pfc.litzsim"), pfc).unwrap();
+    let unsupported = directory.run(&["run", "pfc.litzsim", "pfc.litzwave"], false);
+    assert_eq!(unsupported["error"]["code"], "invalidCircuit");
+    assert!(
+        unsupported["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("control")
+    );
+    assert!(!directory.0.join("pfc.litzwave").exists());
+}
+
+#[test]
 fn serves_json_lines_until_stdin_closes() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_litzsim"))
         .arg("serve")
