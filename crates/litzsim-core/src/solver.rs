@@ -1,6 +1,6 @@
 //! Transient modified nodal analysis for the v1 circuit document.
 
-use crate::circuit::{Document, Error, Part, part_definition};
+use crate::circuit::{Document, Error, Part, Record, RecordQuantity, part_definition};
 use crate::waves::{Channel, Waveform};
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map::Entry;
@@ -67,12 +67,20 @@ pub fn simulate_with_warnings(
     let probes: Vec<_> = devices
         .iter()
         .enumerate()
-        .filter_map(|(index, device)| device.signal_unit().map(|unit| (index, unit)))
+        .flat_map(|(index, device)| {
+            [RecordQuantity::Voltage, RecordQuantity::Current]
+                .into_iter()
+                .filter(move |&quantity| device.record.enabled(quantity))
+                .map(move |quantity| (index, quantity))
+        })
         .collect();
     let clocks: Vec<_> = devices.iter().filter_map(Device::pulse).collect();
-    let mut wave = Waveform::new(probes.iter().map(|&(index, unit)| Channel {
-        name: format!("{}_{unit}", devices[index].id),
-        unit: unit.into(),
+    let mut wave = Waveform::new(probes.iter().map(|&(index, quantity)| {
+        let unit = quantity.unit();
+        Channel {
+            name: format!("{}_{unit}", devices[index].id),
+            unit: unit.into(),
+        }
     }));
 
     let (mut tick, mut time, mut previous) = (0_u64, 0.0, 0.0);
@@ -168,11 +176,13 @@ pub fn simulate_with_warnings(
 fn push_row(
     wave: &mut Waveform,
     devices: &[Device<'_>],
-    probes: &[(usize, &str)],
+    probes: &[(usize, RecordQuantity)],
     time: f64,
     x: &[f64],
 ) -> Result<(), Error> {
-    let signals = probes.iter().map(|&(index, _)| devices[index].signal(x));
+    let signals = probes
+        .iter()
+        .map(|&(index, quantity)| devices[index].signal(quantity, x));
     if signals.clone().any(|value| !value.is_finite()) {
         return Err(Error::new("simulationFailed", "Non-finite waveform value"));
     }
@@ -255,7 +265,7 @@ struct Device<'a> {
     p: Node,
     n: Node,
     branch: Option<usize>,
-    probe_unit: Option<&'static str>,
+    record: Record,
     series_resistance: f64,
     initial_capacitor: InitialCapacitor,
     driven: bool,
@@ -278,17 +288,15 @@ impl Device<'_> {
         matches!(self.kind, Kind::Diode | Kind::Nmos(_)) && !self.driven && !self.conducting
     }
 
-    fn signal_unit(&self) -> Option<&'static str> {
-        self.probe_unit.or(match self.kind {
-            Kind::Inductor(..) | Kind::Diode => Some("A"),
-            _ => None,
-        })
+    fn voltage(&self, x: &[f64]) -> f64 {
+        node(x, self.p) - node(x, self.n)
     }
 
-    fn signal(&self, x: &[f64]) -> f64 {
-        match self.kind {
-            Kind::Voltmeter => node(x, self.p) - node(x, self.n),
-            _ => x[self.branch()],
+    fn signal(&self, quantity: RecordQuantity, x: &[f64]) -> f64 {
+        match (quantity, &self.kind) {
+            (RecordQuantity::Voltage, _) => self.voltage(x),
+            (RecordQuantity::Current, Kind::Resistance(ohm)) => self.voltage(x) / ohm,
+            (RecordQuantity::Current, _) => x[self.branch()],
         }
     }
 }
@@ -365,18 +373,26 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
         let kind = device_kind(id, part)?;
         let (p, n) = match definition.measurement {
             Some(probe) => (probe.from_pin, probe.to_pin),
-            None if matches!(kind, Kind::Nmos(_)) => ("d", Some("s")),
-            None => (definition.pins[0], Some(definition.pins[1])),
+            None => {
+                let [p, n] = definition
+                    .recording_pins
+                    .unwrap_or_else(|| [definition.pins[0], definition.pins[1]]);
+                (p, Some(n))
+            }
         };
         let branch =
             (!matches!(kind, Kind::Resistance(_) | Kind::Voltmeter)).then(|| take_index(&mut size));
+        let record = Record {
+            voltage: part.record.voltage || matches!(kind, Kind::Voltmeter),
+            current: part.record.current || matches!(kind, Kind::Ammeter),
+        };
         devices.push(Device {
             id,
             kind,
             p: pin_node(id.as_str(), p),
             n: n.and_then(|pin| pin_node(id.as_str(), pin)),
             branch,
-            probe_unit: definition.measurement.map(|probe| probe.unit),
+            record,
             series_resistance,
             initial_capacitor: InitialCapacitor::FixedVoltage,
             driven: false,

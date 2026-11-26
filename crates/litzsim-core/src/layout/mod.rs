@@ -1,7 +1,7 @@
 mod routing;
 mod symbols;
 
-use crate::circuit::{Document, Error, part_definition};
+use crate::circuit::{Document, Error, RecordQuantity, part_definition};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -78,6 +78,7 @@ pub struct Symbol<'a> {
     pub mirror: Option<&'static str>,
     pub bounds: Rect,
     pub strokes: Vec<Stroke>,
+    pub recordable: &'static [RecordQuantity],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_arrow: Option<Arrow>,
     #[serde(skip_serializing_if = "Option::is_none")]
