@@ -15,6 +15,12 @@ const SWITCH_EPSILON: f64 = 1e-12;
 /// Fraction of the next interval used to settle switch states at an edge.
 const EDGE_SETTLE: f64 = 1e-6;
 
+/// Treat roundoff-separated clock boundaries as one event.
+fn same_clock_time(a: f64, b: f64) -> bool {
+    let difference = (a - b).abs();
+    difference.is_finite() && difference <= CLOCK_EPSILON * a.max(b)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Warning {
@@ -110,7 +116,8 @@ pub fn simulate_with_warnings(
                 _ => {}
             }
         }
-        let on_grid = time == tick as f64 * step;
+        // An endpoint can represent the grid tick a few ULPs to either side.
+        let on_grid = same_clock_time(time, tick as f64 * step);
         let record = stride.is_none_or(|stride| on_grid && tick % stride == 0) || time == stop;
         // A control tick uses the electrical left limit. Record the held
         // outputs first, except at zero where there is no previous value.
@@ -149,12 +156,12 @@ pub fn simulate_with_warnings(
             .as_ref()
             .map_or(edge, |control| edge.min(control.next_sample()));
         // Merge clocks separated only by floating-point roundoff.
-        let next = if boundary - edge <= CLOCK_EPSILON * boundary {
+        let next = if same_clock_time(boundary, edge) {
             boundary
         } else {
             edge
         };
-        let next = if !at_stop && stop - next <= CLOCK_EPSILON * stop {
+        let next = if !at_stop && same_clock_time(stop, next) {
             stop
         } else {
             next
@@ -272,11 +279,12 @@ impl Pulse {
     fn next_edge(self, time: f64) -> f64 {
         let cycles = time * self.frequency;
         let cycle = cycles.floor();
-        let threshold = cycles + CLOCK_EPSILON * cycles;
-        if cycle + self.duty > threshold {
-            (cycle + self.duty) / self.frequency
-        } else if cycle + 1.0 > threshold {
-            (cycle + 1.0) / self.frequency
+        let falling = (cycle + self.duty) / self.frequency;
+        let rising = (cycle + 1.0) / self.frequency;
+        if falling > time && !same_clock_time(time, falling) {
+            falling
+        } else if rising > time && !same_clock_time(time, rising) {
+            rising
         } else {
             (cycle + 1.0 + self.duty) / self.frequency
         }

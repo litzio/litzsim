@@ -1,4 +1,4 @@
-use super::CLOCK_EPSILON;
+use super::same_clock_time;
 use crate::circuit::{Document, Error, Part, PinKind, RecordQuantity, part_definition};
 use crate::waves::Channel;
 use std::collections::{BTreeMap, VecDeque};
@@ -178,7 +178,7 @@ impl<'a> Control<'a> {
     }
 
     pub(super) fn due(&self, time: f64) -> bool {
-        (self.next_sample() - time).abs() <= CLOCK_EPSILON * time
+        same_clock_time(self.next_sample(), time)
     }
 
     /// Evaluate direct dependencies in order, then hold all values until the next tick.
@@ -195,7 +195,7 @@ impl<'a> Control<'a> {
                 Equation::Sensor(quantity, gain) => sense(block.id, quantity) * gain,
                 Equation::Constant(value) => value,
                 Equation::Step { at, before, after } => {
-                    if at - time > CLOCK_EPSILON * time {
+                    if at > time && !same_clock_time(at, time) {
                         before
                     } else {
                         after

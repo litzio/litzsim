@@ -187,6 +187,110 @@ fn final_control_change_at_pwm_edge_matches_the_rows_of_a_longer_run() {
 }
 
 #[test]
+fn final_pwm_control_rows_at_70_us() {
+    check_pwm_control_stop(50_000.0, 2.5e-6, 70e-6, 70e-6, 70e-6);
+}
+
+#[test]
+fn final_pwm_control_rows_at_50_us_on_the_default_grid() {
+    check_pwm_control_stop(10_000.0, 1e-7, 50e-6, 50e-6, 50e-6);
+}
+
+#[test]
+fn final_pwm_control_rows_match_with_one_ulp_clock_offsets() {
+    let adjacent = |t: f64| [t.next_down(), t, t.next_up()];
+    for (frequency, cycle) in [
+        (10_000.0, 0.0),
+        (20_000.0, 1.0),
+        (40_000.0, 2.0),
+        (50_000.0, 3.0),
+    ] {
+        let edge = (cycle + 0.5) / frequency;
+        for ticks in [7.0, 28.0, 500.0] {
+            for step in adjacent(edge / ticks) {
+                let grid = ticks * step;
+                for sample in adjacent(edge) {
+                    for boundary in [grid, edge, sample] {
+                        for stop in adjacent(boundary) {
+                            check_pwm_control_stop(frequency, step, edge, sample, stop);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn check_pwm_control_stop(frequency: f64, step: f64, edge: f64, sample: f64, stop: f64) {
+    let mut value: Value = serde_json::from_str(BUCK).unwrap();
+    value["simulation"]["timeStep_s"] = json!(step);
+    value["simulation"]["controlSamplePeriod_s"] = json!(sample);
+    value["parts"]["PWM"]["parameters"]["frequency_Hz"] = json!(frequency);
+    value["parts"]["VG"] = json!({"type": "voltmeter", "parameters": {}});
+    value["parts"]["VS"] = json!({
+        "type": "voltageSensor", "parameters": {"gain": 2}, "record": {"output": true}
+    });
+    value["parts"]["S"] = json!({
+        "type": "step", "parameters": {"stepTime_s": sample, "before": 0, "after": 1},
+        "record": {"output": true}
+    });
+    value["nets"]["gate"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!("VG.p"), json!("VS.p")]);
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!("VG.n"), json!("VS.n")]);
+    let context = format!(
+        "frequency={frequency}, step={step:?}, edge={edge:?}, Ts={sample:?}, stop={stop:?}"
+    );
+    let simulate_until = |stop, value: &mut Value| {
+        value["simulation"]["stopTime_s"] = json!(stop);
+        simulate(&document(value), || false).unwrap_or_else(|error| panic!("{context}: {error}"))
+    };
+    let short = simulate_until(stop, &mut value);
+    let long = simulate_until(edge + 1e-6, &mut value);
+    // The short run labels the merged rows with stop; the long run uses the
+    // nearby grid or clock boundary. Compare times within roundoff.
+    let time_tolerance = 8.0 * f64::EPSILON * edge;
+    let at_edge = |wave: &litzsim_core::waves::Waveform| {
+        wave.rows()
+            .filter(|row| (row[0] - edge).abs() <= time_tolerance)
+            .map(<[f64]>::to_vec)
+            .collect::<Vec<_>>()
+    };
+    let final_rows = at_edge(&short);
+    let continued = at_edge(&long);
+    assert_eq!(final_rows.len(), 2, "{context}: short");
+    assert_eq!(continued.len(), 2, "{context}: long");
+    assert_eq!(
+        short
+            .rows()
+            .rev()
+            .take(2)
+            .map(|row| row[0])
+            .collect::<Vec<_>>(),
+        [stop; 2],
+        "{context}"
+    );
+    assert_eq!(continued[0][2..], [10.0, 0.0, 20.0], "{context}");
+    assert_eq!(continued[1][2..], [0.0, 1.0, 20.0], "{context}");
+    for (final_row, continued_row) in final_rows.iter().zip(&continued) {
+        assert!(
+            (final_row[0] - continued_row[0]).abs() <= time_tolerance,
+            "{context}"
+        );
+        // Moving the solve time by one ULP may round the capacitor voltage differently.
+        assert!(
+            (final_row[1] - continued_row[1]).abs() <= 1e-12,
+            "{context}"
+        );
+        assert_eq!(final_row[2..], continued_row[2..], "{context}");
+    }
+}
+
+#[test]
 fn control_execution_reports_the_cycle_and_driverless_inputs() {
     let mut value: Value = serde_json::from_str(CONTROL).unwrap();
     value["nets"]["constant"] = json!(["GAIN1.out", "SUM1.in1", "LIM1.in"]);
