@@ -10,6 +10,7 @@ test('accepts exactly one canonical AI trailer pair in the final block', () => {
   assert.equal(gate.trailerProblem('제목\n\n본문\n\nAI-Agent: Codex\nAI-Model: openai/gpt-6.2-sol\n'), null);
   assert.match(gate.trailerProblem('제목\n\nAI-Agent: Codex\n'), /AI-Model/);
   assert.match(gate.trailerProblem('제목\n\nAI-Agent: Codex\nAI-Model: GPT-6\n'), /canonical/);
+  assert.match(gate.trailerProblem('제목\n\nAI-Agent: codex\nAI-Model: codex/gpt-6.2-sol\n'), /canonical/);
   assert.match(gate.trailerProblem('제목\n\nAI-Agent: A\nAI-Agent: B\nAI-Model: openai/x\n'), /exactly once/);
   assert.match(gate.trailerProblem('제목\n\nAI-Agent: Codex\n\n본문\n\nAI-Model: openai/x\n'), /AI-Agent/);
 });

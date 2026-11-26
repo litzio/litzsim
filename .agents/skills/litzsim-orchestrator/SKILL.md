@@ -77,7 +77,10 @@ description: Orchestrate several LitzSim GitHub issues end to end by planning wa
 - 지시문에 적는 사실 전제(이미 되는 동작, 지원하는 결선, 검사가 쓰는 예제 파일)는 코드나 문서로 확인한 뒤 쓴다. 확인하지 않은 전제는 "확인 필요"로 표시한다.
 - 작업자는 쓰기와 네트워크가 가능한 모드로 만든다. 지시문은 파일 쓰기 도구로 파일에 쓰고, 공통 규칙은 띄울 때마다 [worker-prompt.md](references/worker-prompt.md)의 블록을 그 파일에서 읽어 그대로 붙인다. 줄이거나 고친 세션 사본을 돌려쓰지 않는다. 공통 규칙이 모자라거나 길면 worker-prompt.md를 고치는 PR을 낸다.
 - **작업자 한 명은 PR 하나만 맡는다.** PR이 병합되면 그 작업자의 일은 끝난다. 같은 작업자에게 이어서 맡기는 것은 같은 PR의 리뷰 지적 반영, 충돌 해결, 병합 검증 실패 수정, 한 이슈를 나눈 바로 다음 조각일 때만 한다. 이어서 맡기기 전에 컨텍스트 사용량(`get_agent_status`의 `contextWindowUsedTokens`)을 확인하고 절반을 넘었으면 새 작업자로 바꾼다.
-- **지시문 전달(Paseo CLI).** `paseo run`에는 지시문 파일 인자가 없고, PowerShell에서 긴 글을 명령 인자로 넘기면 큰따옴표가 사라진다. 지시문은 파일로 쓰고 실행 프롬프트는 "그 파일 전체를 UTF-8로 읽고 그대로 따르라"는 한 문장으로 준다. 후속 지시는 `paseo send <id> --prompt-file <파일>`로 보내고, 실행 중인 작업에 범위를 더할 때는 `--behavior steer`를 쓴다. Codex 작업자는 `--provider codex/<model> --thinking <effort> --mode full-access`, 새 worktree는 `--new-workspace worktree --worktree-mode branch-off --base origin/main --new-branch <branch>`로 만든다.
+- **지시문 전달(Paseo CLI).** `paseo run`에는 지시문 파일 인자가 없고, PowerShell에서 긴 글을 명령 인자로 넘기면 큰따옴표가 사라진다. 지시문은 파일로 쓰고 실행 프롬프트는 "그 파일 전체를 UTF-8로 읽고 그대로 따르라"는 한 문장으로 준다. 후속 지시는 `paseo send <id> --prompt-file <파일>`로 보내고, 실행 중인 작업에 범위를 더할 때는 `--behavior steer`를 쓴다. Codex 작업자는 `--provider codex/<model> --thinking <effort> --mode full-access`, 새 worktree는 `--new-workspace worktree --worktree-mode branch-off --base origin/main --new-branch <branch>`로 만든다. Claude 작업자를 쓸 때는 `--mode bypassPermissions`를 준다(기본 모드는 명령마다 권한 승인을 기다리며 멈춘다). 지시문 파일이 worktree 밖(세션 임시 폴더)에 있으면 Claude 기본 모드는 그 파일을 읽는 데도 승인을 기다린다.
+- **리뷰어·후속 agent는 기존 workspace에 붙인다.** 리뷰어를 `--cwd <worktree>`로 띄우면 같은 폴더에 Paseo workspace·project가 새로 생긴다. 구현자의 workspace id(`paseo ls --json`의 `WorkspaceId`)로 `--workspace <id>`를 준다.
+- **이 PC의 Rust 빌드.** MSVC `link.exe`가 없고 Git의 `link`가 먼저 잡힌다. 지시문과 `pr-verify.mjs` 실행에 `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`를 준다.
+- **커밋 trailer.** Codex 작업자가 `AI-Agent: codex`, `AI-Model: codex/gpt-6.2-sol`처럼 도구 이름을 제공사 자리에 쓰는 일이 반복됐다. 지시문에 정확한 값(`AI-Agent: Codex`, `AI-Model: openai/gpt-6.2-sol`)을 적고, `pr-gate.mjs`는 제공사를 `openai|anthropic|google`로 검사한다.
 - **완료 대기(Paseo MCP 도구가 없는 세션).** `notifyOnFinish`를 쓸 수 없으므로 작업자를 만들거나 후속 지시를 보낸 뒤 `paseo wait <id>`를 완료 알림이 오는 백그라운드 실행으로 건다. 끝나면 `paseo logs <id>`의 마지막 보고를 읽는다.
 - 만든 뒤 1–2분 지나서 상태가 `running`인지, worktree가 실제로 있는지 직접 확인한다. 알림이 없다는 이유로 "진행 중"이라고 보고하지 않는다.
 - 작업자가 모델 용량 오류로 멈추면 같은 agent에 "`git status`, 최근 커밋, 열린 PR을 확인한 뒤 이어서 진행하라"를 보낸다. 새 agent로 교체하지 않는다.
@@ -109,6 +112,8 @@ description: Orchestrate several LitzSim GitHub issues end to end by planning wa
 - 리뷰어는 구현에 참여하지 않은 새 agent이고, 프롬프트는 [reviewer-prompt.md](references/reviewer-prompt.md)를 쓴다. 이 PR에서 특히 위험한 지점을 중점 확인 항목으로 구체적으로 적는다.
 - 리뷰어는 구현자의 worktree를 같이 쓰며 별도 빌드 출력(예: `CARGO_TARGET_DIR=target-review`)을 쓴다. 리뷰어가 도는 동안 구현자에게 수정·push를 맡기지 않는다.
 - 리뷰 중 구현자가 head를 바꾸면 리뷰어에게 최종 head 기준으로 판정하라고 알린다.
+- APPROVE 뒤 구현자가 main을 merge하면서 해석기·코어 경로의 충돌을 풀었으면, 같은 리뷰어에게 merge 커밋만 확인 범위로 다시 보게 한다(PR #85). 표시 문자열·캡처만 바뀌었으면 오케스트레이터 확인으로 대신하고 그 판단을 병합 기록에 쓴다.
+- 해석기 사건 시각(적분 격자, PWM 에지, 제어 샘플, 스위치 전환, 종료 시각)이 바뀌는 PR은 리뷰어에게 종료 시각을 사건 경계와 ±1 ULP로 흔든 실행과 기록 설정(저장 간격, 출력 기록)을 바꾼 실행의 결과·진단이 같은지 보게 한다. PR #84·#85·#87에서 매번 이 경계에서 결함이 나왔다.
 - `REQUEST_CHANGES`면 차단 지적마다 오케스트레이터가 먼저 "엔지니어가 실제로 낼 수 있는 회로·조작에서 생기는가, 결과가 틀리거나 데이터를 잃는가"를 따진다. 아니면 비차단 메모로 내리고 그 판단을 기록에 쓴다. 남은 지적만 구현자에게 전달하고, 수정 후 같은 리뷰어 또는 새 리뷰어에게 재검토를 맡긴다.
 - 같은 종류의 지적(예: 지원하지 않는 결선의 또 다른 변형)이 라운드마다 이어지면, 오케스트레이터가 보장 범위를 정해 문장으로 고정한다. 예: "PFC 해석은 예제의 결선만 지원하고, 그 밖의 결선은 해당 소자 ID를 밝힌 오류로 거부한다." 재리뷰 지시에는 그 범위 밖 경로를 비차단 메모로 두라고 적는다.
 
