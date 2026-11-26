@@ -69,6 +69,9 @@ RC·RLC·벅 예제는 [examples](examples/)에 있습니다. PFC 예제는 지�
 
 `start`는 회로 옆 `runs/<runId>/`에 `circuit.litzsim` 스냅샷을 저장하고 별도 감독 프로세스를 띄운 뒤 바로 반환합니다. 감독 프로세스가 이어서 해석 프로세스를 시작합니다. 응답의 `runDirectory`를 후속 CLI 호출에 넘깁니다. 같은 회로 폴더에 진행 중인 실행이 있으면 `runInProgress`를 반환합니다.
 
+`runs/active.lock`, `runs/admission.lock`과 실행 폴더의 `status.lock`은 실행이 끝나도 잠금에 다시 쓸 파일로 남습니다.
+Windows의 `runDirectory`는 `\\?\`로 시작하는 verbatim 경로로 반환됩니다. 표시용으로 일반 경로가 필요하면 화면에서 변환할 수 있습니다.
+
 ```powershell
 $run = & $cli start buck.litzsim | ConvertFrom-Json
 & $cli status $run.runDirectory
@@ -81,6 +84,8 @@ $run = & $cli start buck.litzsim | ConvertFrom-Json
 `status.json`은 `running`, `stopping`, `completed`, `canceled`, `failed`를 기록합니다. `status`와 `stop`은 현재 상태, `simulatedTime`과 `stopTime`(초), 실패 시 `error`를 반환합니다. `stop`은 `stopping`을 접수하고 해석 프로세스 종료를 확인한 뒤 `canceled`로 전이합니다. 완료된 실행에서만 `result.litzwave`를 조회할 수 있습니다.
 
 파형 응답은 요청 범위 `timeRange`와 채널별 `name`, `unit`, `minimum`, `maximum`, `points`를 반환합니다. 각 점의 `row`는 파일의 0부터 시작하는 행 번호이며 `t_s`와 `value`는 원본값입니다. 조회는 양 끝 시각을 포함합니다. 첫 행과 마지막 행, 픽셀 구간별 최솟값·최댓값의 행, 양옆과 값이 다른 피크의 인접 행을 조회 범위 안에서 시간순으로 반환합니다. 범위에 행이 없으면 극값은 `null`, 점은 빈 배열입니다.
+
+첫 조회는 결과 파일 전체를 메모리에 읽으므로 시간과 메모리가 파일 크기에 비례합니다. Windows 상주 모드에서 160 MB 벅 결과의 첫 조회는 228 ms였습니다.
 
 상주 모드와 플러그인 Host는 아래 요청으로 같은 실행 연산을 호출합니다. 상주 CLI의 입력 파이프가 닫히면 해당 세션이 접수한 해석도 중지하고 종료를 확인합니다. 단독 `start`는 명령이 끝난 뒤에도 백그라운드에서 계속 실행됩니다.
 

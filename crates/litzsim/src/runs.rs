@@ -26,6 +26,7 @@ const STATUS: &str = "status.json";
 const WORKER_ERROR: &str = "solver-error.json";
 const CONTROL: &str = "status.lock";
 const ADMISSION: &str = "admission.lock";
+const ACTIVE: &str = "active.lock";
 const STARTING: &str = "starting";
 const POLL: Duration = Duration::from_millis(10);
 const GRACE: Duration = Duration::from_millis(250);
@@ -92,11 +93,13 @@ impl Runs {
             return Err(error("invalidRequest", "Invalid run ID"));
         }
         if let Some(parent) = parent {
-            return Ok(parent
-                .join("runs")
-                .join(id)
-                .canonicalize()
-                .map_err(io_error)?);
+            return parent.join("runs").join(id).canonicalize().map_err(|err| {
+                if err.kind() == io::ErrorKind::NotFound {
+                    error("unknownRun", "Unknown run ID in the circuit directory")
+                } else {
+                    io_error(err)
+                }
+            });
         }
         self.directories.get(id).cloned().ok_or_else(|| {
             error(
@@ -373,12 +376,16 @@ fn admission_lock(root: &Path) -> Result<File, Value> {
 }
 
 fn active_lock(root: &Path) -> Result<File, Value> {
-    let lock = folder_lock(root, "active.lock")?;
-    lock.try_lock().map_err(|err| match err {
-        TryLockError::WouldBlock => run_in_progress(),
-        TryLockError::Error(err) => io_error(err),
-    })?;
-    Ok(lock)
+    try_folder_lock(root, ACTIVE)?.ok_or_else(run_in_progress)
+}
+
+fn try_folder_lock(root: &Path, name: &str) -> Result<Option<File>, Value> {
+    let lock = folder_lock(root, name)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(err)) => Err(io_error(err)),
+    }
 }
 
 fn folder_lock(root: &Path, name: &str) -> Result<File, Value> {
@@ -604,31 +611,54 @@ fn watch_eof(mut input: impl Read + Send + 'static) -> Arc<AtomicBool> {
 }
 
 pub fn status(path: &Path) -> Response {
-    let mut status = read_status(path)?;
-    if status.solver_pid.is_none() && matches!(status.state, State::Running | State::Stopping) {
-        let run_directory = path.canonicalize().map_err(io_error)?;
-        let root = run_directory
-            .parent()
-            .ok_or_else(|| error("invalidRequest", "Expected a run directory"))?;
-        let admission = folder_lock(root, ADMISSION)?;
-        match admission.try_lock() {
-            Ok(()) => {
-                if let Some(reservation) = read_reservation(root)?
-                    && reservation.run_id == status.run_id
-                    && clear_dead_reservation(root, reservation)?
-                {
-                    status = read_status(path)?;
-                }
-            }
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(err)) => return Err(io_error(err)),
-        }
+    Ok(ok(json!(recover_run(path)?)))
+}
+
+pub fn stop(path: &Path) -> Response {
+    let status = recover_run(path)?;
+    if status.state == State::Running {
+        return Ok(ok(json!(stop_request(path)?)));
     }
     Ok(ok(json!(status)))
 }
 
-pub fn stop(path: &Path) -> Response {
-    Ok(ok(json!(stop_request(path)?)))
+fn recover_run(path: &Path) -> Result<Status, Value> {
+    let status = read_status(path)?;
+    if !matches!(status.state, State::Running | State::Stopping) {
+        return Ok(status);
+    }
+    let run_directory = path.canonicalize().map_err(io_error)?;
+    let root = run_directory
+        .parent()
+        .ok_or_else(|| error("invalidRequest", "Expected a run directory"))?;
+    let Some(_admission) = try_folder_lock(root, ADMISSION)? else {
+        return Ok(status);
+    };
+    let Some(_active) = try_folder_lock(root, ACTIVE)? else {
+        return Ok(status);
+    };
+    if let Some(reservation) = read_reservation(root)?
+        && reservation.run_id == status.run_id
+    {
+        if clear_dead_reservation(root, reservation)? {
+            return read_status(path);
+        }
+        return Ok(status);
+    }
+
+    // A healthy supervisor holds the active lock through terminal publication.
+    // Re-read under the status lock in case it just finished and released it.
+    let _control = control(path)?;
+    let mut status: Status = read_json(&path.join(STATUS)).map_err(io_error)?;
+    if matches!(status.state, State::Running | State::Stopping) {
+        status.state = State::Failed;
+        status.error = Some(error(
+            "supervisorExited",
+            "Run supervisor exited before completing the run",
+        ));
+        write_status(path, &status).map_err(io_error)?;
+    }
+    Ok(status)
 }
 
 fn read_status(path: &Path) -> Result<Status, Value> {

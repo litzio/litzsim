@@ -436,6 +436,178 @@ fn terminal(directory: &TestDirectory, run: &str, state: &str) -> Value {
     }
 }
 
+fn write_long_rc(folder: &TestDirectory) {
+    let mut document: Value =
+        serde_json::from_slice(include_bytes!("../../../examples/rc.litzsim")).unwrap();
+    document["simulation"]["stopTime_s"] = json!(100_000.0);
+    document["simulation"]["outputStep_s"] = json!(1.0);
+    std::fs::write(folder.0.join("long.litzsim"), document.to_string()).unwrap();
+}
+
+#[test]
+fn simultaneous_starts_admit_only_one_in_the_same_directory() {
+    let folder = TestDirectory::new("simultaneous-starts");
+    write_long_rc(&folder);
+    let children: Vec<_> = (0..4)
+        .map(|_| {
+            Command::new(env!("CARGO_BIN_EXE_litzsim"))
+                .args(["start", "long.litzsim"])
+                .current_dir(&folder.0)
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let mut admitted = Vec::new();
+    let mut rejected = Vec::new();
+    for child in children {
+        let output = child.wait_with_output().unwrap();
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if output.status.success() {
+            admitted.push(response);
+        } else {
+            rejected.push(response);
+        }
+    }
+    for response in &admitted {
+        let path = response["runDirectory"].as_str().unwrap();
+        folder.run(&["stop", path], true);
+        terminal(&folder, path, "canceled");
+    }
+    assert_eq!(admitted.len(), 1, "{admitted:?}");
+    assert_eq!(rejected.len(), 3, "{rejected:?}");
+    assert!(
+        rejected
+            .iter()
+            .all(|r| r["error"]["code"] == "runInProgress")
+    );
+}
+
+#[test]
+fn stop_before_supervisor_claims_reservation_cancels_without_spawning_solver() {
+    use std::fs::{self, File, OpenOptions};
+
+    let folder = TestDirectory::new("early-stop");
+    let root = folder.0.join("runs");
+    let run = root.join("1-2-0");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("circuit.litzsim"),
+        include_bytes!("../../../examples/rc.litzsim"),
+    )
+    .unwrap();
+    File::create_new(run.join("status.lock")).unwrap();
+    fs::write(
+        run.join("status.json"),
+        json!({
+            "runId": "1-2-0", "revision": "fixture", "state": "running",
+            "simulatedTime": 0, "stopTime": 0.01, "solverPid": null,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // Hold the admission gate so the actual supervisor cannot start the solver
+    // before the public stop command reaches the prepared run.
+    let gate = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(root.join("admission.lock"))
+        .unwrap();
+    gate.lock().unwrap();
+    let mut supervisor = Command::new(env!("CARGO_BIN_EXE_litzsim"))
+        .arg("_supervise")
+        .arg(&run)
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    fs::write(
+        root.join("starting"),
+        json!({
+            "run_id": "1-2-0", "supervisor_pid": supervisor.id(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let path = run.to_str().unwrap();
+    let stopped = folder.run(&["stop", path], true);
+    drop(gate);
+    assert!(supervisor.wait().unwrap().success());
+    assert_eq!(stopped["state"], "stopping");
+    let canceled = folder.run(&["status", path], true);
+    assert_eq!(canceled["state"], "canceled");
+    assert!(canceled["solverPid"].is_null());
+    assert!(!run.join("result.pending").exists());
+    #[cfg(windows)]
+    {
+        let escaped_path = path.replace('\'', "''");
+        let script = format!(
+            r#"$ErrorActionPreference='Stop'
+            $live = Get-CimInstance Win32_Process -Filter "Name='litzsim.exe'" |
+                Where-Object {{ $_.CommandLine -and $_.CommandLine.IndexOf('{escaped_path}', [StringComparison]::OrdinalIgnoreCase) -ge 0 }}
+            if ($live) {{ throw 'A process for the canceled run is still alive' }}"#
+        );
+        let result = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn status_and_stop_report_failure_after_the_supervisor_is_killed() {
+    use std::time::{Duration, Instant};
+
+    let folder = TestDirectory::new("supervisor-killed");
+    write_long_rc(&folder);
+    let mut recovered = Vec::new();
+    for operation in ["status", "stop"] {
+        let started = folder.run(&["start", "long.litzsim"], true);
+        let path = started["runDirectory"].as_str().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let solver = loop {
+            let status = folder.run(&["status", path], true);
+            assert_eq!(status["state"], "running");
+            if let Some(pid) = status["solverPid"].as_u64() {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "{status}");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let powershell = format!(
+            r"$ErrorActionPreference='Stop'
+            $worker = Get-Process -Id {solver}
+            $null = $worker.Handle
+            $entry = Get-CimInstance Win32_Process -Filter 'ProcessId={solver}'
+            $owner = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $entry.ParentProcessId)
+            if ($owner.CommandLine -notmatch '\s_supervise\s') {{ throw 'Unexpected solver parent' }}
+            Stop-Process -Id $entry.ParentProcessId -Force
+            if (!$worker.WaitForExit(10000)) {{ throw 'Solver survived supervisor exit' }}"
+        );
+        let result = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &powershell])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        recovered.push(folder.run(&[operation, path], true));
+    }
+    for status in recovered {
+        assert_eq!(status["state"], "failed", "{status}");
+        assert_eq!(status["error"]["code"], "supervisorExited", "{status}");
+    }
+}
+
 fn wave_request(
     directory: &TestDirectory,
     run: &str,
@@ -657,6 +829,10 @@ fn serve_owns_run_lifetime_and_checks_the_working_revision() {
     start["expectedRevision"] = inspection["revision"].clone();
     let started = request(start);
     assert_eq!(started["state"], "running", "{started}");
+    let missing = request(json!({
+        "op": "status", "runId": "1-2-3", "directory": folder.0,
+    }));
+    assert_eq!(missing["error"]["code"], "unknownRun");
     let status = request(json!({ "op": "status", "runId": started["runId"] }));
     assert_eq!(status["stopTime"], 100_000.0);
     assert_eq!(status["revision"], inspection["revision"]);
