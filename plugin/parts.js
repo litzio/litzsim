@@ -10,7 +10,7 @@ export const CATEGORIES = [
   },
   {
     id: "passive", label: "수동 소자", parts: [
-      { type: "resistor", label: "저항", key: "Shift+R" },
+      { type: "resistor", label: "저항", key: "R" },
       { type: "inductor", label: "인덕터", key: "L" },
       { type: "capacitor", label: "커패시터", key: "C" },
     ],
@@ -31,6 +31,7 @@ export const CATEGORIES = [
 ];
 
 export const PARTS = Object.fromEntries(CATEGORIES.flatMap(group => group.parts.map(part => [part.type, part])));
+export const ROTATE_SHORTCUT = "Shift+R";
 
 export const PARAMETERS = {
   resistance_ohm: ["저항", "Ω"],
