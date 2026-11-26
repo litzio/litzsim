@@ -99,7 +99,7 @@ fn strokes(kind: &str) -> Vec<Stroke> {
             body.push(line(&lead));
             body
         }
-        "constant" | "step" | "ramp" | "sum" | "gain" | "limiter" => {
+        "constant" | "step" | "ramp" | "sum" | "gain" | "limiter" | "integrator" | "pi" => {
             let height = if kind == "sum" { 38 } else { 16 };
             let mut body = vec![line(&[
                 [-20, -height],
@@ -135,7 +135,7 @@ fn strokes(kind: &str) -> Vec<Stroke> {
             line(&[[0, 12], [0, 32]]),
             line(&[[-4, 24], [0, 30], [4, 24]]),
         ],
-        "voltmeter" | "pwm" | "sine" => {
+        "voltmeter" | "pwm" | "dutyPwm" | "sine" => {
             let mut strokes = vec![
                 Stroke::Circle {
                     center: [0, 0],
@@ -147,7 +147,7 @@ fn strokes(kind: &str) -> Vec<Stroke> {
             ];
             match kind {
                 "voltmeter" => {}
-                "pwm" => strokes.push(line(&[
+                "pwm" | "dutyPwm" => strokes.push(line(&[
                     [-13, 6],
                     [-7, 6],
                     [-7, -6],
@@ -164,6 +164,9 @@ fn strokes(kind: &str) -> Vec<Stroke> {
                     },
                 ]),
                 _ => unreachable!(),
+            }
+            if kind == "dutyPwm" {
+                strokes.push(line(&[[-32, 0], [-20, 0]]));
             }
             strokes
         }

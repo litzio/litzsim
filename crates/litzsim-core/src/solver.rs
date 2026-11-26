@@ -36,7 +36,7 @@ pub struct Warning {
 /// Inspect simple voltage-source charging paths before a background run.
 pub fn warnings(document: &Document) -> Vec<Warning> {
     match assemble(document) {
-        Ok((mut devices, _)) => {
+        Ok((mut devices, _, _)) => {
             source_paths(&mut devices, document.circuit().simulation.time_step_s)
         }
         Err(_) => Vec::new(), // The worker reports invalid circuits through the normal error path.
@@ -65,7 +65,7 @@ pub fn simulate_with_warnings(
     mut should_stop: impl FnMut(f64) -> bool,
 ) -> Result<(Waveform, Vec<Warning>), Error> {
     let mut control = Control::compile(document)?;
-    let (mut devices, size) = assemble(document)?;
+    let (mut devices, size, mut clocks) = assemble(document)?;
     let mut system = System::new(size);
     let settings = &document.circuit().simulation;
     let step = settings.time_step_s;
@@ -84,7 +84,17 @@ pub fn simulate_with_warnings(
                 .map(move |quantity| (index, quantity))
         })
         .collect();
-    let clocks: Vec<_> = devices.iter().filter_map(Device::pulse).collect();
+    let sampled_clocks: Vec<_> = control
+        .iter()
+        .flat_map(|control| {
+            devices.iter().filter_map(|device| {
+                let Kind::Pulse(clock) = device.kind else {
+                    return None;
+                };
+                control.pwm_input(device.id).map(|input| (clock, input))
+            })
+        })
+        .collect();
     let electrical_channels = probes.iter().map(|&(index, quantity)| {
         let unit = quantity.unit();
         Channel {
@@ -95,6 +105,16 @@ pub fn simulate_with_warnings(
     let mut wave =
         Waveform::new(electrical_channels.chain(control.iter().flat_map(Control::channels)));
 
+    // At zero, sensor-independent commands can set their gates before the
+    // electrical solve. Feedback-driven gates stay low until sensors are read.
+    if !sampled_clocks.is_empty() {
+        let control = control.as_mut().expect("sampled PWM has control inputs");
+        control.prepare_initial()?;
+        for &(clock, input) in &sampled_clocks {
+            clocks[clock].latch_initial(control.held(input));
+        }
+    }
+
     let (mut tick, mut time, mut previous) = (0_u64, 0.0, 0.0);
     loop {
         if should_stop(previous) {
@@ -103,7 +123,25 @@ pub fn simulate_with_warnings(
         let h = time - previous;
         // Use the interval's interior state. At an edge the sample is the
         // left limit, and the next interval uses the newly switched state.
-        solve_sample(&mut devices, &mut system, Sample::step(time, h))?;
+        let sample = Sample::step(time, h);
+        solve_sample(&mut devices, &mut system, &clocks, sample)?;
+        if time == 0.0 && !sampled_clocks.is_empty() {
+            let control = control.as_mut().expect("sampled PWM has control inputs");
+            control.sample(true, false, |id, quantity| {
+                sense(&devices, &system.rhs, id, quantity)
+            })?;
+            let mut changed = false;
+            for &(clock, input) in &sampled_clocks {
+                changed |= clocks[clock].latch_initial(control.held(input));
+            }
+            if changed {
+                for device in &mut devices {
+                    device.driven = false;
+                    device.conducting = false;
+                }
+                solve_sample(&mut devices, &mut system, &clocks, sample)?;
+            }
+        }
         let x = &system.rhs;
         for device in &mut devices {
             let branch = device.branch;
@@ -124,29 +162,34 @@ pub fn simulate_with_warnings(
         if record && time != 0.0 {
             push_row(&mut wave, &devices, &probes, control.as_ref(), time, x)?;
         }
+        let at_stop = time == stop;
         let mut control_changed = false;
         if let Some(control) = &mut control
             && control.due(time)
         {
-            control_changed = control.sample(|id, quantity| {
-                let index = devices
-                    .binary_search_by_key(&id, |device| device.id)
-                    .expect("sensor has an electrical device");
-                devices[index].signal(quantity, x)
+            control_changed = control.sample(false, at_stop, |id, quantity| {
+                sense(&devices, x, id, quantity)
             })?;
+        }
+        // The just-computed control outputs are visible to any carrier that
+        // starts at this endpoint. This updates only the right-side state.
+        let mut sampled_switching = false;
+        if let Some(control) = &control {
+            for &(clock, input) in &sampled_clocks {
+                sampled_switching |= clocks[clock].advance(time, control.held(input));
+            }
         }
         if record && time == 0.0 {
             push_row(&mut wave, &devices, &probes, control.as_ref(), time, x)?;
         }
-        let at_stop = time == stop;
-        if at_stop && !control_changed {
+        if at_stop && control.is_none() {
             return Ok((wave, warnings));
         }
         if on_grid {
             tick += 1;
         }
-        // A control change at stop needs a right-limit row. Use the interval
-        // that would follow this sample to find the new PWM state.
+        // With control, also check for a gate transition at stop, even when
+        // none of the control outputs are recorded.
         let grid = tick as f64 * step;
         let boundary = if at_stop { grid } else { stop.min(grid) };
         let edge = clocks
@@ -180,9 +223,10 @@ pub fn simulate_with_warnings(
         // Include any updated control outputs in this same right-limit row.
         let right = (time + next) / 2.0;
         let switching = record
-            && clocks
-                .iter()
-                .any(|pulse| pulse.is_high(time - h / 2.0) != pulse.is_high(right));
+            && (sampled_switching
+                || clocks
+                    .iter()
+                    .any(|clock| clock.fixed_switches(sample.interior, right)));
         if switching {
             let switches: Vec<_> = devices.iter().map(|d| (d.driven, d.conducting)).collect();
             let limit = Sample {
@@ -198,8 +242,8 @@ pub fn simulate_with_warnings(
                 h: (next - time) * EDGE_SETTLE,
                 ..limit
             };
-            solve_sample(&mut devices, &mut system, settle)?;
-            solve_sample(&mut devices, &mut system, limit)?;
+            solve_sample(&mut devices, &mut system, &clocks, settle)?;
+            solve_sample(&mut devices, &mut system, &clocks, limit)?;
             push_row(
                 &mut wave,
                 &devices,
@@ -220,6 +264,13 @@ pub fn simulate_with_warnings(
         previous = time;
         time = next;
     }
+}
+
+fn sense(devices: &[Device<'_>], x: &[f64], id: &str, quantity: RecordQuantity) -> f64 {
+    let index = devices
+        .binary_search_by_key(&id, |device| device.id)
+        .expect("sensor has an electrical device");
+    devices[index].signal(quantity, x)
 }
 
 fn push_row(
@@ -291,15 +342,88 @@ impl Pulse {
     }
 }
 
+struct Clock {
+    pulse: Pulse,
+    sampled: Option<SampledDuty>,
+}
+
+struct SampledDuty {
+    next_cycle: u64,
+    falling: f64,
+    high: bool,
+}
+
+impl Clock {
+    fn next_edge(&self, time: f64) -> f64 {
+        self.sampled.as_ref().map_or_else(
+            || self.pulse.next_edge(time),
+            |sampled| {
+                sampled
+                    .falling
+                    .min(sampled.next_cycle as f64 / self.pulse.frequency)
+            },
+        )
+    }
+
+    fn is_high(&self, interior: f64) -> bool {
+        self.sampled
+            .as_ref()
+            .map_or_else(|| self.pulse.is_high(interior), |duty| duty.high)
+    }
+
+    fn fixed_switches(&self, left: f64, right: f64) -> bool {
+        self.sampled.is_none() && self.pulse.is_high(left) != self.pulse.is_high(right)
+    }
+
+    fn latch_initial(&mut self, duty: f64) -> bool {
+        self.sampled
+            .as_mut()
+            .expect("sampled PWM")
+            .latch(0.0, self.pulse.frequency, duty)
+    }
+
+    fn advance(&mut self, time: f64, duty: f64) -> bool {
+        let sampled = self.sampled.as_mut().expect("sampled PWM");
+        let cycle = sampled.next_cycle as f64;
+        if same_clock_time(time, cycle / self.pulse.frequency) {
+            sampled.next_cycle += 1;
+            return sampled.latch(cycle, self.pulse.frequency, duty);
+        }
+        if same_clock_time(time, sampled.falling) {
+            sampled.falling = f64::INFINITY;
+            sampled.high = false;
+            return true;
+        }
+        false
+    }
+}
+
+impl SampledDuty {
+    fn latch(&mut self, cycle: f64, frequency: f64, duty: f64) -> bool {
+        let was_high = self.high;
+        self.high = duty > 0.0;
+        self.falling = f64::INFINITY;
+        if duty > 0.0 && duty < 1.0 {
+            let falling = (cycle + duty) / frequency;
+            if same_clock_time(falling, cycle / frequency) {
+                self.high = false;
+            } else {
+                self.falling = falling;
+            }
+        }
+        was_high != self.high
+    }
+}
+
 enum Kind {
     Resistance(f64),
     Capacitor(f64, f64),
     Inductor(f64, f64),
     Dc(f64),
     Sine(f64, f64),
-    Pulse(Pulse),
+    Pulse(usize),
     Diode,
-    Nmos(Option<Pulse>),
+    Nmos(Option<usize>),
     Voltmeter,
     Ammeter,
 }
@@ -329,7 +453,7 @@ impl Device<'_> {
         self.branch.expect("device has a branch equation")
     }
 
-    fn pulse(&self) -> Option<Pulse> {
+    fn pulse(&self) -> Option<usize> {
         match self.kind {
             Kind::Pulse(pulse) => Some(pulse),
             _ => None,
@@ -372,7 +496,7 @@ pub fn validate_probe_reference(document: &Document) -> Result<(), Error> {
     Ok(())
 }
 
-fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
+fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize, Vec<Clock>), Error> {
     validate_probe_reference(document)?;
     let circuit = document.circuit();
     let pin_nets = circuit.pin_nets();
@@ -430,6 +554,7 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
         .collect();
     let pin_node = |id, pin| nodes[pin_net(id, pin)];
     let mut devices = Vec::new();
+    let mut clocks = Vec::new();
     for (id, part) in &circuit.parts {
         if part.kind == "ground" {
             continue;
@@ -446,7 +571,7 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
                 return Err(Error::invalid(id, format!("{key} must be nonnegative")));
             }
         }
-        let kind = device_kind(id, part)?;
+        let kind = device_kind(id, part, &mut clocks)?;
         let (p, n) = match definition.measurement {
             Some(probe) => (probe.from_pin, probe.to_pin),
             None => {
@@ -488,7 +613,7 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
             })?);
         }
     }
-    Ok((devices, size))
+    Ok((devices, size, clocks))
 }
 
 /// Follow unbranched series resistors and ideal ammeters on either side of a
@@ -573,7 +698,7 @@ fn take_index(size: &mut usize) -> usize {
     index
 }
 
-fn device_kind(id: &str, part: &Part) -> Result<Kind, Error> {
+fn device_kind(id: &str, part: &Part, clocks: &mut Vec<Clock>) -> Result<Kind, Error> {
     let param = |key: &str| part.parameters[key].as_f64().expect("validated parameter");
     let positive = |key| {
         let value = param(key);
@@ -589,16 +714,26 @@ fn device_kind(id: &str, part: &Part) -> Result<Kind, Error> {
         "inductor" => Kind::Inductor(positive("inductance_H")?, param("initialCurrent_A")),
         "dc" => Kind::Dc(param("voltage_V")),
         "sine" => Kind::Sine(param("amplitude_V"), param("frequency_Hz")),
-        "pwm" => {
-            let duty = param("duty");
-            if !(0.0 < duty && duty < 1.0) {
+        "pwm" | "dutyPwm" => {
+            let sampled = part.kind == "dutyPwm";
+            let duty = if sampled { 0.0 } else { param("duty") };
+            if !sampled && !(0.0 < duty && duty < 1.0) {
                 return Err(Error::invalid(id, "PWM duty must be in (0, 1)"));
             }
-            Kind::Pulse(Pulse {
-                frequency: positive("frequency_Hz")?,
-                high: positive("high_V")?,
-                duty,
-            })
+            let index = clocks.len();
+            clocks.push(Clock {
+                pulse: Pulse {
+                    frequency: positive("frequency_Hz")?,
+                    high: positive("high_V")?,
+                    duty,
+                },
+                sampled: sampled.then_some(SampledDuty {
+                    next_cycle: 1,
+                    falling: f64::INFINITY,
+                    high: false,
+                }),
+            });
+            Kind::Pulse(index)
         }
         "diode" => Kind::Diode,
         "nmos" => Kind::Nmos(None),
@@ -616,18 +751,14 @@ fn device_kind(id: &str, part: &Part) -> Result<Kind, Error> {
 fn solve_sample(
     devices: &mut [Device<'_>],
     system: &mut System,
+    clocks: &[Clock],
     sample: Sample,
 ) -> Result<(), Error> {
-    let Sample {
-        time,
-        h,
-        interior,
-        initial,
-    } = sample;
+    let Sample { time, interior, .. } = sample;
     let mut turned_on = false;
     for device in devices.iter_mut() {
-        if let Kind::Nmos(Some(pulse)) = device.kind {
-            let high = pulse.is_high(interior);
+        if let Kind::Nmos(Some(clock)) = device.kind {
+            let high = clocks[clock].is_high(interior);
             turned_on |= high && !device.driven;
             device.driven = high;
             if high {
@@ -635,10 +766,12 @@ fn solve_sample(
             }
         }
     }
+    let mut tried_diodes = BTreeSet::new();
+    let mut open_inductors = BTreeSet::new();
     for iteration in 0..=32 {
         system.clear();
         for device in devices.iter() {
-            stamp(system, device, sample);
+            stamp(system, device, clocks, sample, &open_inductors);
         }
         if let Err(column) = system.solve() {
             // A newly driven channel can short a voltage source through a
@@ -649,7 +782,23 @@ fn solve_sample(
                 }
                 continue;
             }
-            return Err(diagnose_zero_pivot(devices, column, time, h, initial));
+            match resolve_zero_pivot(
+                devices,
+                column,
+                sample,
+                clocks,
+                &tried_diodes,
+                &open_inductors,
+            )? {
+                InitialReturn::Diode(index) => {
+                    tried_diodes.insert(index);
+                    devices[index].conducting = true;
+                }
+                InitialReturn::OpenInductor(branch) => {
+                    open_inductors.insert(branch);
+                }
+            }
+            continue;
         }
         if system.rhs.iter().any(|v| !v.is_finite()) {
             return Err(Error::new(
@@ -661,6 +810,18 @@ fn solve_sample(
             .iter_mut()
             .any(|device| update_switch(device, &system.rhs));
         if !changed {
+            if !open_inductors.is_empty()
+                && let Some(device) = devices.iter().find(|device| {
+                    device.branch.is_some_and(|branch| {
+                        open_inductors.contains(&branch) && system.rhs[branch] != 0.0
+                    })
+                })
+            {
+                return Err(Error::invalid(
+                    device.id,
+                    "Initial open-inductor state cannot satisfy the specified zero current",
+                ));
+            }
             return Ok(());
         }
     }
@@ -670,22 +831,35 @@ fn solve_sample(
     ))
 }
 
-fn diagnose_zero_pivot(
+enum InitialReturn {
+    Diode(usize),
+    OpenInductor(usize),
+}
+
+fn resolve_zero_pivot(
     devices: &[Device<'_>],
     column: usize,
-    time: f64,
-    h: f64,
-    initial: bool,
-) -> Error {
+    sample: Sample,
+    clocks: &[Clock],
+    tried_diodes: &BTreeSet<usize>,
+    open_inductors: &BTreeSet<usize>,
+) -> Result<InitialReturn, Error> {
+    let Sample {
+        time, h, initial, ..
+    } = sample;
     let failed_branch = devices.iter().find(|device| device.branch == Some(column));
-    let initial_inductor_current =
-        |device: &Device<'_>| h == 0.0 && matches!(device.kind, Kind::Inductor(..));
+    let initial_inductor_current = |device: &Device<'_>| {
+        h == 0.0
+            && matches!(device.kind, Kind::Inductor(..))
+            && !open_inductors.contains(&device.branch())
+    };
     let free_initial_capacitor =
         |device: &Device<'_>| initial && device.initial_capacitor == InitialCapacitor::ZeroCurrent;
     let ideal_voltage = |device: &Device<'_>| {
         !device.is_open_switch()
             && match device.kind {
-                Kind::Resistance(_) | Kind::Voltmeter | Kind::Inductor(..) => false,
+                Kind::Resistance(_) | Kind::Voltmeter => false,
+                Kind::Inductor(..) => open_inductors.contains(&device.branch()),
                 Kind::Capacitor(..) => {
                     h == 0.0 && device.series_resistance == 0.0 && !free_initial_capacitor(device)
                 }
@@ -757,33 +931,61 @@ fn diagnose_zero_pivot(
             } else {
                 "Ideal voltage constraint loop"
             };
-            return report(reason, device.id, &ids);
+            return Err(report(reason, device.id, &ids));
         }
     } else if !paths.contains_key(&None) {
         let boundary: Vec<_> = devices
             .iter()
-            .filter(|device| {
+            .enumerate()
+            .filter(|(_, device)| {
                 (device.is_open_switch() || initial_inductor_current(device))
                     && paths.contains_key(&device.p) != paths.contains_key(&device.n)
             })
             .collect();
-        let ids: Vec<_> = boundary.iter().map(|device| device.id).collect();
-        if let Some(inductor) = boundary
+        let ids: Vec<_> = boundary.iter().map(|(_, device)| device.id).collect();
+        let mut inductors = boundary
             .iter()
-            .find(|device| initial_inductor_current(device))
-        {
-            return report(
+            .map(|(_, device)| *device)
+            .filter(|device| initial_inductor_current(device));
+        if let Some(inductor) = inductors.next() {
+            if initial && boundary.iter().any(|(_, device)| {
+                    matches!(device.kind, Kind::Nmos(Some(clock)) if clocks[clock].sampled.is_some())
+                })
+            {
+                // With one zero-current inductor and all switches open, KCL
+                // keeps its current zero while the gates are held. Thus L di/dt
+                // is zero and determines the floating island's voltage.
+                if inductors.next().is_none() && let Kind::Inductor(_, current) = inductor.kind {
+                    if current == 0.0 {
+                        return Ok(InitialReturn::OpenInductor(inductor.branch()));
+                    }
+                    let leaving = |device: &Device<'_>| if paths.contains_key(&device.p) { 1.0 } else { -1.0 };
+                    let outgoing = leaving(inductor) * current;
+                    let mut candidates = boundary.iter().filter(|(_, device)| {
+                        device.is_open_switch() && switch_sign(device).is_some_and(|sign| {
+                            (leaving(device) * sign).is_sign_positive() != outgoing.is_sign_positive()
+                        })
+                    });
+                    if let Some(&(index, _)) = candidates.next()
+                        && candidates.next().is_none() && !tried_diodes.contains(&index)
+                    {
+                        return Ok(InitialReturn::Diode(index));
+                    }
+                }
+                return Err(report("Initial inductor return cannot be uniquely determined", inductor.id, &ids));
+            }
+            return Err(report(
                 "Initial inductor current cutset with no voltage-defined return path",
                 inductor.id,
                 &ids,
-            );
+            ));
         }
         if let Some(id) = ids.first() {
-            return report(
+            return Err(report(
                 "Floating node or island isolated by open switches",
                 id,
                 &ids,
-            );
+            ));
         }
         let ids: Vec<_> = devices
             .iter()
@@ -791,7 +993,11 @@ fn diagnose_zero_pivot(
             .map(|device| device.id)
             .collect();
         if let Some(id) = ids.first() {
-            return report("Floating node or island with no ground reference", id, &ids);
+            return Err(report(
+                "Floating node or island with no ground reference",
+                id,
+                &ids,
+            ));
         }
     }
 
@@ -800,14 +1006,20 @@ fn diagnose_zero_pivot(
         format!("Circuit matrix has a zero pivot at {time} s"),
     );
     error.target_id = failed_branch.map(|device| device.id.into());
-    error
+    Err(error)
+}
+
+fn switch_sign(device: &Device<'_>) -> Option<f64> {
+    match device.kind {
+        Kind::Diode => Some(1.0),
+        Kind::Nmos(_) if !device.driven => Some(-1.0), // Body diode: source to drain.
+        _ => None,
+    }
 }
 
 fn update_switch(device: &mut Device<'_>, x: &[f64]) -> bool {
-    let sign = match device.kind {
-        Kind::Diode => 1.0,
-        Kind::Nmos(_) if !device.driven => -1.0, // Body diode: source to drain.
-        _ => return false,
+    let Some(sign) = switch_sign(device) else {
+        return false;
     };
     let conducts = if device.conducting {
         sign * x[device.branch()] >= -SWITCH_EPSILON
@@ -819,7 +1031,13 @@ fn update_switch(device: &mut Device<'_>, x: &[f64]) -> bool {
     changed
 }
 
-fn stamp(system: &mut System, device: &Device<'_>, sample: Sample) {
+fn stamp(
+    system: &mut System,
+    device: &Device<'_>,
+    clocks: &[Clock],
+    sample: Sample,
+    open_inductors: &BTreeSet<usize>,
+) {
     let Sample {
         time,
         h,
@@ -845,6 +1063,7 @@ fn stamp(system: &mut System, device: &Device<'_>, sample: Sample) {
     system.add(n, k, -1.0);
     let (voltage, coefficient, rhs) = match device.kind {
         Kind::Diode | Kind::Nmos(_) if device.is_open_switch() => (false, 1.0, 0.0),
+        Kind::Inductor(_, _) if h == 0.0 && open_inductors.contains(&branch) => (true, 0.0, 0.0),
         Kind::Inductor(_, current) if h == 0.0 => (false, 1.0, current),
         Kind::Inductor(inductance, current) => {
             let z = inductance / h;
@@ -864,11 +1083,11 @@ fn stamp(system: &mut System, device: &Device<'_>, sample: Sample) {
             -device.series_resistance,
             amplitude * (std::f64::consts::TAU * time * frequency).sin(),
         ),
-        Kind::Pulse(pulse) => (
+        Kind::Pulse(clock) => (
             true,
             0.0,
-            if pulse.is_high(interior) {
-                pulse.high
+            if clocks[clock].is_high(interior) {
+                clocks[clock].pulse.high
             } else {
                 0.0
             },
