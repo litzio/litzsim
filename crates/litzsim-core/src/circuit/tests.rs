@@ -533,6 +533,43 @@ fn added_voltage_probe_round_trips_with_its_ground_reference() {
 }
 
 #[test]
+fn feedback_parts_round_trip_through_save_layout_and_undo() {
+    let original = Document::from_bytes(BUCK).unwrap();
+    let revision = original.revision();
+    let ops: Vec<Operation> = serde_json::from_value(json!([
+        {"op": "add", "type": "integrator", "grid": [-2, 0]},
+        {"op": "add", "type": "pi", "grid": [1, 0]},
+        {"op": "add", "type": "dutyPwm", "grid": [4, 0]},
+        {"op": "delete", "id": "PWM"},
+        {"op": "connect", "a": "PWM1.out", "b": "Q1.g"},
+        {"op": "connect", "a": "PWM1.ref", "b": "Q1.s"},
+        {"op": "connect", "a": "PI1.out", "b": "PWM1.duty"},
+        {"op": "connect", "a": "INT1.out", "b": "PI1.in"},
+        {"op": "add", "type": "constant"},
+        {"op": "connect", "a": "CONST1.out", "b": "INT1.in"},
+        {"op": "setParameter", "id": "INT1", "key": "initialValue", "value": 0.25},
+        {"op": "setParameter", "id": "PI1", "key": "ki", "value": 125},
+        {"op": "setRecording", "id": "PI1", "quantity": "output", "enabled": true},
+        {"op": "setSimulation", "key": "controlSamplePeriod_s", "value": 0.0001}
+    ]))
+    .unwrap();
+    let edited = apply(&original, &revision, &ops).unwrap();
+    assert!(edited.document.inspect().missing_pins.is_empty());
+    let folder = SaveTestDirectory::new("feedback-parts");
+    let path = folder.0.join("feedback.litzsim");
+    save(&path, &edited.document, SaveMode::New).unwrap();
+    let opened = open(&path).unwrap();
+    assert_eq!(opened.document, edited.document);
+    assert_eq!(opened.revision, edited.receipt.after_revision);
+    assert_eq!(
+        json!(crate::layout::layout(&opened.document)),
+        json!(crate::layout::layout(&edited.document)),
+    );
+    let restored = undo(&opened.document, &opened.revision, &revision, &original).unwrap();
+    assert_eq!(restored.document.to_bytes(), original.to_bytes());
+}
+
+#[test]
 fn save_guards_raw_bytes_and_serializes_competing_writers() {
     let folder = SaveTestDirectory::new("save");
     let directory = &folder.0;

@@ -9,6 +9,7 @@ const RC: &str = include_str!("../../../examples/rc.litzsim");
 const RLC: &str = include_str!("../../../examples/rlc.litzsim");
 const BUCK: &str = include_str!("../../../examples/buck.litzsim");
 const CONTROL: &str = include_str!("../../../examples/control-signals.litzsim");
+const VOLTAGE_LOOP: &str = include_str!("../../../examples/buck-voltage-loop.litzsim");
 
 fn document(value: &Value) -> Document {
     Document::from_bytes(&serde_json::to_vec(value).unwrap()).unwrap()
@@ -543,6 +544,452 @@ fn timed_switch_opening_reports_the_floating_node_at_the_edge() {
             .message
             .contains("Floating node or island isolated by open switches at 0.000755 s")
     );
+}
+
+#[test]
+fn integrator_and_pi_update_at_each_tick_and_saturate_without_winding_up() {
+    let value = json!({
+        "version": 1,
+        "layout": {},
+        "simulation": {"timeStep_s": 0.25, "stopTime_s": 1.5, "controlSamplePeriod_s": 0.25},
+        "parts": {
+            "S": {"type": "step", "parameters": {"before": 2, "after": -1, "stepTime_s": 0.75}},
+            "R": {"type": "step", "parameters": {"before": 0, "after": 2, "stepTime_s": 1.5}},
+            "E": {"type": "sum", "parameters": {"sign1": 1, "sign2": 1}},
+            "I": {"type": "integrator", "parameters": {"initialValue": 0.25, "min": -0.25, "max": 1}, "record": {"output": true}},
+            "PI": {"type": "pi", "parameters": {"kp": 0.25, "ki": 1, "initialIntegral": 0.25, "min": -0.5, "max": 1}, "record": {"output": true}},
+            "GP": {"type": "gain", "parameters": {"gain": 0.17}},
+            "GI": {"type": "gain", "parameters": {"gain": 0.3}},
+            "II": {"type": "integrator", "parameters": {"initialValue": 0.125, "min": -1, "max": 1}},
+            "SUM": {"type": "sum", "parameters": {"sign1": 1, "sign2": 1}, "record": {"output": true}},
+            "UNCLAMPED": {"type": "pi", "parameters": {"kp": 0.17, "ki": 0.3, "initialIntegral": 0.125, "min": -1, "max": 1}, "record": {"output": true}},
+            "NEG": {"type": "constant", "parameters": {"value": -1}},
+            "UNWIND": {"type": "pi", "parameters": {"kp": 0, "ki": 1, "initialIntegral": 2, "min": 0, "max": 1}, "record": {"output": true}}
+        },
+        "nets": {
+            "step": ["S.out", "E.in1"], "reverse": ["R.out", "E.in2"],
+            "error": ["E.out", "I.in", "PI.in", "GP.in", "GI.in", "UNCLAMPED.in"],
+            "p": ["GP.out", "SUM.in1"], "di": ["GI.out", "II.in"], "i": ["II.out", "SUM.in2"],
+            "negative": ["NEG.out", "UNWIND.in"]
+        }
+    });
+    let wave = simulate(&document(&value), || false).unwrap();
+    let [i, pi, sum, unclamped, unwind] =
+        ["I_out", "PI_out", "SUM_out", "UNCLAMPED_out", "UNWIND_out"]
+            .map(|name| channel(&wave, name));
+    for row in wave.rows() {
+        assert_eq!(
+            row[sum].to_bits(),
+            row[unclamped].to_bits(),
+            "at {} s",
+            row[0]
+        );
+    }
+    // At the top rail the PI integral stays at 0.25 for three ticks. At
+    // the bottom rail it stays at -0.25 on the sixth tick. Reversing the
+    // input releases either rail immediately. The standalone integral clamps its state.
+    let expected = [
+        [0.75, 1.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.75, -0.25, 1.0],
+        [0.5, -0.5, 0.75],
+        [0.25, -0.5, 0.5],
+        [0.5, 0.25, 0.25],
+    ];
+    for (tick, expected) in expected.into_iter().enumerate() {
+        let row = wave
+            .rows()
+            .rev()
+            .find(|row| row[0] == tick as f64 * 0.25)
+            .unwrap();
+        assert_eq!([row[i], row[pi], row[unwind]], expected, "tick {tick}");
+    }
+}
+
+fn buck_with_duty_input(command: Value) -> Value {
+    let mut value: Value = serde_json::from_str(BUCK).unwrap();
+    value["parts"]["PWM"] =
+        json!({"type": "dutyPwm", "parameters": {"frequency_Hz": 10000, "high_V": 10}});
+    value["parts"]["COMMAND"] = command;
+    value["parts"]["VG"] = json!({"type": "voltmeter", "parameters": {}});
+    value["nets"]["duty"] = json!(["COMMAND.out", "PWM.duty"]);
+    value["nets"]["gate"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VG.p"));
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VG.n"));
+    value
+}
+
+#[test]
+fn constant_duty_input_matches_fixed_pwm_bit_for_bit() {
+    for (frequency, duty, ts) in [
+        (10_000.0, 0.5, 50e-6),
+        (50_000.0, 0.3, 13e-6),
+        (37_000.0, 0.8, 17e-6),
+        (100_000.0, 0.374, 10e-6),
+    ] {
+        let mut value =
+            buck_with_duty_input(json!({"type": "constant", "parameters": {"value": duty}}));
+        value["simulation"]["controlSamplePeriod_s"] = json!(ts);
+        value["parts"]["PWM"]["parameters"]["frequency_Hz"] = json!(frequency);
+        let sampled = simulate(&document(&value), || false).unwrap();
+        if frequency == 100_000.0 {
+            let gate = channel(&sampled, "VG_V");
+            let edge_levels: Vec<_> = sampled
+                .rows()
+                .filter(|row| row[0] == 3.74e-6)
+                .map(|row| row[gate])
+                .collect();
+            assert_eq!(
+                edge_levels,
+                [10.0, 0.0],
+                "the first falling edge splits the 0.1 µs grid"
+            );
+        }
+        value["parts"]["PWM"]["type"] = json!("pwm");
+        value["parts"]["PWM"]["parameters"]["duty"] = json!(duty);
+        value["nets"].as_object_mut().unwrap().remove("duty");
+        let fixed = simulate(&document(&value), || false).unwrap();
+        assert_eq!(sampled.channels(), fixed.channels());
+        assert_eq!(sampled.rows().len(), fixed.rows().len());
+        for (sampled, fixed) in sampled.rows().zip(fixed.rows()) {
+            assert!(
+                sampled
+                    .iter()
+                    .zip(fixed)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "{frequency} Hz, duty {duty}: {sampled:?} != {fixed:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn coincident_carrier_uses_pi_output_from_left_limit_gate_measurement() {
+    let mut value = buck_with_duty_input(json!({
+        "type": "pi", "parameters": {"kp": 1, "ki": 0, "initialIntegral": 0, "min": 0, "max": 1},
+        "record": {"output": true}
+    }));
+    value["simulation"] =
+        json!({"timeStep_s": 3e-7, "stopTime_s": 210e-6, "controlSamplePeriod_s": 100e-6});
+    value["parts"]["REF"] = json!({"type": "constant", "parameters": {"value": 1}});
+    value["parts"]["VS"] =
+        json!({"type": "voltageSensor", "parameters": {"gain": 0.1}, "record": {"output": true}});
+    value["parts"]["ERROR"] = json!({"type": "sum", "parameters": {"sign1": 1, "sign2": -1}});
+    value["nets"]["gate"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VS.p"));
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VS.n"));
+    value["nets"]["reference"] = json!(["REF.out", "ERROR.in1"]);
+    value["nets"]["sensed"] = json!(["VS.out", "ERROR.in2"]);
+    value["nets"]["error"] = json!(["ERROR.out", "COMMAND.in"]);
+
+    let wave = simulate(&document(&value), || false).unwrap();
+    let columns = ["VG_V", "VS_out", "COMMAND_out"].map(|name| channel(&wave, name));
+    let at = |time| {
+        wave.rows()
+            .filter(|row| row[0] == time)
+            .map(|row| columns.map(|column| row[column]))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(at(0.0), [[10.0, 0.0, 1.0]]);
+    assert_eq!(at(100e-6), [[10.0, 0.0, 1.0], [0.0, 1.0, 0.0]]);
+    assert_eq!(at(200e-6), [[0.0, 1.0, 0.0], [10.0, 0.0, 1.0]]);
+}
+
+#[test]
+fn duty_pwm_holds_until_carrier_start_and_clamps_without_extra_gate_edges() {
+    let mut value =
+        buck_with_duty_input(json!({"type": "sum", "parameters": {"sign1": 1, "sign2": 1}}));
+    value["simulation"] = json!({
+        "timeStep_s": 3e-6, "stopTime_s": 470e-6, "controlSamplePeriod_s": 70e-6
+    });
+    value["parts"]["A"] =
+        json!({"type": "step", "parameters": {"before": 0.25, "after": 1.5, "stepTime_s": 70e-6}});
+    value["parts"]["B"] =
+        json!({"type": "step", "parameters": {"before": 0, "after": -2, "stepTime_s": 210e-6}});
+    value["parts"]["C"] =
+        json!({"type": "step", "parameters": {"before": 0, "after": 1, "stepTime_s": 350e-6}});
+    value["parts"]["OFFSET"] = json!({"type": "sum", "parameters": {"sign1": 1, "sign2": 1}});
+    value["nets"]["a"] = json!(["A.out", "COMMAND.in1"]);
+    value["nets"]["b"] = json!(["B.out", "OFFSET.in1"]);
+    value["nets"]["c"] = json!(["C.out", "OFFSET.in2"]);
+    value["nets"]["offset"] = json!(["OFFSET.out", "COMMAND.in2"]);
+
+    let wave = simulate(&document(&value), || false).unwrap();
+    let gate = channel(&wave, "VG_V");
+    let mut previous = wave.rows().next().unwrap();
+    assert_eq!(previous[gate], 10.0);
+    let mut edges = Vec::new();
+    for row in wave.rows().skip(1) {
+        if previous[gate] != row[gate] {
+            assert_eq!(previous[0], row[0]);
+            edges.push((row[0], row[gate]));
+        }
+        previous = row;
+    }
+    let expected = [
+        (25e-6, 0.0),
+        (100e-6, 10.0),
+        (300e-6, 0.0),
+        (400e-6, 10.0),
+        (450e-6, 0.0),
+    ];
+    assert_eq!(edges.len(), expected.len());
+    for ((time, gate), (edge, level)) in edges.into_iter().zip(expected) {
+        assert!((time - edge).abs() <= 1e-18);
+        assert_eq!(gate, level);
+    }
+    value["nets"].as_object_mut().unwrap().remove("duty");
+    let error = simulate(&document(&value), || false).unwrap_err();
+    assert_eq!(error.target_id.as_deref(), Some("PWM"));
+    assert!(error.message.contains("Unconnected signal input PWM.duty"));
+}
+
+#[test]
+fn duty_pwm_uses_coincident_samples_at_carrier_start_and_handles_final_edges() {
+    let adjacent = |t: f64| [t.next_down(), t, t.next_up()];
+    for (edge, before, after, gate_levels) in [
+        (50e-6, 0.5, 1.0, [10.0, 0.0]),
+        (100e-6, 0.0, 0.5, [0.0, 10.0]),
+        (100e-6, 1.0, 0.0, [10.0, 0.0]),
+    ] {
+        for step in adjacent(edge / 28.0) {
+            for sample in adjacent(edge) {
+                for stop in adjacent(edge) {
+                    let mut value = buck_with_duty_input(json!({
+                        "type": "step", "parameters": {"before": before, "after": after, "stepTime_s": sample},
+                        "record": {"output": true}
+                    }));
+                    value["simulation"] = json!({"timeStep_s": step, "stopTime_s": stop, "controlSamplePeriod_s": sample});
+                    let short = simulate(&document(&value), || false).unwrap();
+                    value["simulation"]["stopTime_s"] = json!(edge + 1e-6);
+                    let long = simulate(&document(&value), || false).unwrap();
+                    let gate = channel(&short, "VG_V");
+                    let command = channel(&short, "COMMAND_out");
+                    let pairs = |wave: &litzsim_core::waves::Waveform| {
+                        wave.rows()
+                            .filter(|row| (row[0] - edge).abs() <= 8.0 * f64::EPSILON * edge)
+                            .map(|row| (row[0], row[gate], row[command]))
+                            .collect::<Vec<_>>()
+                    };
+                    let short_rows = pairs(&short);
+                    let long_rows = pairs(&long);
+                    let expected = [(gate_levels[0], before), (gate_levels[1], after)];
+                    assert_eq!(
+                        short_rows.iter().map(|&(t, _, _)| t).collect::<Vec<_>>(),
+                        [stop; 2]
+                    );
+                    for rows in [short_rows, long_rows] {
+                        assert_eq!(
+                            rows.into_iter().map(|(_, g, d)| (g, d)).collect::<Vec<_>>(),
+                            expected
+                        );
+                    }
+                    value["parts"]["COMMAND"]["record"]["output"] = json!(false);
+                    value["simulation"]["stopTime_s"] = json!(stop);
+                    let unrecorded = simulate(&document(&value), || false).unwrap();
+                    let final_gate: Vec<_> = unrecorded
+                        .rows()
+                        .filter(|row| row[0] == stop)
+                        .map(|row| row[gate])
+                        .collect();
+                    assert_eq!(
+                        final_gate, gate_levels,
+                        "unrecorded command, edge {edge}, stop {stop}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn switching_node_feedback_starts_identically_after_diode_rename() {
+    use litzsim_core::circuit::{Operation, apply};
+
+    let mut value: Value = serde_json::from_str(VOLTAGE_LOOP).unwrap();
+    value["parts"]["VS"]["record"]["output"] = json!(true);
+    value["nets"]["output"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|pin| pin != "VS.p");
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VS.p"));
+    let original = document(&value);
+    let rename: Operation =
+        serde_json::from_value(json!({"op": "rename", "id": "D1", "newId": "Z1"})).unwrap();
+    let renamed = apply(&original, &original.revision(), &[rename])
+        .unwrap()
+        .document;
+    let observed = |doc| {
+        let wave = simulate(doc, || false).unwrap();
+        let first = wave.rows().next().unwrap();
+        let at_first_carrier = wave
+            .rows()
+            .find(|row| (row[0] - 100e-6).abs() < 1e-18)
+            .unwrap();
+        [
+            first[channel(&wave, "VS_out")],
+            first[channel(&wave, "PI_out")],
+            at_first_carrier[channel(&wave, "VC_V")],
+        ]
+    };
+    let before = observed(&original);
+    let after = observed(&renamed);
+    assert_eq!(before, after);
+    assert_eq!(before[..2], [0.0, 0.09375]);
+    assert!(before[2] > 0.0);
+
+    value["parts"]["L1"]["parameters"]["initialCurrent_A"] = json!(0.2);
+    let original = document(&value);
+    let rename: Operation =
+        serde_json::from_value(json!({"op": "rename", "id": "D1", "newId": "Z1"})).unwrap();
+    let renamed = apply(&original, &original.revision(), &[rename])
+        .unwrap()
+        .document;
+    assert_eq!(observed(&original), observed(&renamed));
+
+    // Two ideal incoming paths in parallel leave the branch currents undetermined.
+    value["parts"]["D2"] = json!({"type": "diode", "parameters": {}});
+    value["nets"]["ground"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("D2.a"));
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("D2.k"));
+    let error = simulate(&document(&value), || false).unwrap_err();
+    assert_eq!(error.code, "singularCircuit");
+    assert_eq!(error.target_id.as_deref(), Some("L1"));
+    assert_eq!(
+        error.message,
+        "Initial inductor return cannot be uniquely determined at 0 s: D1, D2, L1, Q1"
+    );
+}
+
+#[test]
+fn voltage_feedback_buck_reaches_reference_in_ten_milliseconds() {
+    let wave = simulate(
+        &Document::from_bytes(VOLTAGE_LOOP.as_bytes()).unwrap(),
+        || false,
+    )
+    .unwrap();
+    let initial = wave.rows().next().unwrap();
+    assert_eq!(initial[channel(&wave, "VC_V")], 0.0);
+    assert_eq!(initial[channel(&wave, "ERR_out")], 2.5);
+    assert_eq!(initial[channel(&wave, "PI_out")], 0.09375);
+    let stats = wave.measure(&["VC_V".into()], 8e-3, 10e-3).unwrap();
+    let average = stats.channels[0].average.unwrap();
+    assert!(
+        (average - 2.5).abs() <= 0.025,
+        "average output = {average} V"
+    );
+}
+
+#[test]
+fn feedback_buck_load_step_shares_the_carrier_sample_and_diagnostics() {
+    let edge = 1e-3_f64;
+    let mut circuit: Value = serde_json::from_str(VOLTAGE_LOOP).unwrap();
+    circuit["simulation"]["stopTime_s"] = json!(1.1e-3);
+    circuit["parts"]["C1"]["parameters"]["esr_ohm"] = json!(0);
+    circuit["parts"]["R2"] = json!({"type": "resistor", "parameters": {"resistance_ohm": 10}});
+    circuit["parts"]["VG"] = json!({"type": "voltmeter", "parameters": {}});
+    circuit["nets"]["gate"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VG.p"));
+    circuit["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VG.n"));
+    circuit["nets"]["output"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("R2.p"));
+    circuit["nets"]["ground"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("SW1.n"));
+    circuit["nets"]["branch"] = json!(["R2.n", "SW1.p"]);
+    let at_edge = |row: &[f64]| (row[0] - edge).abs() <= 8.0 * f64::EPSILON * edge;
+    let mut exact_pair = None;
+    for at in [edge, edge.next_down(), edge.next_up()] {
+        circuit["parts"]["SW1"] = json!({
+            "type": "timedSwitch", "parameters": {"initiallyClosed": 0, "switchTime_s": at},
+            "record": {"voltage": true, "current": true}
+        });
+        let full = simulate(&document(&circuit), || false).unwrap();
+        let pair: Vec<_> = full.rows().filter(|row| at_edge(row)).collect();
+        assert_eq!(pair.len(), 2, "switch time {at:?}");
+        assert_eq!(pair[0][0], pair[1][0]);
+        let (v, gate, load, err, duty) = (
+            channel(&full, "VC_V"),
+            channel(&full, "VG_V"),
+            channel(&full, "SW1_A"),
+            channel(&full, "ERR_out"),
+            channel(&full, "PI_out"),
+        );
+        assert_eq!([pair[0][gate], pair[1][gate]], [0.0, 10.0]);
+        assert!((pair[1][v] - pair[0][v]).abs() < 1e-12);
+        assert_eq!(pair[0][load], 0.0);
+        assert!(pair[1][load] > 0.0);
+        assert!((pair[1][load] - pair[0][v] / 10.0).abs() < 1e-12);
+        assert!((pair[1][err] - (2.5 - pair[0][v])).abs() < 1e-12);
+        assert_ne!(pair[0][duty], pair[1][duty]);
+        let owned: Vec<_> = pair.iter().map(|row| row.to_vec()).collect();
+        assert_eq!(&owned, exact_pair.get_or_insert_with(|| owned.clone()));
+
+        let mut short = circuit.clone();
+        short["parts"].as_object_mut().unwrap().remove("R2");
+        short["nets"].as_object_mut().unwrap().remove("branch");
+        *short["nets"]["output"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap() = json!("SW1.p");
+        for (stride, records_edge) in [(None, true), (Some(4e-6), true), (Some(3.5e-6), false)] {
+            let mut configured = circuit.clone();
+            for value in [&mut configured, &mut short] {
+                if let Some(stride) = stride {
+                    value["simulation"]["outputStep_s"] = json!(stride);
+                }
+            }
+            let sparse = simulate(&document(&configured), || false).unwrap();
+            let saved: Vec<_> = sparse.rows().filter(|row| at_edge(row)).collect();
+            if records_edge {
+                assert_eq!(saved, pair);
+            } else {
+                assert!(saved.is_empty());
+            }
+            let mut full_rows = full.rows();
+            for row in sparse.rows() {
+                assert!(
+                    full_rows.any(|full| full == row),
+                    "saved row differs: {row:?}"
+                );
+            }
+            let error = simulate(&document(&short), || false).unwrap_err();
+            assert_eq!(error.code, "singularCircuit");
+            assert_eq!(error.target_id.as_deref(), Some("SW1"));
+            assert_eq!(
+                error.message,
+                "Ideal voltage constraint loop at 0.001 s: SW1, C1"
+            );
+        }
+    }
 }
 
 #[test]
