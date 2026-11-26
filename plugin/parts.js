@@ -43,6 +43,9 @@ const CONTROL_LABELS = {
   sum: "합산",
   gain: "이득",
   limiter: "리미터",
+  integrator: "적분기",
+  pi: "PI 제어기",
+  dutyPwm: "듀티 입력 PWM",
   timedSwitch: "시간 스위치",
 };
 

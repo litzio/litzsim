@@ -12,7 +12,7 @@ import {
   applyToAll, autoRange, axisFor, defaultRun, formatValue, keepSignals, keepView, niceStep, panRange, readTimeAxis, ticks,
   timeAxisProblem, zoomAxis, zoomRange,
 } from "./plot.js";
-import { CATEGORIES, DUTY_UPDATE_LABELS, PARTS, RECORDING_LABELS, ROTATE_SHORTCUT, libraryCategories, shortcutOf } from "./parts.js";
+import { CATEGORIES, DUTY_UPDATE_LABELS, PARTS, RECORDING_LABELS, ROTATE_SHORTCUT, libraryCategories, partLabel, shortcutOf } from "./parts.js";
 import {
   deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex, selectionBox,
   undoRenamed, wireStyle,
@@ -143,6 +143,17 @@ test("the control library, recording and wire styles follow the core layout", as
   assert.ok(!signStroke(sum, 32));
   const changed = await apply(sheet, [{ op: "setParameter", id: "SUM1", key: "sign2", value: 1 }]);
   assert.ok(signStroke(changed.layout.symbols.find(symbol => symbol.id === "SUM1"), 32));
+});
+
+test("new control and switch types use the same display names in the library and properties", async () => {
+  const { layout } = await apply(await rc(), []);
+  const entries = libraryCategories(layout).flatMap(group => group.parts);
+  for (const [type, label] of [
+    ["integrator", "적분기"], ["pi", "PI 제어기"], ["dutyPwm", "듀티 입력 PWM"], ["timedSwitch", "시간 스위치"],
+  ]) {
+    assert.equal(entries.find(part => part.type === type)?.label, label);
+    assert.equal(partLabel(type), label);
+  }
 });
 
 test("a new circuit with only a changed simulation setting is unsaved", async () => {
