@@ -23,11 +23,13 @@ $before = & $cli inspect buck.litzsim --json | ConvertFrom-Json
     Set-Content -Encoding utf8NoBOM ops.json
 $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | ConvertFrom-Json
 & $cli undo buck.litzsim --expect $edited.receipt.afterRevision --before $edited.receipt.beforeRevision --previous previous.litzsim
+& $cli layout buck.litzsim --json
 ```
 
 - `inspect`는 회로 문서, 정규화한 문서의 `revision`, 읽은 파일 바이트의 `diskRevision`, 단자별 네트와 격자 좌표, 계기 기준 방향을 반환합니다. 미접속 단자는 `missingPins`에서 확인할 수 있습니다.
 - `apply`와 `undo`는 문서와 receipt를 반환하고 파일을 교체합니다. receipt는 작업 전후 revision, 생성·수정·삭제된 소자 ID, 변경된 네트별 전후 단자 목록을 담습니다. 실패하면 JSON 오류와 0이 아닌 종료 코드를 반환합니다. 배치 연산 오류에는 1부터 시작하는 연산 번호와 대상 ID가 들어갑니다.
 - `undo`는 현재 문서와 스냅샷의 revision을 각각 receipt의 `afterRevision`, `beforeRevision`과 대조합니다. 스냅샷이 다르면 `previousMismatch`를 반환합니다.
+- `layout`은 같은 문서 revision의 기호·단자·직각 배선·접속점·교차 점프·라벨과 겹침 진단을 반환합니다. 좌표와 라벨 치수는 [회로도 기하 규약](docs/layout.md)을 따릅니다.
 
 | `ops.json`의 `op` | 필드 |
 | --- | --- |
@@ -46,7 +48,7 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 
 RC·RLC·벅 예제는 [examples](examples/)에 있습니다. PFC 예제는 지원 범위 밖 제어 설정이 있어 읽기를 거절합니다. 회로 파일에는 revision이나 Undo 기록을 저장하지 않습니다. 저장 중에는 시스템 임시 폴더의 경로별 OS 잠금을 사용합니다. 신규 저장은 하드 링크를 지원하는 파일시스템에서 완성된 파일을 원자적으로 게시합니다.
 
-`litzsim serve`는 요청 한 줄마다 JSON 한 줄을 반환합니다. `ping`은 버전을, `new`는 빈 v1 문서와 revision을 반환합니다. 실패 응답의 `error` 객체에는 `code`와 `message`가 들어갑니다. 편집과 파일 요청의 필드는 다음과 같습니다.
+`litzsim serve`는 요청 한 줄마다 JSON 한 줄을 반환합니다. `ping`은 버전을, `new`는 빈 v1 문서와 revision을 반환합니다. 성공한 `apply` 응답에는 `document`, `receipt`, 같은 revision의 `layout`이 함께 들어갑니다. 실패 응답의 `error` 객체에는 `code`와 `message`가 들어갑니다. 편집과 파일 요청의 필드는 다음과 같습니다.
 
 | `op` | 필드 |
 | --- | --- |

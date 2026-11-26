@@ -106,28 +106,28 @@ struct Part {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Placement {
+pub(crate) struct Placement {
     #[serde(deserialize_with = "integer")]
-    x: i32,
+    pub(crate) x: i32,
     #[serde(deserialize_with = "integer")]
-    y: i32,
+    pub(crate) y: i32,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "optional_integer"
     )]
-    rotation: Option<i32>,
+    pub(crate) rotation: Option<i32>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "present"
     )]
-    mirror: Option<Mirror>,
+    pub(crate) mirror: Option<Mirror>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-enum Mirror {
+pub(crate) enum Mirror {
     Horizontal,
     Vertical,
     Both,
@@ -143,7 +143,7 @@ impl Placement {
         self.rotation = (rotation != 0).then_some(rotation);
     }
 
-    fn pin_position(self, [x, y]: [i32; 2]) -> [i64; 2] {
+    pub(crate) fn orient(self, [x, y]: [i32; 2]) -> [i32; 2] {
         let [mut x, mut y] = match self.rotation.unwrap_or_default() {
             0 => [x, y],
             90 => [-y, x],
@@ -157,6 +157,11 @@ impl Placement {
         if self.mirror == Some(Mirror::Vertical) {
             y = -y;
         }
+        [x, y]
+    }
+
+    fn pin_position(self, offset: [i32; 2]) -> [i64; 2] {
+        let [x, y] = self.orient(offset);
         [
             i64::from(self.x) + i64::from(x),
             i64::from(self.y) + i64::from(y),
@@ -206,7 +211,32 @@ pub struct Inspection<'a> {
     pub missing_pins: Vec<String>,
 }
 
+pub(crate) struct LayoutPart<'a> {
+    pub id: &'a str,
+    pub kind: &'a str,
+    pub parameters: &'a BTreeMap<String, Value>,
+    pub placement: Placement,
+}
+
 impl Document {
+    pub(crate) fn layout_parts(&self) -> impl Iterator<Item = LayoutPart<'_>> {
+        self.0.parts.iter().map(|(id, part)| LayoutPart {
+            id,
+            kind: &part.kind,
+            parameters: &part.parameters,
+            placement: self.0.layout.get(id).copied().unwrap_or_default(),
+        })
+    }
+
+    pub(crate) fn layout_nets(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.0.nets
+    }
+
+    pub(crate) fn layout_bend(&self, pin: &str) -> Option<[i64; 2]> {
+        let bend = self.0.bends.as_ref()?.get(pin)?;
+        Some([i64::from(bend.x), i64::from(bend.y)])
+    }
+
     pub fn new() -> Self {
         Self(CircuitV1 {
             version: 1,
