@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "simulation": {"timeStep_s": 0.000002, "stopTime_s": 0.002},
+  "parts": {
+    "V1": {"type": "dc", "parameters": {"voltage_V": 5}},
+    "R1": {"type": "resistor", "parameters": {"resistance_ohm": 1000}},
+    "C1": {
+      "type": "capacitor",
+      "parameters": {"capacitance_F": 0.000001, "initialVoltage_V": 0, "esr_ohm": 0},
+      "record": {"voltage": true}
+    },
+    "R2": {"type": "resistor", "parameters": {"resistance_ohm": 1000}},
+    "SW1": {
+      "type": "timedSwitch",
+      "parameters": {"initiallyClosed": 0, "switchTime_s": 0.000755},
+      "record": {"voltage": true, "current": true}
+    },
+    "GND": {"type": "ground", "parameters": {}}
+  },
+  "nets": {
+    "input": ["V1.p", "R1.p"],
+    "output": ["R1.n", "C1.p", "R2.p"],
+    "branch": ["R2.n", "SW1.p"],
+    "ground": ["V1.n", "C1.n", "SW1.n", "GND.ref"]
+  },
+  "layout": {
+    "V1": {"x": 0, "y": 2},
+    "R1": {"x": 4, "y": 1},
+    "C1": {"x": 8, "y": 3},
+    "R2": {"x": 12, "y": 2, "rotation": 90},
+    "SW1": {"x": 12, "y": 5},
+    "GND": {"x": 4, "y": 8}
+  }
+}

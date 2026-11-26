@@ -194,6 +194,7 @@ fn replacing_unedited_examples_preserves_raw_bytes() {
         include_bytes!("../../../examples/buck.litzsim").as_slice(),
         include_bytes!("../../../examples/buck-probe.litzsim").as_slice(),
         include_bytes!("../../../examples/control-signals.litzsim").as_slice(),
+        include_bytes!("../../../examples/rc-load-step.litzsim").as_slice(),
     ] {
         fs::write(&path, bytes).unwrap();
         let opened = open(&path).unwrap();
@@ -225,6 +226,60 @@ fn replacing_unedited_examples_preserves_raw_bytes() {
     .unwrap();
     assert_ne!(revision, opened.disk_revision);
     assert_eq!(fs::read(&path).unwrap(), opened.document.to_bytes());
+}
+
+#[test]
+fn timed_switch_edit_saves_and_undo_restores_the_original_circuit() {
+    use std::fs;
+
+    let folder = TestDirectory::new("timed-switch");
+    let file = "circuit.litzsim";
+    let path = folder.0.join(file);
+    let before = include_bytes!("../../../examples/rc-load-step.litzsim");
+    fs::write(&path, before).unwrap();
+    fs::write(folder.0.join("before.litzsim"), before).unwrap();
+    let original = folder.run(&["inspect", file, "--json"], true);
+    let revision = original["revision"].as_str().unwrap();
+    fs::write(
+        folder.0.join("ops.json"),
+        json!([
+            {"op": "setParameter", "id": "SW1", "key": "initiallyClosed", "value": 1},
+            {"op": "setParameter", "id": "SW1", "key": "switchTime_s", "value": 0.0009}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let edited = folder.run(
+        &["apply", file, "--expect", revision, "--ops", "ops.json"],
+        true,
+    );
+    let edited_revision = edited["receipt"]["afterRevision"].as_str().unwrap();
+    let reopened = folder.run(&["inspect", file, "--json"], true);
+    assert_eq!(reopened["revision"], edited_revision);
+    assert_eq!(reopened["document"], edited["document"]);
+    assert_eq!(
+        reopened["document"]["parts"]["SW1"]["parameters"],
+        json!({"initiallyClosed": 1.0, "switchTime_s": 0.0009})
+    );
+    let layout = folder.run(&["layout", file, "--json"], true);
+    assert_eq!(layout["pins"]["SW1.p"]["netId"], "branch");
+    assert_eq!(layout["pins"]["SW1.n"]["netId"], "ground");
+    assert_eq!(layout["issues"], json!([]));
+    folder.run(&["run", file, "edited.litzwave"], true);
+    folder.run(
+        &[
+            "undo",
+            file,
+            "--expect",
+            edited_revision,
+            "--before",
+            revision,
+            "--previous",
+            "before.litzsim",
+        ],
+        true,
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
 }
 
 #[test]

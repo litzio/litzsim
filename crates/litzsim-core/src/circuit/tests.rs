@@ -262,6 +262,7 @@ fn new_parts_take_short_designators_and_skip_used_numbers() {
         "capacitor",
         "diode",
         "nmos",
+        "timedSwitch",
         "pwm",
         "voltmeter",
         "ammeter",
@@ -272,8 +273,15 @@ fn new_parts_take_short_designators_and_skip_used_numbers() {
     assert_eq!(
         result.receipt.created,
         [
-            "AM1", "C2", "D1", "GND1", "L1", "PWM1", "Q1", "R2", "V2", "V3", "VM1"
+            "AM1", "C2", "D1", "GND1", "L1", "PWM1", "Q1", "R2", "SW1", "V2", "V3", "VM1"
         ]
+    );
+    assert_eq!(
+        result.document.0.parts["SW1"].parameters,
+        BTreeMap::from([
+            ("initiallyClosed".into(), 0.0.into()),
+            ("switchTime_s".into(), 0.001.into()),
+        ])
     );
     for id in ["V1", "R1", "C1", "GND", "VC"] {
         assert_eq!(result.document.0.parts[id], rc.0.parts[id]);
