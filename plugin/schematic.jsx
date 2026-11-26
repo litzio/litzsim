@@ -96,8 +96,8 @@ const boxProps = ({ min, max }, pad = 0) => ({
 });
 
 export function Schematic({
-  layout, view, zoom, svgRef, selectedId, pendingPin, hoverSegment, preview, ghost, suggestion,
-  onSymbolDown, onPinDown, onSegmentEnter, onBackgroundDown, onPointerMove, onPointerUp,
+  layout, view, zoom, svgRef, selectedIds, pendingPin, hoverSegment, selectedWires, showGrid, marquee, preview, ghost, suggestion,
+  onSymbolDown, onPinDown, onSegmentEnter, onSegmentDown, onBackgroundDown, onPointerMove, onPointerUp, onPointerCancel,
 }) {
   const labels = React.useRef(null);
   React.useLayoutEffect(() => {
@@ -108,24 +108,26 @@ export function Schematic({
     document.fonts?.ready.then(() => { if (live) fitLabels(group); });
     return () => { live = false; };
   });
-  const jumps = layout.jumps;
-  const moving = preview && layout.symbols.find(symbol => symbol.id === preview.id);
+  const moving = preview ? layout.symbols.filter(symbol => preview.ids.includes(symbol.id)) : [];
   const sorted = [...layout.jumps].sort((a, b) => a.at[0] - b.at[0]);
+  const hovered = layout.segments[hoverSegment];
   return <svg ref={svgRef} role="group" aria-label="회로도" data-revision={layout.revision}
     viewBox={`${view.x} ${view.y} ${view.width} ${view.height}`} width={view.width * zoom} height={view.height * zoom}
     style={{ display: "block", background: PAPER, touchAction: "none", userSelect: "none" }}
-    onPointerDown={onBackgroundDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
+    onPointerDown={onBackgroundDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel}>
     <defs>
       <pattern id="litzsim-grid" width={32} height={32} patternUnits="userSpaceOnUse" x={0} y={0}>
         <circle cx={0} cy={0} r={1} fill="var(--id-color-border)" />
       </pattern>
     </defs>
     <rect {...boxProps({ min: [view.x, view.y], max: [view.x + view.width, view.y + view.height] })}
-      fill="url(#litzsim-grid)" data-background="" />
+      fill={showGrid ? "url(#litzsim-grid)" : PAPER} data-background="" />
 
-    {hoverSegment !== null && layout.segments[hoverSegment] && <path d={wirePath(layout.segments[hoverSegment], jumps)}
+    {hovered && !selectedWires.has(hovered) && <path d={wirePath(hovered, sorted)}
       stroke={ACCENT} strokeWidth={8} strokeOpacity={0.35} fill="none" strokeLinecap="round" pointerEvents="none" />}
-    {selectedId && layout.symbols.filter(symbol => symbol.id === selectedId).map(symbol =>
+    {[...selectedWires].map((segment, index) => <path key={index} d={wirePath(segment, sorted)}
+      stroke={ACCENT} strokeWidth={8} strokeOpacity={0.9} fill="none" strokeLinecap="round" pointerEvents="none" />)}
+    {layout.symbols.filter(symbol => selectedIds.includes(symbol.id)).map(symbol =>
       <rect key={symbol.id} {...boxProps(symbol.bounds, 6)} fill="var(--id-color-surface-selected)" fillOpacity={0.5}
         stroke={ACCENT} strokeWidth={1.5} strokeDasharray="4 3" pointerEvents="none" />)}
 
@@ -151,12 +153,14 @@ export function Schematic({
 
     {/* Hit targets, drawn transparent above the ink. */}
     <g fill="none" stroke="transparent" strokeWidth={12}>
-      {layout.segments.map((segment, index) => <line key={index} data-segment={index} data-terminals={segment.terminals.join(" ")} data-net={segment.netId}
-        x1={segment.from[0]} y1={segment.from[1]} x2={segment.to[0]} y2={segment.to[1]}
-        pointerEvents="stroke" onPointerEnter={() => onSegmentEnter(index)} />)}
+      {layout.segments.map((segment, index) => <path key={index} data-segment={index} data-terminals={segment.terminals.join(" ")} data-net={segment.netId}
+        data-selected={selectedWires.has(segment) || undefined} d={wirePath(segment, sorted)}
+        pointerEvents="stroke" style={{ cursor: "pointer" }} onPointerEnter={() => onSegmentEnter(index)}
+        onPointerDown={event => onSegmentDown(index, event)} />)}
     </g>
     <g fill="transparent">
-      {layout.symbols.map(symbol => <rect key={symbol.id} data-part={symbol.id} data-center={symbol.center.join(" ")} {...boxProps(symbol.bounds)}
+      {layout.symbols.map(symbol => <rect key={symbol.id} data-part={symbol.id} data-selected={selectedIds.includes(symbol.id) || undefined}
+        data-center={symbol.center.join(" ")} {...boxProps(symbol.bounds)}
         style={{ cursor: "move" }} onPointerDown={event => onSymbolDown(symbol.id, event)} />)}
     </g>
     <g>
@@ -166,10 +170,12 @@ export function Schematic({
         onPointerDown={event => onPinDown(id, event)}><title>{id}</title></circle>)}
     </g>
 
-    {moving && <g transform={`translate(${preview.dx} ${preview.dy})`} opacity={0.55} pointerEvents="none"
+    {moving.length > 0 && <g transform={`translate(${preview.dx} ${preview.dy})`} opacity={0.55} pointerEvents="none"
       stroke={ACCENT} strokeWidth={LINE} fill="none">
-      <g transform={symbolTransform(moving)}>{moving.strokes.map((stroke, index) => <Stroke key={index} stroke={stroke} />)}</g>
-      <rect {...boxProps(moving.bounds, 6)} strokeWidth={1} strokeDasharray="4 3" />
+      {moving.map(symbol => <g key={symbol.id}>
+        <g transform={symbolTransform(symbol)}>{symbol.strokes.map((stroke, index) => <Stroke key={index} stroke={stroke} />)}</g>
+        <rect {...boxProps(symbol.bounds, 6)} strokeWidth={1} strokeDasharray="4 3" />
+      </g>)}
     </g>}
     {ghost && <g pointerEvents="none" stroke={ACCENT} fill="none" strokeDasharray="4 3">
       <rect x={ghost.at[0] - 32} y={ghost.at[1] - 32} width={64} height={64} />
@@ -182,6 +188,8 @@ export function Schematic({
       <circle cx={suggestion.from[0]} cy={suggestion.from[1]} r={7} strokeWidth={2} />
       <circle cx={suggestion.to[0]} cy={suggestion.to[1]} r={7} strokeWidth={2} />
     </g>}
+    {marquee && <rect {...boxProps(marquee)} data-marquee="" fill={ACCENT} fillOpacity={0.08}
+      stroke={ACCENT} strokeWidth={1.5} strokeDasharray="4 3" pointerEvents="none" />}
   </svg>;
 }
 

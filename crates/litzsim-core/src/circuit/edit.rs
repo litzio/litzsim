@@ -42,6 +42,12 @@ pub enum Operation {
     Delete {
         id: String,
     },
+    /// Cut one wire segment from `layout` without inserting a part.
+    RemoveBranch {
+        terminals: [String; 2],
+        from: [i64; 2],
+        to: [i64; 2],
+    },
     /// Cut one wire segment from `layout` and put a two-terminal part in series.
     InsertInBranch {
         #[serde(rename = "type")]
@@ -93,8 +99,17 @@ pub fn apply(
 ) -> Result<EditResult, Error> {
     let before = check_revision(document, expected_revision)?;
     let mut next = document.clone();
-    for (index, op) in ops.iter().enumerate() {
+    let mut remaining = ops.iter().enumerate().peekable();
+    while let Some((index, op)) = remaining.next() {
         let result = match op {
+            Operation::RemoveBranch { .. } => {
+                // All consecutive wire selections refer to the same drawn layout.
+                let cuts = std::iter::once((index, op)).chain(std::iter::from_fn(|| {
+                    remaining.next_if(|(_, op)| matches!(op, Operation::RemoveBranch { .. }))
+                }));
+                remove_branches(&mut next, cuts)?;
+                continue;
+            }
             Operation::InsertInBranch {
                 kind,
                 terminals,
@@ -103,16 +118,18 @@ pub fn apply(
             } => insert_in_branch(&mut next, kind, terminals, *from, *to),
             _ => next.0.apply(op),
         };
-        result.map_err(|mut error| {
-            error.code = "operationFailed";
-            error.operation = Some(index + 1);
-            error
-        })?;
+        result.map_err(|error| operation_failed(error, index))?;
     }
     Ok(EditResult {
         receipt: receipt(document, &next, before),
         document: next,
     })
+}
+
+fn operation_failed(mut error: Error, index: usize) -> Error {
+    error.code = "operationFailed";
+    error.operation = Some(index + 1);
+    error
 }
 
 pub fn undo(
@@ -264,7 +281,9 @@ impl CircuitV1 {
                 self.parts.remove(id);
                 self.layout.remove(id);
             }
-            Operation::InsertInBranch { .. } => unreachable!("applied with the layout"),
+            Operation::RemoveBranch { .. } | Operation::InsertInBranch { .. } => {
+                unreachable!("applied with the layout")
+            }
         }
         Ok(())
     }
@@ -316,6 +335,61 @@ impl CircuitV1 {
             }
         }
     }
+}
+
+fn remove_branches<'a>(
+    document: &mut Document,
+    cuts: impl Iterator<Item = (usize, &'a Operation)>,
+) -> Result<(), Error> {
+    let mut partitions = BTreeMap::new();
+    for (index, op) in cuts {
+        let Operation::RemoveBranch {
+            terminals,
+            from,
+            to,
+        } = op
+        else {
+            unreachable!("only wire cuts are grouped");
+        };
+        let (net, far) = crate::layout::branch_cut(document, terminals, *from, *to)
+            .map_err(|error| operation_failed(error, index))?;
+        let groups = partitions
+            .entry(net.clone())
+            .or_insert_with(|| vec![document.0.nets[&net].clone()]);
+        // Each cut divides any group that still has terminals on both sides.
+        // Keep the original ID with the first group and preserve file order.
+        let mut splits = Vec::new();
+        for group in groups.iter_mut() {
+            let moved: Vec<_> = group
+                .iter()
+                .filter(|pin| far.contains(pin))
+                .cloned()
+                .collect();
+            if !moved.is_empty() && moved.len() < group.len() {
+                group.retain(|pin| !far.contains(pin));
+                splits.push(moved);
+            }
+        }
+        groups.extend(splits);
+    }
+    let nets = &mut document.0.nets;
+    let mut disconnected = Vec::new();
+    for (net, groups) in partitions {
+        let mut groups = groups.into_iter();
+        let near = groups.next().expect("original net");
+        if near.len() >= 2 {
+            nets.insert(net, near);
+        } else {
+            disconnected.push(net);
+        }
+        for far in groups.filter(|pins| pins.len() >= 2) {
+            nets.insert(next_id("net", nets), far);
+        }
+    }
+    for net in disconnected {
+        nets.remove(&net);
+    }
+    Ok(())
 }
 
 fn insert_in_branch(

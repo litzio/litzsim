@@ -654,6 +654,92 @@ fn insert_in_branch_cuts_the_chosen_segment_and_faces_the_first_pin_toward_from(
 }
 
 #[test]
+fn remove_branch_disconnects_singletons_and_splits_a_t_junction() {
+    let doc = Document::from_bytes(RC).unwrap();
+    let revision = doc.revision();
+    let drawn = layout(&doc);
+    let cut = |segment: &Segment<'_>| Operation::RemoveBranch {
+        terminals: segment.terminals.map(str::to_owned),
+        from: segment.from,
+        to: segment.to,
+    };
+    let input = drawn
+        .segments
+        .iter()
+        .find(|segment| segment.net_id == "input")
+        .unwrap();
+    let ground = |from, to| {
+        drawn
+            .segments
+            .iter()
+            .find(|segment| segment.net_id == "ground" && segment.from == from && segment.to == to)
+            .unwrap()
+    };
+    let root = ground([0, 96], [128, 96]);
+    let right = ground([128, 96], [256, 96]);
+
+    let edited = apply(&doc, &revision, &[cut(input), cut(right)]).unwrap();
+    let pins = layout(&edited.document).pins;
+    assert_eq!(pins["V1.p"].net_id, None);
+    assert_eq!(pins["R1.p"].net_id, None);
+    let nets = edited.document.layout_nets();
+    assert_eq!(nets["ground"], ["GND.ref", "V1.n"]);
+    assert_eq!(nets["net1"], ["C1.n", "VC.n"]);
+    assert_eq!(nets["output"], doc.layout_nets()["output"]);
+    assert_eq!(edited.receipt.nets.len(), 3);
+    assert_eq!(edited.receipt.nets["input"].after, None);
+    assert_eq!(
+        edited.receipt.nets["ground"].after.as_ref(),
+        Some(&nets["ground"])
+    );
+    assert_eq!(edited.receipt.nets["net1"].before, None);
+    let undone = undo(
+        &edited.document,
+        &edited.receipt.after_revision,
+        &revision,
+        &doc,
+    )
+    .unwrap();
+    assert_eq!(undone.document.to_bytes(), doc.to_bytes());
+
+    // Two cuts on the same T must use the same drawing. The first removes the
+    // original net, so after rerouting the second cut could no longer match.
+    let mixed = apply(
+        &doc,
+        &revision,
+        &[cut(root), cut(right), Operation::Delete { id: "R1".into() }],
+    )
+    .unwrap();
+    let nets = mixed.document.layout_nets();
+    assert!(!nets.contains_key("ground"));
+    assert_eq!(nets["net1"], ["C1.n", "VC.n"]);
+    assert_eq!(layout(&mixed.document).pins["V1.n"].net_id, None);
+    assert_eq!(mixed.receipt.deleted, ["R1"]);
+    assert_eq!(
+        undo(
+            &mixed.document,
+            &mixed.receipt.after_revision,
+            &revision,
+            &doc
+        )
+        .unwrap()
+        .document
+        .to_bytes(),
+        doc.to_bytes()
+    );
+
+    let invalid = Operation::RemoveBranch {
+        terminals: right.terminals.map(str::to_owned),
+        from: right.from,
+        to: [384, 96],
+    };
+    let bytes = doc.to_bytes();
+    let error = apply(&doc, &revision, &[cut(root), invalid]).unwrap_err();
+    assert_eq!((error.code, error.operation), ("operationFailed", Some(2)));
+    assert_eq!(doc.to_bytes(), bytes);
+}
+
+#[test]
 fn insert_in_branch_leaves_unrouted_terminals_on_the_original_net() {
     // Review repro: G2 shares GND's position but its unmet bend fails to route.
     let mut fixture: Value = serde_json::from_slice(RC).unwrap();
@@ -683,6 +769,19 @@ fn insert_in_branch_leaves_unrouted_terminals_on_the_original_net() {
     let nets = edited.document.layout_nets();
     assert_eq!(nets["ground"], ["V1.n", "G2.ref", "AM1.p"]);
     assert_eq!(nets["net1"], ["AM1.n", "GND.ref"]);
+
+    let removed = apply(
+        &doc,
+        &doc.revision(),
+        &[Operation::RemoveBranch {
+            terminals: ["V1.n".into(), "GND.ref".into()],
+            from: [0, 96],
+            to: [0, 160],
+        }],
+    )
+    .unwrap();
+    assert_eq!(removed.document.layout_nets()["ground"], ["V1.n", "G2.ref"]);
+    assert_eq!(layout(&removed.document).pins["GND.ref"].net_id, None);
 }
 
 #[test]

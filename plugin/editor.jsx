@@ -1,7 +1,7 @@
 import React from "react";
-import { CATEGORIES, PARTS, PARAMETERS, formatSI, parseSI, shortcutOf } from "./parts.js";
+import { CATEGORIES, PARTS, PARAMETERS, ROTATE_SHORTCUT, formatSI, parseSI, shortcutOf } from "./parts.js";
 import { Schematic, sheetView, contentBounds } from "./schematic.jsx";
-import { isDirty, nearestPair } from "./rules.js";
+import { EMPTY_SELECTION, deleteSelection, isDirty, nearestPair, selectInBox, selectedSegmentIndex, selectionBox } from "./rules.js";
 import { Waveform } from "./waveform.jsx";
 
 // The editor owns only screen state: selection, drag previews, hover, the
@@ -28,7 +28,7 @@ const styles = {
   kbd: { fontFamily: "var(--font-family-mono)", fontSize: "var(--font-size-xs)", color: "var(--id-color-text-muted)", border: "var(--border-width) solid var(--id-color-border-subtle)", borderRadius: "var(--id-radius-sm)", padding: "0 var(--space-1)", whiteSpace: "nowrap" },
   railButton: { width: "var(--size-control)", height: "var(--size-control)", display: "grid", placeItems: "center", border: "none", borderRadius: "var(--id-radius-sm)", background: "transparent", color: "var(--id-color-text-muted)", cursor: "pointer" },
   field: { display: "flex", flexDirection: "column", gap: "var(--space-1)", fontSize: "var(--font-size-sm)" },
-  fact: { display: "flex", justifyContent: "space-between", gap: "var(--space-2)", fontSize: "var(--font-size-sm)" },
+  fact: { display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "var(--space-2)", fontSize: "var(--font-size-sm)" },
   hint: { position: "absolute", transform: "translate(-50%, -100%)", zIndex: 1 },
   stage: { position: "relative", flex: 1, minWidth: 0, display: "flex" },
   zoom: { position: "absolute", right: "var(--space-3)", bottom: "var(--space-3)", display: "flex", alignItems: "center", gap: "var(--space-1)", padding: "var(--space-1)", border, borderRadius: "var(--id-radius-md)", background: "var(--id-color-surface)", boxShadow: "var(--shadow-overlay)", fontSize: "var(--font-size-sm)", zIndex: 2 },
@@ -51,6 +51,8 @@ const label = type => PARTS[type]?.label ?? type;
 const formatTime = seconds => `${formatSI(seconds)} s`;
 const gridOf = ([x, y]) => [Math.round(x / GRID), Math.round(y / GRID)];
 const sheetOf = response => ({ document: response.document, revision: response.layout.revision, layout: response.layout });
+const additive = event => event.button === 0 && (event.shiftKey || event.ctrlKey);
+const toggle = (items, item) => items.includes(item) ? items.filter(value => value !== item) : [...items, item];
 
 function intersects(a, b) {
   return a.min[0] < b.max[0] && b.min[0] < a.max[0] && a.min[1] < b.max[1] && b.min[1] < a.max[1];
@@ -144,7 +146,7 @@ function Properties({ ui, sheet, selectedId, busy, edit }) {
     <div style={styles.group}>
       <h4 style={{ margin: 0 }}>배치</h4>
       <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--space-1)" }}>
-        <ui.Button size="sm" disabled={busy} onClick={() => edit([{ op: "rotate", id: selectedId }])}>회전 R</ui.Button>
+        <ui.Button size="sm" disabled={busy} onClick={() => edit([{ op: "rotate", id: selectedId }])}>회전 {ROTATE_SHORTCUT}</ui.Button>
         <ui.Button size="sm" disabled={busy} onClick={() => edit([{ op: "mirror", id: selectedId, axis: "horizontal" }])}>좌우 반전 F</ui.Button>
         <ui.Button size="sm" disabled={busy} onClick={() => edit([{ op: "mirror", id: selectedId, axis: "vertical" }])}>상하 반전 Shift+F</ui.Button>
         <ui.Button size="sm" variant="destructive" disabled={busy} onClick={() => edit([{ op: "delete", id: selectedId }])}>삭제</ui.Button>
@@ -155,6 +157,8 @@ function Properties({ ui, sheet, selectedId, busy, edit }) {
       {own.map(([id, pin]) => <div key={id} style={styles.fact} data-terminal={id}>
         <code>{id.slice(selectedId.length + 1)}</code>
         <span style={{ color: pin.netId ? "var(--id-color-text)" : "var(--id-color-warning)" }}>{pin.netId ?? "미접속"}</span>
+        <ui.Button size="sm" disabled={busy || pin.netId === null}
+          onClick={() => edit([{ op: "disconnect", pin: id }])}>연결 끊기</ui.Button>
       </div>)}
     </div>
   </>;
@@ -166,7 +170,11 @@ export function Editor({ ui, adapter }) {
   const [file, setFile] = useState(null);
   const [disk, setDisk] = useState(null);
   const [history, setHistory] = useState([]);
-  const [selectedId, setSelectedId] = useState(null);
+  const [selected, setSelected] = useState(EMPTY_SELECTION);
+  const selectedCount = selected.parts.length + selected.wires.length;
+  const selectedId = selectedCount === 1 ? selected.parts[0] : undefined;
+  const [marquee, setMarquee] = useState(null);
+  const [showGrid, setShowGrid] = useState(true);
   const [pendingPin, setPendingPin] = useState(null);
   const [hoverSegment, setHoverSegment] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -178,7 +186,7 @@ export function Editor({ ui, adapter }) {
   const [run, setRun] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  // Zoom and scroll are screen state only; they are never written to the circuit.
+  // View controls are screen state only.
   const [zoom, setZoom] = useState(1);
   const [canvasSize, setCanvasSize] = useState([0, 0]);
   const [, setAnchorTick] = useState(0);
@@ -198,6 +206,7 @@ export function Editor({ ui, adapter }) {
   // Queued work reads the newest document and undo snapshots, not a render's copy.
   const latest = useRef({ sheet: null, history: [] });
   const drag = useRef(null);
+  const area = useRef(null);
   const libraryDrag = useRef(null);
   const pointer = useRef(null);
   const frame = useRef(null);
@@ -236,7 +245,7 @@ export function Editor({ ui, adapter }) {
     commit(next, []);
     setFile(nextFile);
     setDisk(nextDisk);
-    setSelectedId(null);
+    setSelected(EMPTY_SELECTION);
     setPendingPin(null);
     setSuggestion(null);
     setHoverSegment(null);
@@ -353,6 +362,13 @@ export function Editor({ ui, adapter }) {
     return () => cancelAnimationFrame(id);
   }, [sheet]);
 
+  function keepSelection(next, createdId) {
+    setSelected(current => createdId ? { ...EMPTY_SELECTION, parts: [createdId] } : {
+      parts: current.parts.filter(id => next.document.parts[id]),
+      wires: current.wires.map(wire => next.layout.segments[selectedSegmentIndex(next.layout, wire)]).filter(Boolean),
+    });
+  }
+
   // `review` sees the core result before it replaces the working sheet; false discards it.
   function edit(ops, { kind = ops[0].op, started = performance.now(), review } = {}) {
     return perform(async () => {
@@ -364,8 +380,7 @@ export function Editor({ ui, adapter }) {
       commit(next, [...undoable, { previous: before.document, receipt: response.receipt }]);
       if (!Object.keys(before.document.parts).length && Object.keys(next.document.parts).length) fitPending.current = true;
       setHoverSegment(null);
-      if (response.receipt.created.length) setSelectedId(response.receipt.created[0]);
-      else setSelectedId(id => (id && next.document.parts[id] ? id : null));
+      keepSelection(next, response.receipt.created[0]);
       return { ...next, created: response.receipt.created };
     });
   }
@@ -384,7 +399,7 @@ export function Editor({ ui, adapter }) {
       setSuggestion(null);
       setPendingPin(null);
       setHoverSegment(null);
-      setSelectedId(id => (id && next.document.parts[id] ? id : null));
+      keepSelection(next);
     });
   }
 
@@ -536,29 +551,58 @@ export function Editor({ ui, adapter }) {
   }
 
   function onSymbolDown(id, event) {
-    if (space.current) return;
+    if (space.current || (event.button !== 0 && event.button !== 2)) return;
     event.stopPropagation();
-    setSelectedId(id);
-    setPendingPin(null);
-    if (event.button !== 0) return;
-    setSuggestion(null);
-    drag.current = { id, start: sceneFromClient(event.clientX, event.clientY), moved: false, dx: 0, dy: 0 };
-    svgRef.current.setPointerCapture(event.pointerId);
     scrollRef.current.focus({ preventScroll: true });
+    setPendingPin(null);
+    setSuggestion(null);
+    setHoverSegment(null);
+    if (additive(event)) {
+      setSelected(current => ({ ...current, parts: toggle(current.parts, id) }));
+      return;
+    }
+    const keep = event.button === 0 && selected.parts.includes(id);
+    const ids = keep ? selected.parts : [id];
+    if (!keep) setSelected({ ...EMPTY_SELECTION, parts: ids });
+    if (event.button !== 0 || busy) return;
+    const start = sceneFromClient(event.clientX, event.clientY);
+    if (!start) return;
+    drag.current = { id, ids, start, revision: sheet.revision, moved: false, dx: 0, dy: 0 };
+    svgRef.current.setPointerCapture(event.pointerId);
+  }
+
+  function onSegmentDown(index, event) {
+    if (space.current || (event.button !== 0 && event.button !== 2)) return;
+    event.stopPropagation();
+    scrollRef.current.focus({ preventScroll: true });
+    const wire = sheet.layout.segments[index];
+    if (additive(event)) setSelected(current => ({ ...current, wires: toggle(current.wires, wire) }));
+    else setSelected({ ...EMPTY_SELECTION, wires: [wire] });
+    setPendingPin(null);
+    setSuggestion(null);
+    setHoverSegment(index);
   }
 
   function onBackgroundDown(event) {
     scrollRef.current.focus({ preventScroll: true });
-    if (event.button === 0 || event.button === 1) {
-      // Dragging empty space, or anything while Space is held, pans the drawing.
+    if (event.button === 1 || (event.button === 0 && space.current)) {
       event.preventDefault();
       startPan(event);
       setHoverSegment(null);
+      return;
     }
-    if (space.current) return;
-    setSelectedId(null);
+    if (event.button !== 0 && event.button !== 2) return;
+    setSelected(EMPTY_SELECTION);
     setPendingPin(null);
     setSuggestion(null);
+    setHoverSegment(null);
+    if (event.button === 0) {
+      event.preventDefault();
+      const start = sceneFromClient(event.clientX, event.clientY);
+      if (!start) return;
+      area.current = { start };
+      svgRef.current.setPointerCapture(event.pointerId);
+    }
   }
 
   function onPointerMove(event) {
@@ -570,7 +614,15 @@ export function Editor({ ui, adapter }) {
     }
     const at = sceneFromClient(event.clientX, event.clientY);
     pointer.current = at;
-    if (event.target.dataset?.background !== undefined && !drag.current) setHoverSegment(null);
+    if (area.current) {
+      if (!at || (!area.current.box && Math.hypot(at[0] - area.current.start[0], at[1] - area.current.start[1]) < 4)) return;
+      const box = selectionBox(area.current.start, at);
+      area.current.box = box;
+      setMarquee(box);
+      setSelected(selectInBox(sheet.layout, box));
+      return;
+    }
+    if (event.target.dataset?.segment === undefined && !drag.current) setHoverSegment(null);
     const active = drag.current;
     if (!active || !at) return;
     const [dx, dy] = [0, 1].map(axis => Math.round((at[axis] - active.start[axis]) / GRID) * GRID);
@@ -578,8 +630,8 @@ export function Editor({ ui, adapter }) {
     active.moved = true;
     if (dx === active.dx && dy === active.dy && preview) return;
     Object.assign(active, { dx, dy });
-    setPreview({ id: active.id, dx, dy });
-    setSuggestion(nearestPair(sheet.layout, active.id, [dx, dy]));
+    setPreview({ ids: active.ids, dx, dy });
+    if (active.ids.length === 1) setSuggestion(nearestPair(sheet.layout, active.id, [dx, dy]));
   }
 
   async function onPointerUp(event) {
@@ -589,21 +641,38 @@ export function Editor({ ui, adapter }) {
       if (svgRef.current.hasPointerCapture(event.pointerId)) svgRef.current.releasePointerCapture(event.pointerId);
       return;
     }
+    if (area.current) {
+      area.current = null;
+      setMarquee(null);
+      if (svgRef.current.hasPointerCapture(event.pointerId)) svgRef.current.releasePointerCapture(event.pointerId);
+      return;
+    }
     const active = drag.current;
     if (!active) return;
     const started = performance.now();
     drag.current = null;
     if (svgRef.current.hasPointerCapture(event.pointerId)) svgRef.current.releasePointerCapture(event.pointerId);
     setPreview(null);
-    if (!active.moved || (!active.dx && !active.dy)) {
-      setSuggestion(null);
-      return;
-    }
-    const symbol = sheet.layout.symbols.find(item => item.id === active.id);
-    const grid = gridOf([symbol.center[0] + active.dx, symbol.center[1] + active.dy]);
     setSuggestion(null);
-    const next = await edit([{ op: "move", id: active.id, grid }], { kind: "move", started });
-    if (next) setSuggestion(nearestPair(next.layout, active.id));
+    if (active.revision !== sheet.revision) return;
+    if (!active.moved) setSelected({ ...EMPTY_SELECTION, parts: [active.id] });
+    if (!active.dx && !active.dy) return;
+    const ops = active.ids.map(id => {
+      const symbol = sheet.layout.symbols.find(item => item.id === id);
+      return { op: "move", id, grid: gridOf([symbol.center[0] + active.dx, symbol.center[1] + active.dy]) };
+    });
+    const next = await edit(ops, { kind: "move", started });
+    if (next && active.ids.length === 1) setSuggestion(nearestPair(next.layout, active.id));
+  }
+
+  function onPointerCancel() {
+    pan.current = null;
+    area.current = null;
+    drag.current = null;
+    setMarquee(null);
+    setPreview(null);
+    setSuggestion(null);
+    setPanning(space.current);
   }
 
   function onLibraryDown(type, event) {
@@ -644,19 +713,21 @@ export function Editor({ ui, adapter }) {
       setPanning(true);
     } else if (modifier && !event.shiftKey && key === "z") undo();
     else if (modifier && key === "s") save();
+    else if (event.ctrlKey && !event.shiftKey && !event.altKey && key === "'") setShowGrid(show => !show);
     else if (event.key === "Home" || (modifier && key === "0")) fitAll();
     else if (!modifier && (event.key === "+" || event.key === "=")) zoomCenter(ZOOM.step);
     else if (!modifier && event.key === "-") zoomCenter(1 / ZOOM.step);
     else if (event.key === "Escape") {
-      setSuggestion(null);
+      onPointerCancel();
       setPendingPin(null);
       setHoverSegment(null);
-      if (!suggestion && !pendingPin) setSelectedId(null);
+      setSelected(EMPTY_SELECTION);
     } else if (event.key === "Enter" && suggestion) acceptSuggestion();
-    else if ((event.key === "Delete" || event.key === "Backspace") && selectedId) edit([{ op: "delete", id: selectedId }]);
-    else {
+    else if ((event.key === "Delete" || event.key === "Backspace") && selectedCount) {
+      if (!busy && !marquee) edit(deleteSelection(selected));
+    } else {
       const shortcut = shortcutOf(event);
-      if (shortcut === "R" && selectedId) edit([{ op: "rotate", id: selectedId }]);
+      if (shortcut === ROTATE_SHORTCUT && selectedId) edit([{ op: "rotate", id: selectedId }]);
       else if (shortcut === "F" && selectedId) edit([{ op: "mirror", id: selectedId, axis: "horizontal" }]);
       else if (shortcut === "Shift+F" && selectedId) edit([{ op: "mirror", id: selectedId, axis: "vertical" }]);
       else if (shortcut === "A" && hoverSegment !== null) insertAmmeter(hoverSegment);
@@ -692,6 +763,8 @@ export function Editor({ ui, adapter }) {
     .filter(Boolean).join(" · ");
   const selection = selectedId && sheet.document.parts[selectedId];
   const segment = hoverSegment !== null ? sheet.layout.segments[hoverSegment] : null;
+  const wire = selectedCount === 1 ? selected.wires[0] : undefined;
+  const selectedWires = new Set(selected.wires);
   const runReason = running ? "실행 중입니다. 중지한 뒤 다시 실행할 수 있습니다."
     : !file ? "새 회로는 저장한 뒤 실행할 수 있습니다."
       : !hasParts ? "회로가 비어 있습니다." : "";
@@ -713,19 +786,23 @@ export function Editor({ ui, adapter }) {
       .some(text => text.toLowerCase().includes(query_))),
   })).filter(group => group.parts.length);
 
-  const hint = suggestion && !preview ? `연결 추천: ${suggestion.a} ↔ ${suggestion.b} · Enter 연결 · Esc 취소`
+  const hint = marquee ? `영역 선택 · 소자 ${selected.parts.length} · 도선 ${selected.wires.length}`
+    : suggestion && !preview ? `연결 추천: ${suggestion.a} ↔ ${suggestion.b} · Enter 연결 · Esc 취소`
     : preview ? (suggestion ? `놓으면 ${suggestion.a} ↔ ${suggestion.b} 연결을 추천합니다` : "놓을 위치로 끌어 옮기세요")
       : pendingPin ? `${pendingPin}에서 연결할 단자를 누르세요 · Esc 취소`
-        : segment ? `가지 ${segment.terminals.join(" – ")} · A 이 가지에 전류계 끼우기`
-          : selection ? `${selectedId} 선택 · R 회전 · F 좌우 반전 · Shift+F 상하 반전 · Delete 삭제 · 끌어서 이동`
-            : "부품을 누르거나 끌어 놓으세요 · 단자를 차례로 눌러 연결 · 휠 확대·축소 · 빈 곳 끌기 이동 · Home 전체 보기 · Ctrl+Z 되돌리기";
+        : wire ? `도선 선택 · ${wire.terminals.join(" – ")} · Delete / Backspace / 우클릭으로 삭제`
+          : selectedCount > 1 ? `소자 ${selected.parts.length} · 도선 ${selected.wires.length} 선택 · Delete 삭제 · Esc 해제`
+            : segment ? `가지 ${segment.terminals.join(" – ")} · A 이 가지에 전류계 끼우기`
+              : selection ? `${selectedId} 선택 · ${ROTATE_SHORTCUT} 회전 · F 좌우 반전 · Shift+F 상하 반전 · Delete 삭제 · 끌어서 이동`
+                : "빈 곳 끌기 영역 선택 · 가운데 버튼 또는 Space+끌기 이동 · R 저항 · Ctrl+' 격자 보기 · Ctrl+Z 되돌리기";
 
   const menu = [
-    { id: "rotate", label: "회전 (R)", icon: null, disabled: !selection, disabledReason: selection ? undefined : "소자를 먼저 선택하세요", run: () => edit([{ op: "rotate", id: selectedId }]) },
-    { id: "mirror-h", label: "좌우 반전 (F)", icon: null, disabled: !selection, disabledReason: selection ? undefined : "소자를 먼저 선택하세요", run: () => edit([{ op: "mirror", id: selectedId, axis: "horizontal" }]) },
-    { id: "mirror-v", label: "상하 반전 (Shift+F)", icon: null, disabled: !selection, disabledReason: selection ? undefined : "소자를 먼저 선택하세요", run: () => edit([{ op: "mirror", id: selectedId, axis: "vertical" }]) },
+    { id: "rotate", label: `회전 (${ROTATE_SHORTCUT})`, icon: null, visible: Boolean(selection), disabled: busy, run: () => edit([{ op: "rotate", id: selectedId }]) },
+    { id: "mirror-h", label: "좌우 반전 (F)", icon: null, visible: Boolean(selection), disabled: busy, run: () => edit([{ op: "mirror", id: selectedId, axis: "horizontal" }]) },
+    { id: "mirror-v", label: "상하 반전 (Shift+F)", icon: null, visible: Boolean(selection), disabled: busy, run: () => edit([{ op: "mirror", id: selectedId, axis: "vertical" }]) },
     { id: "insert", label: "이 가지에 전류계 끼우기 (A)", icon: null, visible: Boolean(segment), run: () => insertAmmeter(hoverSegment) },
-    { id: "delete", label: "삭제 (Delete)", icon: null, danger: true, disabled: !selection, disabledReason: selection ? undefined : "소자를 먼저 선택하세요", run: () => edit([{ op: "delete", id: selectedId }]) },
+    { id: "delete", label: wire ? "도선 삭제" : "삭제 (Delete)", icon: null, danger: true, visible: selectedCount > 0, disabled: busy, run: () => edit(deleteSelection(selected)) },
+    { id: "grid", label: "격자 보기 (Ctrl+')", icon: <span aria-label={showGrid ? "켜짐" : "꺼짐"}>{showGrid ? "✓" : "□"}</span>, visible: !selectedCount, run: () => setShowGrid(show => !show) },
   ];
 
   return <ui.ScreenLayout fillHeight
@@ -784,12 +861,16 @@ export function Editor({ ui, adapter }) {
         <ui.ContextMenu actions={menu} trigger={
           <div ref={scrollRef} tabIndex={0} role="application" aria-label="회로도 편집 영역"
             style={{ ...styles.canvas, cursor: panning ? "grab" : undefined }}
-            onPointerLeave={() => { pointer.current = null; }}>
+            onPointerLeave={() => { pointer.current = null; setHoverSegment(null); }}>
             <div style={{ position: "relative", width: scaled(view.width), height: scaled(view.height) }}>
-              <Schematic layout={sheet.layout} view={view} zoom={zoom} svgRef={svgRef} selectedId={selectedId} pendingPin={pendingPin}
-                hoverSegment={hoverSegment} preview={preview} ghost={ghost} suggestion={suggestion}
-                onSymbolDown={onSymbolDown} onPinDown={onPinDown} onSegmentEnter={index => { if (!drag.current) setHoverSegment(index); }}
-                onBackgroundDown={onBackgroundDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} />
+              <Schematic layout={sheet.layout} view={view} zoom={zoom} svgRef={svgRef} selectedIds={selected.parts} pendingPin={pendingPin}
+                hoverSegment={hoverSegment} selectedWires={selectedWires} showGrid={showGrid} marquee={marquee}
+                preview={preview} ghost={ghost} suggestion={suggestion}
+                onSegmentDown={onSegmentDown}
+                onSymbolDown={onSymbolDown} onPinDown={onPinDown} onSegmentEnter={index => {
+                  if (!drag.current && !area.current && !pan.current) setHoverSegment(index);
+                }}
+                onBackgroundDown={onBackgroundDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} />
               {segment && !preview && <div style={{
                 ...styles.hint,
                 left: scaled((segment.from[0] + segment.to[0]) / 2 - view.x),
