@@ -295,6 +295,37 @@ fn serves_json_lines_until_stdin_closes() {
     let reopened = request(json!({ "op": "inspect", "file": file }), true);
     assert_eq!(reopened["diskRevision"], replaced["diskRevision"]);
     assert_eq!(reopened["document"], blank["document"]);
+
+    #[cfg(windows)]
+    {
+        use std::fs::{self, OpenOptions};
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+        let original = fs::read(&file).unwrap();
+        // This test process holds the file without delete sharing while the CLI saves.
+        let _reader = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&file)
+            .unwrap();
+        let rejected = request(
+            json!({
+                "op": "save", "file": file, "document": edited["document"],
+                "expectedDiskRevision": reopened["diskRevision"]
+            }),
+            false,
+        );
+        assert_eq!(rejected["error"]["code"], "ioError");
+        let path = file.canonicalize().unwrap();
+        let message = rejected["error"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with(&format!("Could not replace {}: ", path.display())),
+            "{message}"
+        );
+        assert_eq!(fs::read(&file).unwrap(), original);
+    }
     drop(input);
     assert!(child.wait().unwrap().success());
 }
