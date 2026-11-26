@@ -67,7 +67,7 @@ RC·RLC·벅 예제는 [examples](examples/)에 있습니다. PFC 예제는 지�
 
 ### 백그라운드 실행과 파형 조회
 
-`start`는 회로 옆 `runs/<runId>/`에 `circuit.litzsim` 스냅샷을 저장하고 별도 해석 프로세스를 기동한 뒤 바로 반환합니다. 응답의 `runDirectory`를 후속 CLI 호출에 넘깁니다. 같은 회로 폴더에 진행 중인 실행이 있으면 `runInProgress`를 반환합니다.
+`start`는 회로 옆 `runs/<runId>/`에 `circuit.litzsim` 스냅샷을 저장하고 별도 감독 프로세스를 띄운 뒤 바로 반환합니다. 감독 프로세스가 이어서 해석 프로세스를 시작합니다. 응답의 `runDirectory`를 후속 CLI 호출에 넘깁니다. 같은 회로 폴더에 진행 중인 실행이 있으면 `runInProgress`를 반환합니다.
 
 ```powershell
 $run = & $cli start buck.litzsim | ConvertFrom-Json

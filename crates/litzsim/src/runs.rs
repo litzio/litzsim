@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{
@@ -25,6 +25,8 @@ const STAGED: &str = "result.pending";
 const STATUS: &str = "status.json";
 const WORKER_ERROR: &str = "solver-error.json";
 const CONTROL: &str = "status.lock";
+const ADMISSION: &str = "admission.lock";
+const STARTING: &str = "starting";
 const POLL: Duration = Duration::from_millis(10);
 const GRACE: Duration = Duration::from_millis(250);
 
@@ -52,11 +54,9 @@ struct Status {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Start<T> {
-    directory: PathBuf,
-    document: T,
-    expected_revision: String,
+struct Reservation {
+    run_id: String,
+    supervisor_pid: u32,
 }
 
 #[derive(Default)]
@@ -75,41 +75,20 @@ impl Runs {
     ) -> Response {
         self.supervisors
             .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
-        let request = Start {
-            directory,
-            document,
-            expected_revision: expected_revision.into(),
-        };
-        let mut child = child_command("_supervise")?
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(io_error)?;
-        let response = (|| {
-            let mut input = child.stdin.as_mut().expect("supervisor input pipe");
-            serde_json::to_writer(&mut input, &request).map_err(io_error)?;
-            input.write_all(b"\n").map_err(io_error)?;
-            accepted(&mut child)
-        })();
-        match response {
-            Ok(response) => {
-                let id = response["runId"].as_str().expect("supervisor run ID");
-                let path = response["runDirectory"]
-                    .as_str()
-                    .expect("supervisor run directory");
-                self.directories.insert(id.into(), path.into());
-                self.supervisors.push(child);
-                Ok(response)
-            }
-            Err(error) => {
-                let _ = child.wait();
-                Err(error)
-            }
-        }
+        let (response, child) = admit(&directory, &document, expected_revision, true)?;
+        self.directories.insert(
+            response["runId"].as_str().expect("run ID").into(),
+            response["runDirectory"]
+                .as_str()
+                .expect("run directory")
+                .into(),
+        );
+        self.supervisors.push(child);
+        Ok(response)
     }
 
     pub fn directory(&self, id: &str, parent: Option<&Path>) -> Result<PathBuf, Value> {
-        if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit() || byte == b'-') {
+        if !valid_run_id(id) {
             return Err(error("invalidRequest", "Invalid run ID"));
         }
         if let Some(parent) = parent {
@@ -164,16 +143,15 @@ impl Drop for Runs {
 }
 
 pub fn start_file(path: &OsStr) -> Response {
-    let mut supervisor = child_command("_supervise")?
-        .arg(path)
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(io_error)?;
-    let response = accepted(&mut supervisor);
-    if response.is_err() {
-        let _ = supervisor.wait();
-    }
-    response
+    let path = Path::new(path).canonicalize().map_err(io_error)?;
+    let opened = circuit::open(&path).map_err(|err| json!(err))?;
+    let (response, _) = admit(
+        path.parent().expect("circuit parent"),
+        &opened.document,
+        &opened.revision,
+        false,
+    )?;
+    Ok(response)
 }
 
 fn child_command(mode: &str) -> Result<Command, Value> {
@@ -224,61 +202,20 @@ fn prevent_pipe_inheritance() -> io::Result<()> {
     Ok(())
 }
 
-fn accepted(child: &mut Child) -> Response {
-    let mut line = String::new();
-    BufReader::new(child.stdout.take().expect("supervisor output pipe"))
-        .read_line(&mut line)
-        .map_err(io_error)?;
-    let response: Value = serde_json::from_str(&line).map_err(|_| {
-        error(
-            "runStartFailed",
-            "Run supervisor exited without acknowledging start",
-        )
-    })?;
-    if response["ok"] == true {
-        Ok(response)
-    } else {
-        Err(response["error"].clone())
-    }
-}
-
-pub fn supervise(file: Option<&OsStr>) -> Result<(), Value> {
-    let mut input = BufReader::new(io::stdin());
-    let start = match file {
-        Some(file) => {
-            let path = Path::new(file).canonicalize().map_err(io_error)?;
-            let opened = circuit::open(&path).map_err(|err| json!(err))?;
-            Start {
-                directory: path.parent().expect("circuit parent").into(),
-                document: opened.document,
-                expected_revision: opened.revision,
-            }
-        }
-        None => {
-            let mut line = String::new();
-            input.read_line(&mut line).map_err(io_error)?;
-            let start: Start<Box<serde_json::value::RawValue>> = serde_json::from_str(&line)
-                .map_err(|err| error("invalidRequest", err.to_string()))?;
-            Start {
-                directory: start.directory,
-                document: Document::from_bytes(start.document.get().as_bytes())
-                    .map_err(|err| json!(err))?,
-                expected_revision: start.expected_revision,
-            }
-        }
-    };
-    let revision = start.document.revision();
-    if revision != start.expected_revision {
+fn admit(
+    directory: &Path,
+    document: &Document,
+    expected_revision: &str,
+    owned: bool,
+) -> Result<(Value, Child), Value> {
+    let revision = document.revision();
+    if revision != expected_revision {
         return Err(json!({
             "code": "revisionConflict", "message": "Circuit revision conflict",
-            "expected": start.expected_revision, "actual": revision,
+            "expected": expected_revision, "actual": revision,
         }));
     }
-    let root = start
-        .directory
-        .canonicalize()
-        .map_err(io_error)?
-        .join("runs");
+    let root = directory.canonicalize().map_err(io_error)?.join("runs");
     if root.to_str().is_none() {
         return Err(error(
             "invalidRequest",
@@ -286,69 +223,208 @@ pub fn supervise(file: Option<&OsStr>) -> Result<(), Value> {
         ));
     }
     fs::create_dir_all(&root).map_err(io_error)?;
-    let active = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root.join("active.lock"))
-        .map_err(io_error)?;
-    active.try_lock().map_err(|err| match err {
-        TryLockError::WouldBlock => {
-            error("runInProgress", "A run is already active in this directory")
-        }
-        TryLockError::Error(err) => io_error(err),
-    })?;
+    let _admission = admission_lock(&root)?;
+    let _active = active_lock(&root)?;
+    check_reservation(&root)?;
+    let mut command = child_command("_supervise")?;
     let (path, run_id) = create_run(&root).map_err(io_error)?;
-    circuit::save(&path.join(SNAPSHOT), &start.document, SaveMode::New)
-        .map_err(|err| json!(err))?;
-    let control = File::create_new(path.join(CONTROL)).map_err(io_error)?;
+    circuit::save(&path.join(SNAPSHOT), document, SaveMode::New).map_err(|err| json!(err))?;
+    File::create_new(path.join(CONTROL)).map_err(io_error)?;
     let mut status = Status {
         run_id,
         revision,
         state: State::Running,
         simulated_time: 0.0,
-        stop_time: start.document.stop_time_s(),
+        stop_time: document.stop_time_s(),
         solver_pid: None,
         error: None,
     };
-    control.lock().map_err(io_error)?;
-    let mut worker = match child_command("_solve")?
-        .arg(&path)
-        .stdin(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => Worker(child),
-        Err(err) => {
-            let cause = io_error(err);
+    write_status(&path, &status).map_err(io_error)?;
+    command.arg(&path);
+    if owned {
+        command.arg("--owned").stdin(Stdio::piped());
+    }
+    let launch = (|| {
+        let child = command.spawn().map_err(io_error)?;
+        let reservation = Reservation {
+            run_id: status.run_id.clone(),
+            supervisor_pid: child.id(),
+        };
+        if let Err(err) = replace_json(&root, STARTING, &reservation) {
+            drop(Worker(child));
+            return Err(io_error(err));
+        }
+        Ok::<_, Value>(child)
+    })();
+    let child = match launch {
+        Ok(child) => child,
+        Err(cause) => {
             status.state = State::Failed;
             status.error = Some(cause.clone());
             write_status(&path, &status).map_err(io_error)?;
             return Err(cause);
         }
     };
-    status.solver_pid = Some(worker.0.id());
-    write_status(&path, &status).map_err(io_error)?;
-    control.unlock().map_err(io_error)?;
-
     let response = json!({
         "ok": true, "runId": status.run_id, "revision": status.revision,
         "state": status.state, "runDirectory": path,
     });
-    let owner_closed = match file {
-        Some(_) => Arc::default(),
-        None => watch_eof(input),
-    };
-    if acknowledge(&response).is_err() {
-        owner_closed.store(true, Ordering::Release);
+    Ok((response, child))
+}
+
+fn check_reservation(root: &Path) -> Result<(), Value> {
+    if let Some(reservation) = read_reservation(root)?
+        && !clear_dead_reservation(root, reservation)?
+    {
+        return Err(run_in_progress());
     }
-    let exit = monitor(&path, &mut worker, &owner_closed);
-    // Even when monitoring fails, reap the solver before changing the final state.
-    drop(worker);
-    control.lock().map_err(io_error)?;
+    Ok(())
+}
+
+fn read_reservation(root: &Path) -> Result<Option<Reservation>, Value> {
+    match read_json(&root.join(STARTING)) {
+        Ok(reservation) => Ok(Some(reservation)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(io_error(err)),
+    }
+}
+
+fn clear_dead_reservation(root: &Path, reservation: Reservation) -> Result<bool, Value> {
+    if supervisor_alive(reservation.supervisor_pid).map_err(io_error)? {
+        return Ok(false);
+    }
+    if !valid_run_id(&reservation.run_id) {
+        return Err(error("invalidRequest", "Invalid run admission ID"));
+    }
+    let path = root.join(reservation.run_id);
+    let _control = control(&path)?;
+    let mut status: Status = read_json(&path.join(STATUS)).map_err(io_error)?;
+    status.state = State::Failed;
+    status.error = Some(error(
+        "supervisorExited",
+        "Run supervisor exited during startup",
+    ));
+    write_status(&path, &status).map_err(io_error)?;
+    fs::remove_file(root.join(STARTING)).map_err(io_error)?;
+    Ok(true)
+}
+
+fn valid_run_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit() || byte == b'-')
+}
+
+#[cfg(windows)]
+fn supervisor_alive(pid: u32) -> io::Result<bool> {
+    use std::ffi::c_void;
+    type Handle = *mut c_void;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+        fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+    // Open a synchronization-only handle and poll the process without waiting.
+    unsafe {
+        let handle = OpenProcess(0x0010_0000, 0, pid);
+        if handle.is_null() {
+            return match io::Error::last_os_error() {
+                err if err.raw_os_error() == Some(87) => Ok(false),
+                err if err.kind() == io::ErrorKind::PermissionDenied => Ok(true),
+                err => Err(err),
+            };
+        }
+        let state = WaitForSingleObject(handle, 0);
+        let wait_error = io::Error::last_os_error();
+        CloseHandle(handle);
+        match state {
+            0 => Ok(false),
+            258 => Ok(true),
+            _ => Err(wait_error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn supervisor_alive(pid: u32) -> io::Result<bool> {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    let pid = i32::try_from(pid)
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid supervisor PID"))?;
+    // Signal zero checks process existence without delivering a signal.
+    if unsafe { kill(pid, 0) } == 0 {
+        return Ok(true);
+    }
+    let err = io::Error::last_os_error();
+    match err.kind() {
+        io::ErrorKind::PermissionDenied => Ok(true),
+        io::ErrorKind::NotFound => Ok(false),
+        _ if err.raw_os_error() == Some(3) => Ok(false), // ESRCH
+        _ => Err(err),
+    }
+}
+
+fn admission_lock(root: &Path) -> Result<File, Value> {
+    let lock = folder_lock(root, ADMISSION)?;
+    lock.lock().map_err(io_error)?;
+    Ok(lock)
+}
+
+fn active_lock(root: &Path) -> Result<File, Value> {
+    let lock = folder_lock(root, "active.lock")?;
+    lock.try_lock().map_err(|err| match err {
+        TryLockError::WouldBlock => run_in_progress(),
+        TryLockError::Error(err) => io_error(err),
+    })?;
+    Ok(lock)
+}
+
+fn folder_lock(root: &Path, name: &str) -> Result<File, Value> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(name))
+        .map_err(io_error)
+}
+
+fn run_in_progress() -> Value {
+    error("runInProgress", "A run is already active in this directory")
+}
+
+pub fn supervise(path: &Path, owned: bool) -> Result<(), Value> {
+    let root = path
+        .parent()
+        .ok_or_else(|| error("invalidRequest", "Expected a run directory"))?;
+    let admission = admission_lock(root)?;
+    let active = active_lock(root)?;
+    let reservation = root.join(STARTING);
+    let reserved: Reservation = read_json(&reservation).map_err(io_error)?;
+    if path.file_name() != Some(OsStr::new(&reserved.run_id))
+        || reserved.supervisor_pid != std::process::id()
+    {
+        return Err(error(
+            "invalidRequest",
+            "Run has no matching admission reservation",
+        ));
+    }
+    // From here the supervisor holds the OS lease until the terminal status is visible.
+    fs::remove_file(reservation).map_err(io_error)?;
+    drop(admission);
+
+    let owner_closed = if owned {
+        watch_eof(io::stdin())
+    } else {
+        Arc::default()
+    };
+    let exit = supervise_solver(path, &owner_closed);
+    let _control = control(path)?;
     let mut status = read_json(&path.join(STATUS)).map_err(io_error)?;
-    finish(&path, &mut status, exit);
-    let published = write_status(&path, &status).map_err(io_error);
+    finish(path, &mut status, exit);
+    let published = write_status(path, &status).map_err(io_error);
     if published.is_err() && status.state == State::Completed {
         let _ = fs::remove_file(path.join(RESULT));
     }
@@ -356,10 +432,29 @@ pub fn supervise(file: Option<&OsStr>) -> Result<(), Value> {
     published
 }
 
-pub fn acknowledge(response: &Value) -> io::Result<()> {
-    let mut output = io::stdout().lock();
-    writeln!(output, "{response}")?;
-    output.flush()
+fn supervise_solver(path: &Path, owner_closed: &AtomicBool) -> Result<Option<ExitStatus>, Value> {
+    if owner_closed.load(Ordering::Acquire) {
+        stop_request(path)?;
+        return Ok(None);
+    }
+    if read_status(path)?.state == State::Stopping {
+        return Ok(None);
+    }
+    let mut worker = Worker(
+        child_command("_solve")?
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(io_error)?,
+    );
+    {
+        let _control = control(path)?;
+        let mut status: Status = read_json(&path.join(STATUS)).map_err(io_error)?;
+        status.solver_pid = Some(worker.0.id());
+        write_status(path, &status).map_err(io_error)?;
+    }
+    // Worker drops and is reaped even when updating or monitoring fails.
+    monitor(path, &mut worker, owner_closed).map(Some)
 }
 
 fn create_run(root: &Path) -> io::Result<(PathBuf, String)> {
@@ -421,20 +516,21 @@ fn monitor(
     }
 }
 
-fn finish(path: &Path, status: &mut Status, exit: Result<ExitStatus, Value>) {
+fn finish(path: &Path, status: &mut Status, exit: Result<Option<ExitStatus>, Value>) {
     let result = match exit {
         Ok(_) if status.state == State::Stopping => {
             status.state = State::Canceled;
             Ok(())
         }
-        Ok(exit) if exit.success() => fs::rename(path.join(STAGED), path.join(RESULT))
+        Ok(Some(exit)) if exit.success() => fs::rename(path.join(STAGED), path.join(RESULT))
             .map_err(io_error)
             .map(|()| {
                 status.state = State::Completed;
                 status.simulated_time = status.stop_time;
             }),
-        Ok(exit) => Err(read_json(&path.join(WORKER_ERROR))
+        Ok(Some(exit)) => Err(read_json(&path.join(WORKER_ERROR))
             .unwrap_or_else(|_| error("solverExited", format!("Solver exited with {exit}")))),
+        Ok(None) => unreachable!("solver skipped after a stop request"),
         Err(error) => Err(error),
     };
     if let Err(error) = result {
@@ -508,7 +604,27 @@ fn watch_eof(mut input: impl Read + Send + 'static) -> Arc<AtomicBool> {
 }
 
 pub fn status(path: &Path) -> Response {
-    Ok(ok(json!(read_status(path)?)))
+    let mut status = read_status(path)?;
+    if status.solver_pid.is_none() && matches!(status.state, State::Running | State::Stopping) {
+        let run_directory = path.canonicalize().map_err(io_error)?;
+        let root = run_directory
+            .parent()
+            .ok_or_else(|| error("invalidRequest", "Expected a run directory"))?;
+        let admission = folder_lock(root, ADMISSION)?;
+        match admission.try_lock() {
+            Ok(()) => {
+                if let Some(reservation) = read_reservation(root)?
+                    && reservation.run_id == status.run_id
+                    && clear_dead_reservation(root, reservation)?
+                {
+                    status = read_status(path)?;
+                }
+            }
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(err)) => return Err(io_error(err)),
+        }
+    }
+    Ok(ok(json!(status)))
 }
 
 pub fn stop(path: &Path) -> Response {
@@ -545,9 +661,13 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
 }
 
 fn write_status(path: &Path, value: &Status) -> io::Result<()> {
-    let staged = path.join("status.json.tmp");
+    replace_json(path, STATUS, value)
+}
+
+fn replace_json(path: &Path, name: &str, value: &impl Serialize) -> io::Result<()> {
+    let staged = path.join(format!("{name}.tmp"));
     let result = fs::write(&staged, serde_json::to_vec(value)?)
-        .and_then(|()| fs::rename(&staged, path.join(STATUS)));
+        .and_then(|()| fs::rename(&staged, path.join(name)));
     if result.is_err() {
         let _ = fs::remove_file(staged);
     }
@@ -565,4 +685,37 @@ fn error(code: &str, message: impl Into<String>) -> Value {
 
 fn io_error(err: impl std::fmt::Display) -> Value {
     error("ioError", err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admission_does_not_wait_for_supervisor_handshake() {
+        let (directory, _) = create_run(&std::env::temp_dir()).unwrap();
+        let document =
+            Document::from_bytes(include_bytes!("../../../examples/rc.litzsim")).unwrap();
+        let revision = document.revision();
+
+        // In a unit test current_exe is the test runner. The private supervisor
+        // arguments make it exit without initializing a solver or replying.
+        let (first, mut child) = admit(&directory, &document, &revision, false).unwrap();
+        let path = Path::new(first["runDirectory"].as_str().unwrap());
+        assert_eq!(first["state"], "running");
+        assert_eq!(
+            circuit::open(&path.join(SNAPSHOT)).unwrap().revision,
+            revision
+        );
+        assert!(status(path).unwrap()["solverPid"].is_null());
+        child.wait().unwrap();
+
+        let failed = status(path).unwrap();
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["error"]["code"], "supervisorExited");
+        let (next, mut child) = admit(&directory, &document, &revision, false).unwrap();
+        assert_ne!(first["runId"], next["runId"]);
+        child.wait().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

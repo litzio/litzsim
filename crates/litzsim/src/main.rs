@@ -19,9 +19,12 @@ fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     match args.as_slice() {
         [flag] if flag == "--version" => println!("litzsim {}", litzsim_core::VERSION),
-        [mode, rest @ ..] if mode == "_supervise" && rest.len() <= 1 => {
-            if let Err(error) = runs::supervise(rest.first().map(|file| file.as_os_str())) {
-                let _ = runs::acknowledge(&json!({ "ok": false, "error": error }));
+        [mode, path, flags @ ..]
+            if mode == "_supervise"
+                && (flags.is_empty() || matches!(flags, [flag] if flag == "--owned")) =>
+        {
+            if let Err(error) = runs::supervise(path.as_ref(), !flags.is_empty()) {
+                eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
         }
