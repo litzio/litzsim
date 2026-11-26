@@ -5,10 +5,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(windows)]
 use std::time::Duration;
 
-/// Delays between Windows replacement attempts after a sharing error.
+/// Delays between Windows save path or replacement attempts after a sharing error.
 #[cfg(windows)]
 pub const REPLACE_RETRY_DELAYS: [Duration; 4] = [
     Duration::from_millis(25),
@@ -16,6 +15,8 @@ pub const REPLACE_RETRY_DELAYS: [Duration; 4] = [
     Duration::from_millis(75),
     Duration::from_millis(100),
 ];
+#[cfg(not(windows))]
+const REPLACE_RETRY_DELAYS: [Duration; 0] = [];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,7 +45,16 @@ pub fn open(path: &Path) -> Result<Opened, Error> {
 /// when a process exits without finishing. Keep the lock file in the system
 /// temporary directory so waiting processes keep the same file identity.
 pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<String, Error> {
-    let path = save_path(path, |path| path.canonicalize())
+    save_with_canonicalize(path, document, mode, |path| path.canonicalize())
+}
+
+pub(super) fn save_with_canonicalize(
+    path: &Path,
+    document: &Document,
+    mode: SaveMode<'_>,
+    canonicalize: impl FnMut(&Path) -> io::Result<PathBuf>,
+) -> Result<String, Error> {
+    let path = save_path(path, canonicalize)
         .map_err(|error| save_io_error("resolve the save path for", path, error))?;
     if path.file_name().is_none() {
         return Err(Error::new("ioError", "Expected a circuit file path"));
@@ -102,7 +112,6 @@ pub(super) fn replace_file(
     mode: &SaveMode<'_>,
     mut rename: impl FnMut(&Path, &Path) -> io::Result<()>,
 ) -> Result<(), Error> {
-    #[cfg(windows)]
     let mut delays = REPLACE_RETRY_DELAYS.into_iter();
     loop {
         // Another program can edit the destination while the staged file syncs
@@ -111,15 +120,22 @@ pub(super) fn replace_file(
         let Err(error) = rename(staged, path) else {
             return Ok(());
         };
-        #[cfg(windows)]
-        if matches!(error.raw_os_error(), Some(5 | 32))
-            && let Some(delay) = delays.next()
-        {
-            std::thread::sleep(delay);
+        if wait_for_sharing_retry(&error, &mut delays) {
             continue;
         }
         return Err(save_io_error("replace", path, error));
     }
+}
+
+fn wait_for_sharing_retry(error: &io::Error, delays: &mut impl Iterator<Item = Duration>) -> bool {
+    if cfg!(windows)
+        && matches!(error.raw_os_error(), Some(5 | 32))
+        && let Some(delay) = delays.next()
+    {
+        std::thread::sleep(delay);
+        return true;
+    }
+    false
 }
 
 fn check_destination(path: &Path, mode: &SaveMode<'_>) -> Result<Option<Vec<u8>>, Error> {
@@ -155,7 +171,14 @@ pub(super) fn save_path(
     path: &Path,
     mut canonicalize: impl FnMut(&Path) -> io::Result<PathBuf>,
 ) -> io::Result<PathBuf> {
-    let resolved = canonicalize(path);
+    let mut delays = REPLACE_RETRY_DELAYS.into_iter();
+    let mut resolve = |path: &Path| loop {
+        match canonicalize(path) {
+            Err(error) if wait_for_sharing_retry(&error, &mut delays) => continue,
+            outcome => return outcome,
+        }
+    };
+    let resolved = resolve(path);
     #[cfg(windows)]
     let resolved = if resolved
         .as_ref()
@@ -164,7 +187,7 @@ pub(super) fn save_path(
         // Canonicalization can open the old file just before another save replaces
         // it, then ask Windows for its name after NTFS has moved it out of the way.
         // Resolve the requested name again so both saves use the destination's lock.
-        let current = canonicalize(path);
+        let current = resolve(path);
         if current
             .as_ref()
             .is_ok_and(|path| is_ntfs_deleted_path(path))
@@ -183,7 +206,7 @@ pub(super) fn save_path(
                 .parent()
                 .filter(|path| !path.as_os_str().is_empty())
                 .unwrap_or(Path::new("."));
-            Ok(canonicalize(parent)?.join(name))
+            Ok(resolve(parent)?.join(name))
         }
         Err(error) => Err(error),
     }

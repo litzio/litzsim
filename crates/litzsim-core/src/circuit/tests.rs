@@ -665,6 +665,42 @@ fn windows_replacement_checks_for_changes_before_retrying() {
 
 #[cfg(windows)]
 #[test]
+fn competing_save_reports_the_winners_revision_after_path_sharing_errors() {
+    use super::file::save_with_canonicalize;
+    use std::io;
+
+    let folder = SaveTestDirectory::new("path-sharing");
+    let path = folder.0.join("circuit.litzsim");
+    let original = Document::from_bytes(RC).unwrap();
+    fs::write(&path, RC).unwrap();
+    let expected = open(&path).unwrap().disk_revision;
+    let mode = || SaveMode::Replace {
+        expected_disk_revision: &expected,
+    };
+    let winner = Document::new();
+    let mut lookups = 0;
+    let mut winner_revision = None;
+    let conflict = save_with_canonicalize(&path, &original, mode(), |requested| {
+        assert_eq!(requested, path);
+        lookups += 1;
+        match lookups {
+            1 => {
+                winner_revision = Some(save(&path, &winner, mode()).unwrap());
+                Err(io::Error::from_raw_os_error(5))
+            }
+            2 => Err(io::Error::from_raw_os_error(32)),
+            _ => requested.canonicalize(),
+        }
+    })
+    .unwrap_err();
+    assert_eq!(conflict.code, "diskRevisionConflict", "{conflict:?}");
+    assert_eq!(conflict.actual, Some(json!(winner_revision.unwrap())));
+    assert_eq!(lookups, 3);
+    assert_eq!(fs::read(&path).unwrap(), winner.to_bytes());
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_save_discards_the_ntfs_deleted_path_of_a_replaced_file() {
     use super::file::save_path;
     use std::path::{Path, PathBuf};
