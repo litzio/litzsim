@@ -42,6 +42,8 @@ pub struct PartDefinition {
     pub id_prefix: &'static str,
     /// Forces the voltage between its two terminals; one net on both is a short.
     pub voltage_source: bool,
+    /// When the PWM captures the duty for its next switching period.
+    pub duty_update_timing: Option<&'static str>,
     /// Terminal roles in pin order. An empty slice means all are electrical.
     pin_kinds: &'static [PinKind],
 }
@@ -237,6 +239,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         },
         id_prefix,
         voltage_source: matches!(kind, "dc" | "sine" | "pwm" | "dutyPwm"),
+        duty_update_timing: (kind == "dutyPwm").then_some("cycleStart"),
         pin_kinds: match kind {
             "voltageSensor" | "currentSensor" => &[Electrical, Electrical, SignalOutput],
             "constant" | "step" | "ramp" => &[SignalOutput],

@@ -4,6 +4,13 @@ export const GRID = 32;
 export const SUGGEST_DISTANCE = 1.5 * GRID;
 export const EMPTY_SELECTION = { parts: [], wires: [] };
 
+/** Apply the paper accent only to nets classified as signals by the core. */
+export const SIGNAL_INK = "var(--id-color-accent-blue-paper)";
+
+export function wireStyle(signalNets, netId) {
+  return signalNets.includes(netId) ? { stroke: SIGNAL_INK, strokeWidth: 1.5 } : {};
+}
+
 /** A sheet differs from what was last saved, or from the blank/opened circuit it started as. */
 export function isDirty(revision, savedRevision) {
   return revision !== savedRevision;
@@ -43,6 +50,7 @@ export function deleteSelection({ parts, wires }) {
 /**
  * Closest terminal of another part for a part moved by offset. A suggestion only
  * attaches a free terminal: merging two existing nets is left to explicit clicks.
+ * The core validates the connection when the candidate is accepted.
  */
 export function nearestPair(layout, partId, [dx, dy] = [0, 0]) {
   const pins = Object.entries(layout.pins);

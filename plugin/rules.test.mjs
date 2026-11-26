@@ -12,10 +12,10 @@ import {
   applyToAll, autoRange, axisFor, defaultRun, formatValue, keepSignals, keepView, niceStep, panRange, readTimeAxis, ticks,
   timeAxisProblem, zoomAxis, zoomRange,
 } from "./plot.js";
-import { CATEGORIES, PARTS, ROTATE_SHORTCUT, shortcutOf } from "./parts.js";
+import { CATEGORIES, DUTY_UPDATE_LABELS, PARTS, RECORDING_LABELS, ROTATE_SHORTCUT, libraryCategories, partLabel, shortcutOf } from "./parts.js";
 import {
   deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex, selectionBox,
-  undoRenamed,
+  undoRenamed, wireStyle,
 } from "./rules.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -97,6 +97,65 @@ test("the measurement library offers the node voltage probe on N", () => {
   assert.deepEqual(Object.values(PARTS).filter(part => part.key === "N"), [PARTS.voltageProbe]);
 });
 
+test("the control library, recording and wire styles follow the core layout", async () => {
+  const sheet = await apply(await rc(), [
+    { op: "add", type: "constant", grid: [1, 10] },
+    { op: "add", type: "sum", grid: [6, 11] },
+    { op: "connect", a: "CONST1.out", b: "SUM1.in1" },
+    { op: "setRecording", id: "SUM1", quantity: "output", enabled: true },
+  ]);
+  const { pins, segments, signalNets, symbols } = sheet.layout;
+  const categories = libraryCategories(sheet.layout);
+  const control = categories.find(group => group.id === "control");
+  assert.equal(control.label, "제어");
+  assert.deepEqual(control.parts.map(part => [part.type, part.key]), [
+    ["pwm", "P"], ["voltageSensor", undefined], ["currentSensor", undefined], ["constant", undefined],
+    ["step", undefined], ["ramp", undefined], ["sum", undefined], ["gain", undefined], ["limiter", undefined],
+    ["integrator", undefined], ["pi", undefined], ["dutyPwm", undefined],
+  ]);
+  assert.ok(categories.find(group => group.id === "switches").parts.some(part => part.type === "timedSwitch"));
+  const future = libraryCategories({ controlKinds: ["futureBlock"] }).find(group => group.id === "control").parts.at(-1);
+  assert.deepEqual(future, { type: "futureBlock", label: "futureBlock" });
+  const buck = await call("inspect", { file: `${root}examples/buck-voltage-loop.litzsim` });
+  const { layout: loop } = await apply(buck, [{ op: "add", type: "pwm", grid: [0, 15] }]);
+  assert.equal(DUTY_UPDATE_LABELS[loop.symbols.find(symbol => symbol.id === "PWM").dutyUpdateTiming], "주기 시작");
+  assert.equal(loop.symbols.find(symbol => symbol.id === "PWM1").dutyUpdateTiming, undefined);
+  const sum = symbols.find(symbol => symbol.id === "SUM1");
+  assert.deepEqual(sum.recordable.map(quantity => RECORDING_LABELS[quantity]), ["출력 기록"]);
+  assert.deepEqual(sheet.document.parts.SUM1.record, { output: true });
+
+  const signal = pins["CONST1.out"].netId;
+  assert.deepEqual(signalNets, [signal]);
+  assert.ok(segments.some(segment => segment.netId === signal));
+  assert.ok(segments.some(segment => segment.netId === "input"));
+  assert.deepEqual(wireStyle(signalNets, signal), { stroke: "var(--id-color-accent-blue-paper)", strokeWidth: 1.5 });
+  assert.deepEqual(wireStyle(signalNets, "input"), {});
+  const refused = await send("apply", {
+    document: sheet.document, expectedRevision: sheet.revision,
+    ops: [{ op: "connect", a: "CONST1.out", b: "R1.p" }],
+  });
+  assert.equal(refused.ok, false);
+  assert.match(refused.error.message, /^Cannot connect signal and electrical terminals:/);
+
+  const signStroke = (symbol, y) => symbol.strokes.some(stroke => stroke.kind === "polyline"
+    && JSON.stringify(stroke.points) === JSON.stringify([[-11, y - 4], [-11, y + 4]]));
+  assert.ok(signStroke(sum, -32));
+  assert.ok(!signStroke(sum, 32));
+  const changed = await apply(sheet, [{ op: "setParameter", id: "SUM1", key: "sign2", value: 1 }]);
+  assert.ok(signStroke(changed.layout.symbols.find(symbol => symbol.id === "SUM1"), 32));
+});
+
+test("new control and switch types use the same display names in the library and properties", async () => {
+  const { layout } = await apply(await rc(), []);
+  const entries = libraryCategories(layout).flatMap(group => group.parts);
+  for (const [type, label] of [
+    ["integrator", "적분기"], ["pi", "PI 제어기"], ["dutyPwm", "듀티 입력 PWM"], ["timedSwitch", "시간 스위치"],
+  ]) {
+    assert.equal(entries.find(part => part.type === type)?.label, label);
+    assert.equal(partLabel(type), label);
+  }
+});
+
 test("a new circuit with only a changed simulation setting is unsaved", async () => {
   const created = await call("new");
   const blank = { document: created.document, revision: created.revision };
@@ -121,6 +180,24 @@ test("suggestions never merge two connected nets (review repro: R1 dragged to [1
   const added = await apply(await rc(), [{ op: "add", type: "resistor", grid: [9, 1] }]);
   const suggestion = nearestPair(added.layout, "R2");
   assert.deepEqual([suggestion.a, suggestion.b, suggestion.distance], ["R2.p", "C1.p", 0]);
+});
+
+test("a nearby terminal is suggested by distance and the core validates its net", async () => {
+  const opened = await call("inspect", { file: `${root}examples/control-signals.litzsim` });
+  const sheet = await apply(opened, [{ op: "add", type: "constant", grid: [2, 3] }]);
+  const { a, b, distance } = nearestPair(sheet.layout, "CONST2");
+  assert.deepEqual([a, b, distance], ["CONST2.out", "SUM1.in1", 32]);
+  const refused = await send("apply", {
+    document: sheet.document, expectedRevision: sheet.revision,
+    ops: [{ op: "connect", a, b }],
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.message, "Signal net has multiple outputs: CONST2.out, CONST1.out");
+
+  // Moving the same terminal beside an output changes the nearest candidate,
+  // even though the core would also refuse that connection.
+  const nearOutput = await apply(opened, [{ op: "add", type: "constant", grid: [0, 1] }]);
+  assert.equal(nearestPair(nearOutput.layout, "CONST2")?.b, "CONST1.out");
 });
 
 test("the core reports a shorted voltage source before the screen keeps the connection", async () => {

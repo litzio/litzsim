@@ -1,6 +1,7 @@
 import React from "react";
+import { SIGNAL_INK, wireStyle } from "./rules.js";
 
-// Publication decision: the sheet is white paper with black ink in every theme.
+// Publication decision: white paper and black electrical ink in every theme.
 // These two values are the documented exception to Litzio color tokens.
 const INK = "#000";
 const PAPER = "#fff";
@@ -132,18 +133,20 @@ export function Schematic({
         stroke={ACCENT} strokeWidth={1.5} strokeDasharray="4 3" pointerEvents="none" />)}
 
     <g stroke={INK} strokeWidth={LINE} strokeLinecap="square" strokeLinejoin="miter" fill="none" pointerEvents="none">
-      {layout.segments.map((segment, index) => <path key={index} d={wirePath(segment, sorted)} />)}
+      {layout.segments.map((segment, index) => <path key={index} d={wirePath(segment, sorted)}
+        {...wireStyle(layout.signalNets, segment.netId)} />)}
       {layout.symbols.map(symbol => <Symbol key={symbol.id} symbol={symbol} />)}
     </g>
     <g fill={INK} stroke="none" pointerEvents="none">
-      {layout.junctions.map((junction, index) => <circle key={index} cx={junction.at[0]} cy={junction.at[1]} r={3.5} />)}
+      {layout.junctions.map((junction, index) => <circle key={index} cx={junction.at[0]} cy={junction.at[1]} r={3.5}
+        fill={layout.signalNets.includes(junction.netId) ? SIGNAL_INK : undefined} />)}
     </g>
     <g ref={labels} style={SANS} pointerEvents="none">
       {layout.labels.map(label => <Label key={label.id} label={label} />)}
     </g>
     <g fill={PAPER} stroke={INK} strokeWidth={1.5} pointerEvents="none">
       {Object.entries(layout.pins).filter(([, pin]) => pin.netId === null).map(([id, pin]) =>
-        <circle key={id} cx={pin.at[0]} cy={pin.at[1]} r={3} />)}
+        <circle key={id} cx={pin.at[0]} cy={pin.at[1]} r={3} stroke={pin.signalDirection ? SIGNAL_INK : undefined} />)}
     </g>
     <g fill="none" stroke={WARNING} strokeWidth={1.5} strokeDasharray="3 3" pointerEvents="none">
       {layout.issues.map((issue, index) => <rect key={index} data-issue={issue.code} {...boxProps(issue.area, 4)}>

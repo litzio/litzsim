@@ -2,7 +2,7 @@ use super::{
     Arrow, GRID_PITCH, Issue, Label, LabelKind, LabelMetrics, MeterMark, Obstacle, Pin, Point,
     Rect, Stroke, Symbol, Target, add, scene,
 };
-use crate::circuit::{LayoutPart, Measurement, Mirror, Placement, part_definition};
+use crate::circuit::{LayoutPart, Measurement, Mirror, PinKind, Placement, part_definition};
 use std::collections::BTreeMap;
 
 type LocalPoint = [i32; 2];
@@ -20,6 +20,91 @@ fn diode(x: i32) -> [Stroke; 2] {
             points: [[x - 7, 7], [x, -7], [x + 7, 7]],
         },
     ]
+}
+
+// Signal blocks that share the rectangular symbol and label placement.
+const CONTROL_SYMBOLS: &[&str] = &[
+    "voltageSensor",
+    "currentSensor",
+    "constant",
+    "step",
+    "ramp",
+    "sum",
+    "gain",
+    "limiter",
+    "integrator",
+    "pi",
+];
+
+pub(super) fn library_kinds() -> (Vec<&'static str>, Vec<&'static str>) {
+    CONTROL_SYMBOLS
+        .iter()
+        .copied()
+        // These two parts have their own circuit symbols.
+        .chain(["dutyPwm", "timedSwitch"])
+        .partition(|kind| {
+            let definition = part_definition(kind).expect("defined library part");
+            definition
+                .pins
+                .iter()
+                .any(|pin| definition.pin_kind(pin).is_signal())
+        })
+}
+
+fn control_block(kind: &str) -> Vec<Stroke> {
+    let definition = part_definition(kind).expect("validated control block");
+    let height = definition
+        .pin_offsets
+        .iter()
+        .filter(|[x, _]| *x != 0)
+        .map(|[_, y]| y.abs() * GRID_PITCH as i32 + 10)
+        .max()
+        .unwrap_or_default()
+        .max(16);
+    let mut body = vec![line(&[
+        [-20, -height],
+        [20, -height],
+        [20, height],
+        [-20, height],
+        [-20, -height],
+    ])];
+    body.extend(definition.pin_offsets.iter().map(|&[x, y]| {
+        let tip = [x * GRID_PITCH as i32, y * GRID_PITCH as i32];
+        let edge = if x == 0 {
+            [0, y.signum() * height]
+        } else {
+            [x.signum() * 20, tip[1]]
+        };
+        line(&[edge, tip])
+    }));
+    match kind {
+        "constant" => body.push(line(&[[-12, 0], [12, 0]])),
+        "step" => body.push(line(&[[-12, 6], [0, 6], [0, -6], [12, -6]])),
+        "ramp" => body.push(line(&[[-12, 6], [-8, 6], [5, -6], [12, -6]])),
+        "sum" => body.push(line(&[[7, -9], [-7, -9], [1, 0], [-7, 9], [7, 9]])),
+        "gain" => body.extend([
+            line(&[[-6, -9], [-6, 9]]),
+            line(&[[6, -9], [-6, 0], [6, 9]]),
+        ]),
+        "limiter" => body.push(line(&[[-12, 7], [-6, 7], [6, -7], [12, -7]])),
+        _ => {}
+    }
+    body
+}
+
+fn output_tip([column, row]: LocalPoint) -> Stroke {
+    let x = column.signum();
+    let y = if x == 0 { row.signum() } else { 0 };
+    let at = [
+        column * GRID_PITCH as i32 - x * 3,
+        row * GRID_PITCH as i32 - y * 3,
+    ];
+    let back = [at[0] - x * 6, at[1] - y * 6];
+    line(&[
+        [back[0] - y * 4, back[1] + x * 4],
+        at,
+        [back[0] + y * 4, back[1] - x * 4],
+    ])
 }
 
 fn strokes(kind: &str) -> Vec<Stroke> {
@@ -103,24 +188,7 @@ fn strokes(kind: &str) -> Vec<Stroke> {
             body.push(line(&lead));
             body
         }
-        "constant" | "step" | "ramp" | "sum" | "gain" | "limiter" | "integrator" | "pi" => {
-            let height = if kind == "sum" { 38 } else { 16 };
-            let mut body = vec![line(&[
-                [-20, -height],
-                [20, -height],
-                [20, height],
-                [-20, height],
-                [-20, -height],
-            ])];
-            let definition = part_definition(kind).expect("validated control block");
-            body.extend(
-                definition
-                    .pin_offsets
-                    .iter()
-                    .map(|&[x, y]| line(&[[x * 20, y * 32], [x * 32, y * 32]])),
-            );
-            body
-        }
+        _ if CONTROL_SYMBOLS.contains(&kind) => control_block(kind),
         "ammeter" => vec![
             Stroke::Circle {
                 center: [0, 0],
@@ -310,7 +378,21 @@ pub(super) fn geometry<'a>(
             .expect("defined terminal");
         definition.pin_offsets[index].map(|n| n * GRID_PITCH as i32)
     };
-    let strokes = strokes(kind);
+    let mut strokes = strokes(kind);
+    for (&pin, &pin_offset) in definition.pins.iter().zip(definition.pin_offsets) {
+        if definition.pin_kind(pin) == PinKind::SignalOutput {
+            strokes.push(output_tip(pin_offset));
+        }
+    }
+    if kind == "sum" {
+        for (pin, key) in [("in1", "sign1"), ("in2", "sign2")] {
+            let [_, y] = offset(pin);
+            strokes.push(line(&[[-15, y], [-7, y]]));
+            if part.parameters[key].as_f64().expect("validated sign") > 0.0 {
+                strokes.push(line(&[[-11, y - 4], [-11, y + 4]]));
+            }
+        }
+    }
     let local = strokes
         .iter()
         .map(local_bounds)
@@ -347,7 +429,17 @@ pub(super) fn geometry<'a>(
         }
     }
     let mut current_arrow = None;
-    let mut meter_mark = None;
+    let mut meter_mark = match kind {
+        "pi" => Some(MeterMark {
+            at: center,
+            text: "PI",
+        }),
+        "integrator" => Some(MeterMark {
+            at: center,
+            text: "∫",
+        }),
+        _ => None,
+    };
     if let Some(measurement) = measurement {
         if measurement.quantity == "current" {
             let from = offset(measurement.from_pin);
@@ -382,7 +474,8 @@ pub(super) fn geometry<'a>(
         }
     }
 
-    let horizontal = matches!(kind, "resistor" | "ammeter" | "inductor")
+    let horizontal = (matches!(kind, "resistor" | "ammeter" | "inductor" | "currentSensor")
+        || (measurement.is_none() && CONTROL_SYMBOLS.contains(&kind)))
         ^ (placement.rotation.unwrap_or_default() % 180 != 0);
     let width = 10 * id.len() as i64 + 4;
     let value = value_text(&part);
@@ -425,6 +518,7 @@ pub(super) fn geometry<'a>(
         bounds,
         strokes,
         recordable: definition.recordable(),
+        duty_update_timing: definition.duty_update_timing,
         current_arrow,
         meter_mark,
     };

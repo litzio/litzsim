@@ -34,6 +34,36 @@ export const CATEGORIES = [
 export const PARTS = Object.fromEntries(CATEGORIES.flatMap(group => group.parts.map(part => [part.type, part])));
 export const ROTATE_SHORTCUT = "Shift+R";
 
+const CONTROL_LABELS = {
+  voltageSensor: "전압 센서",
+  currentSensor: "전류 센서",
+  constant: "상수 지령",
+  step: "계단 지령",
+  ramp: "램프 지령",
+  sum: "합산",
+  gain: "이득",
+  limiter: "리미터",
+  integrator: "적분기",
+  pi: "PI 제어기",
+  dutyPwm: "듀티 입력 PWM",
+  timedSwitch: "시간 스위치",
+};
+
+export function partLabel(type) {
+  return PARTS[type]?.label ?? (Object.hasOwn(CONTROL_LABELS, type) ? CONTROL_LABELS[type] : type);
+}
+
+export function libraryCategories({ controlKinds, powerSwitchKinds }) {
+  const coreKinds = { control: controlKinds, switches: powerSwitchKinds };
+  return CATEGORIES.map(group => ({
+    ...group,
+    parts: [...group.parts, ...(coreKinds[group.id] ?? []).map(type => ({ type, label: partLabel(type) }))],
+  }));
+}
+
+export const RECORDING_LABELS = { voltage: "전압 기록", current: "전류 기록", output: "출력 기록" };
+export const DUTY_UPDATE_LABELS = { cycleStart: "주기 시작" };
+
 export const PARAMETERS = {
   resistance_ohm: ["저항", "Ω"],
   inductance_H: ["인덕턴스", "H"],
@@ -45,6 +75,20 @@ export const PARAMETERS = {
   frequency_Hz: ["주파수", "Hz"],
   duty: ["듀티비", ""],
   high_V: ["High 전압", "V"],
+  gain: ["이득", ""],
+  value: ["지령값", ""],
+  stepTime_s: ["전환 시각", "s"],
+  before: ["전환 전", ""],
+  after: ["전환 후", ""],
+  startTime_s: ["시작 시각", "s"],
+  slope_per_s: ["기울기", "1/s"],
+  finalValue: ["최종값", ""],
+  sign1: ["입력 1 부호", ""],
+  sign2: ["입력 2 부호", ""],
+  min: ["하한", ""],
+  max: ["상한", ""],
+  initiallyClosed: ["초기 닫힘 (0/1)", ""],
+  switchTime_s: ["스위치 전환 시각", "s"],
 };
 
 const PREFIXES = [[1e9, "G"], [1e6, "M"], [1e3, "k"], [1, ""], [1e-3, "m"], [1e-6, "µ"], [1e-9, "n"], [1e-12, "p"]];
