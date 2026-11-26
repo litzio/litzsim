@@ -67,6 +67,44 @@ fn archived_examples_keep_v1_data_and_have_canonical_bytes() {
 }
 
 #[test]
+fn resistance_defaults_stay_out_of_files_and_remain_editable() {
+    let original = Document::from_bytes(RC).unwrap();
+    let inspection = json!(original.inspect());
+    assert_eq!(
+        inspection["document"]["parts"]["C1"]["parameters"]["esr_ohm"],
+        json!(1e-6)
+    );
+    assert_eq!(
+        inspection["document"]["parts"]["V1"]["parameters"]["internalResistance_ohm"],
+        json!(0.0)
+    );
+    let mut explicit: Value = serde_json::from_slice(RC).unwrap();
+    explicit["parts"]["C1"]["parameters"]["esr_ohm"] = json!(1e-6);
+    explicit["parts"]["V1"]["parameters"]["internalResistance_ohm"] = json!(0);
+    let explicit = Document::from_bytes(&serde_json::to_vec(&explicit).unwrap()).unwrap();
+    assert_eq!(explicit.to_bytes(), original.to_bytes());
+
+    let set_esr = |document: &Document, value| {
+        apply(
+            document,
+            &document.revision(),
+            &[Operation::SetParameter {
+                id: "C1".into(),
+                key: "esr_ohm".into(),
+                value,
+            }],
+        )
+        .unwrap()
+        .document
+    };
+    let ideal = set_esr(&original, 0.0);
+    let saved: Value = serde_json::from_slice(&ideal.to_bytes()).unwrap();
+    assert_eq!(saved["parts"]["C1"]["parameters"]["esr_ohm"], json!(0.0));
+    let reopened = Document::from_bytes(&ideal.to_bytes()).unwrap();
+    assert_eq!(set_esr(&reopened, 1e-6).to_bytes(), original.to_bytes());
+}
+
+#[test]
 fn mirrors_across_sheet_axes_at_every_rotation_and_restores_on_undo() {
     let original = Document::from_bytes(BUCK).unwrap();
     let mut rotated = original.clone();

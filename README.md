@@ -46,7 +46,7 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 
 `.litzsim` v1의 `parts`, `nets`, `layout`, `bends`, `simulation`을 읽고 안정된 순서와 숫자 표기로 저장합니다. `layout`의 `rotation`은 기존 0/90/180/270° 규약을 따릅니다. 선택 필드 `mirror`는 회전 후 적용할 반전 방향입니다. 양축 반전(`both`)은 180°를 더한 회전으로 정규화하고, 0° 회전과 반전 없음은 해당 필드를 생략합니다. 반전과 회전 후에도 단자 이름, 네트, 계기 극성은 유지합니다.
 
-RC·RLC·벅 예제는 [examples](examples/)에 있습니다. PFC 예제는 지원 범위 밖 제어 설정이 있어 읽기를 거절합니다. 회로 파일에는 revision이나 Undo 기록을 저장하지 않습니다. 저장 중에는 시스템 임시 폴더의 경로별 OS 잠금을 사용합니다. 신규 저장은 하드 링크를 지원하는 파일시스템에서 완성된 파일을 원자적으로 게시합니다.
+RC·RLC·벅 예제는 [examples](examples/)에 있습니다. PFC 예제는 지원 범위 밖 제어 설정이 있어 읽기를 거절합니다. 회로 파일에는 revision이나 Undo 기록을 저장하지 않습니다. 저장 중에는 시스템 임시 폴더의 경로별 OS 잠금을 사용합니다. 신규 저장은 하드 링크를 지원하는 파일시스템에서 완성된 파일을 원자적으로 게시합니다. 동일한 회로로 덮어쓰면 기존 바이트와 `diskRevision`을 유지합니다. 저항 기본값이 파일에 명시돼 있으면 저장할 때 그 키를 생략합니다.
 
 `litzsim serve`는 요청 한 줄마다 JSON 한 줄을 반환합니다. `ping`은 버전을, `new`는 빈 v1 문서와 revision을 반환합니다. 성공한 `apply` 응답에는 `document`, `receipt`, 같은 revision의 `layout`이 함께 들어갑니다. 실패 응답의 `error` 객체에는 `code`와 `message`가 들어갑니다. 편집과 파일 요청의 필드는 다음과 같습니다.
 
@@ -59,11 +59,15 @@ RC·RLC·벅 예제는 [examples](examples/)에 있습니다. PFC 예제는 지�
 
 ## CLI로 회로 해석하기
 
-`litzsim run FILE OUT`은 RC·RLC·이상 벅의 과도응답을 계산하고 지정한 새 파일에 원본 파형을 저장합니다. 성공하면 행 수, 채널 이름과 단위, 종료 시각을 JSON으로 출력합니다. 실행 예시는 `litzsim run examples/rc.litzsim rc.litzwave`입니다. 출력 경로는 하드 링크를 지원하는 파일시스템의 기존 폴더에 지정합니다. 기존 파일은 보존합니다.
+`litzsim run FILE OUT`은 RC·RLC·이상 벅의 과도응답을 계산하고 지정한 새 파일에 원본 파형을 저장합니다. 성공하면 행 수, 채널 이름과 단위, 종료 시각, `warnings` 배열을 JSON으로 출력합니다. 실행 예시는 `litzsim run examples/rc.litzsim rc.litzwave`입니다. 출력 경로는 하드 링크를 지원하는 파일시스템의 기존 폴더에 지정합니다. 기존 파일은 보존합니다.
 
 `timeStep_s`는 적분 간격입니다. PWM 에지가 스텝 사이에 있으면 그 시각에서 스텝을 나눕니다. `outputStep_s`를 생략하면 PWM 에지를 포함한 모든 적분 결과를 저장합니다. 적분 간격의 정수배를 지정하면 해당 시간 격자에서만 저장합니다. 두 경우 모두 시각 0과 `stopTime_s`의 표본을 포함합니다. 전압계는 p−n, 전류계는 p→n 방향을 사용합니다. 인덕터 전류는 p→n, 다이오드 전류는 애노드에서 캐소드 방향입니다. 미접속 단자와 지원 범위 밖 모델은 실행 전에 진단합니다.
 
-이상 전압원 제약끼리 병렬 또는 루프를 이루거나, 초기 인덕터 전류에 귀로가 없거나, 열린 스위치 때문에 노드가 뜨면 해석이 특이 행렬로 중단될 수 있습니다. 시각 0에는 커패시터도 이상 전압원으로 취급하므로 DC 전원에 바로 병렬로 연결하면 초기 전압이 같아도 해석할 수 없습니다. 이 구조를 진단한 경우 `singularCircuit` 오류의 `targetId`에 관련 소자 하나를, `message`에 실패 시각과 구조적 원인 및 관련 소자 ID를 표시합니다.
+커패시터의 `esr_ohm` 기본값은 1 µΩ입니다. [Simscape Capacitor](https://www.mathworks.com/help/simscape/ref/capacitor.html)와 같이 작은 직렬 저항을 두어 전원에 직결한 커패시터도 해석할 수 있게 합니다. 직류·사인 전압원의 `internalResistance_ohm` 기본값은 0 Ω으로 이상 전원을 유지합니다. 두 파라미터는 0 이상이며, 생략하면 기본값을 적용합니다. 커패시터의 `initialVoltage_V`는 ESR 안쪽의 초기 전압입니다.
+
+돌입 전류 시험에서는 실제 커패시터 ESR과 전원 내부 저항을 입력하고 커패시터와 직렬로 전류계를 넣습니다. 충전 시정수(경로의 직렬 저항 합 × 용량)보다 작은 `timeStep_s`를 지정하고, 스텝을 줄여 피크가 수렴하는지 확인합니다. 전원과 커패시터가 직결되거나 분기 없는 저항·전류계로 이어진 경로에서 시정수가 스텝의 1/10보다 짧으면 `inrushTimeStep` 경고를 냅니다. 경고의 `partIds`, `timeConstant_s`, `timeStep_s`는 관련 소자와 시간(초)을 나타냅니다. 이때 돌입 전류 피크가 time-step에 좌우되며 해석은 계속합니다.
+
+저항이 0 Ω인 경로에서 DC 전원과 커패시터의 초기 전압이 단자 극성까지 일치하면 커패시터 전류를 0 A로 초기화합니다. 초기 전압이 다르면 `singularCircuit`에 ESR 또는 전원 내부 저항을 추가하라는 안내가 나옵니다. 이상 전압 제약의 루프, 초기 인덕터 전류에 귀로가 없는 회로, 열린 스위치로 고립된 노드도 특이 행렬을 일으킬 수 있습니다. 구조적 원인을 확인하면 `targetId`에 관련 소자 하나를, `message`에 실패 시각과 원인 및 관련 소자 ID를 표시합니다.
 
 `.litzwave` 파일은 8바이트 서명 `LITZWV02`, 행 수(u64), 채널 메타데이터의 바이트 길이(u32), UTF-8 JSON 채널 배열, 원본 데이터 순서로 저장합니다. 채널 배열의 첫 항목은 `{"name":"time","unit":"s"}`입니다. 이어지는 항목은 `VC_V` 같은 채널 이름과 `V` 또는 `A` 단위를 담습니다. 원본 데이터는 시간순 고정 폭 행으로 구성되며, 각 행에 채널 배열 순서대로 IEEE 754 binary64 값이 들어갑니다. 모든 바이너리 숫자는 리틀엔디언입니다.
 
@@ -83,7 +87,7 @@ $run = & $cli start buck.litzsim | ConvertFrom-Json
 & $cli stop $run.runDirectory
 ```
 
-`status.json`은 `running`, `stopping`, `completed`, `canceled`, `failed`를 기록합니다. `status`와 `stop`은 현재 상태, `simulatedTime`과 `stopTime`(초), 실패 시 `error`를 반환합니다. `stop`은 `stopping`을 접수하고 해석 프로세스 종료를 확인한 뒤 `canceled`로 전이합니다. 완료된 실행에서만 `result.litzwave`를 조회할 수 있습니다.
+`status.json`은 `running`, `stopping`, `completed`, `canceled`, `failed`를 기록합니다. `status`와 `stop`은 현재 상태, `simulatedTime`과 `stopTime`(초), `warnings` 배열, 실패 시 `error`를 반환합니다. `stop`은 `stopping`을 접수하고 해석 프로세스 종료를 확인한 뒤 `canceled`로 전이합니다. 완료된 실행에서만 `result.litzwave`를 조회할 수 있습니다.
 
 파형 응답은 요청 범위 `timeRange`와 채널별 `name`, `unit`, `minimum`, `maximum`, `points`를 반환합니다. 각 점의 `row`는 파일의 0부터 시작하는 행 번호이며 `t_s`와 `value`는 원본값입니다. 조회는 양 끝 시각을 포함합니다. 첫 행과 마지막 행, 픽셀 구간별 최솟값·최댓값의 행, 양옆과 값이 다른 피크의 인접 행을 조회 범위 안에서 시간순으로 반환합니다. 범위에 행이 없으면 극값은 `null`, 점은 빈 배열입니다.
 

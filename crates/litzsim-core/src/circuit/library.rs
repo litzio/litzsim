@@ -19,10 +19,29 @@ pub struct PartDefinition {
     pub measurement: Option<Measurement>,
 }
 
+impl PartDefinition {
+    pub(crate) fn series_resistance(self) -> Option<(&'static str, f64)> {
+        self.defaults
+            .iter()
+            .copied()
+            .find(|(key, _)| matches!(*key, "esr_ohm" | "internalResistance_ohm"))
+    }
+}
+
 pub fn part_definition(kind: &str) -> Option<PartDefinition> {
     let (pins, defaults): (&[_], &[_]) = match kind {
-        "dc" => (&["p", "n"], &[("voltage_V", 5.0)]),
-        "sine" => (&["p", "n"], &[("amplitude_V", 1.0), ("frequency_Hz", 50.0)]),
+        "dc" => (
+            &["p", "n"],
+            &[("voltage_V", 5.0), ("internalResistance_ohm", 0.0)],
+        ),
+        "sine" => (
+            &["p", "n"],
+            &[
+                ("amplitude_V", 1.0),
+                ("frequency_Hz", 50.0),
+                ("internalResistance_ohm", 0.0),
+            ],
+        ),
         "resistor" => (&["p", "n"], &[("resistance_ohm", 1000.0)]),
         "inductor" => (
             &["p", "n"],
@@ -30,7 +49,11 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         ),
         "capacitor" => (
             &["p", "n"],
-            &[("capacitance_F", 1e-6), ("initialVoltage_V", 0.0)],
+            &[
+                ("capacitance_F", 1e-6),
+                ("initialVoltage_V", 0.0),
+                ("esr_ohm", 1e-6),
+            ],
         ),
         "ground" => (&["ref"], &[]),
         "diode" => (&["a", "k"], &[]),

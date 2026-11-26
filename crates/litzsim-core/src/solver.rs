@@ -2,12 +2,35 @@
 
 use crate::circuit::{Document, Error, Part, part_definition};
 use crate::waves::{Channel, Waveform};
+use serde::{Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 type Node = Option<usize>; // Ground has no row or column.
 const CLOCK_EPSILON: f64 = 8.0 * f64::EPSILON;
 const SWITCH_EPSILON: f64 = 1e-12;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Warning {
+    pub code: String,
+    pub message: String,
+    pub part_ids: Vec<String>,
+    #[serde(rename = "timeConstant_s")]
+    pub time_constant_s: f64,
+    #[serde(rename = "timeStep_s")]
+    pub time_step_s: f64,
+}
+
+/// Inspect simple voltage-source charging paths before a background run.
+pub fn warnings(document: &Document) -> Vec<Warning> {
+    match assemble(document) {
+        Ok((mut devices, _)) => {
+            source_paths(&mut devices, document.circuit().simulation.time_step_s)
+        }
+        Err(_) => Vec::new(), // The worker reports invalid circuits through the normal error path.
+    }
+}
 
 /// Solve from the document's initial conditions. The callback returns true to
 /// cancel before assembling the next sample. Cancellation returns no waveform.
@@ -21,11 +44,20 @@ pub fn simulate(
 /// Report the simulated time reached before each step and check for cancellation.
 pub fn simulate_observed(
     document: &Document,
-    mut should_stop: impl FnMut(f64) -> bool,
+    should_stop: impl FnMut(f64) -> bool,
 ) -> Result<Waveform, Error> {
-    let (mut devices, mut system) = assemble(document)?;
+    simulate_with_warnings(document, should_stop).map(|(wave, _)| wave)
+}
+
+pub fn simulate_with_warnings(
+    document: &Document,
+    mut should_stop: impl FnMut(f64) -> bool,
+) -> Result<(Waveform, Vec<Warning>), Error> {
+    let (mut devices, size) = assemble(document)?;
+    let mut system = System::new(size);
     let settings = &document.circuit().simulation;
     let step = settings.time_step_s;
+    let warnings = source_paths(&mut devices, step);
     let stop = settings.stop_time_s;
     let stride = settings
         .output_step_s
@@ -52,8 +84,12 @@ pub fn simulate_observed(
         solve_sample(&mut devices, &mut system, time, h)?;
         let x = &system.rhs;
         for device in &mut devices {
+            let branch = device.branch;
             match &mut device.kind {
-                Kind::Capacitor(_, history) => *history = node(x, device.p) - node(x, device.n),
+                // Integrate the ideal capacitor voltage inside the ESR branch.
+                Kind::Capacitor(capacitance, history) => {
+                    *history += (h / *capacitance) * x[branch.expect("capacitor branch")];
+                }
                 Kind::Inductor(_, history) => *history = x[device.branch.expect("inductor branch")],
                 _ => {}
             }
@@ -67,7 +103,7 @@ pub fn simulate_observed(
             wave.push(time, signals);
         }
         if time == stop {
-            return Ok(wave);
+            return Ok((wave, warnings));
         }
         if on_grid {
             tick += 1;
@@ -137,6 +173,13 @@ enum Kind {
     Ammeter,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InitialCapacitor {
+    FixedVoltage,
+    ZeroCurrent,
+    SourceConflict,
+}
+
 struct Device<'a> {
     id: &'a str,
     kind: Kind,
@@ -144,6 +187,8 @@ struct Device<'a> {
     n: Node,
     branch: Option<usize>,
     probe_unit: Option<&'static str>,
+    series_resistance: f64,
+    initial_capacitor: InitialCapacitor,
     driven: bool,
     conducting: bool,
 }
@@ -179,7 +224,7 @@ impl Device<'_> {
     }
 }
 
-fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, System), Error> {
+fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
     let circuit = document.circuit();
     let pin_nets = circuit.pin_nets();
     let missing: Vec<_> = pin_nets
@@ -222,6 +267,13 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, System), Error> {
             continue;
         }
         let definition = part_definition(&part.kind).expect("validated part");
+        let mut series_resistance = 0.0;
+        if let Some((key, _)) = definition.series_resistance() {
+            series_resistance = part.parameters[key].as_f64().expect("validated parameter");
+            if series_resistance < 0.0 {
+                return Err(Error::invalid(id, format!("{key} must be nonnegative")));
+            }
+        }
         let kind = device_kind(id, part)?;
         let (p, n) = match definition.measurement {
             Some(probe) => (probe.from_pin, probe.to_pin),
@@ -237,6 +289,8 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, System), Error> {
             n: pin_node(id.as_str(), n),
             branch,
             probe_unit: definition.measurement.map(|probe| probe.unit),
+            series_resistance,
+            initial_capacitor: InitialCapacitor::FixedVoltage,
             driven: false,
             conducting: false,
         });
@@ -253,7 +307,83 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, System), Error> {
             })?);
         }
     }
-    Ok((devices, System::new(size)))
+    Ok((devices, size))
+}
+
+/// Follow unbranched series resistors and ideal ammeters on either side of a
+/// capacitor, then look for a voltage source across the resulting node pair.
+fn source_paths(devices: &mut [Device<'_>], step: f64) -> Vec<Warning> {
+    let mut attached = BTreeMap::<Node, Vec<usize>>::new();
+    let mut sources = BTreeMap::<(Node, Node), Vec<usize>>::new();
+    for (index, device) in devices.iter().enumerate() {
+        if matches!(device.kind, Kind::Voltmeter) {
+            continue;
+        }
+        attached.entry(device.p).or_default().push(index);
+        attached.entry(device.n).or_default().push(index);
+        if matches!(device.kind, Kind::Dc(_) | Kind::Sine(..)) {
+            let pair = (device.p.min(device.n), device.p.max(device.n));
+            sources.entry(pair).or_default().push(index);
+        }
+    }
+    let mut warnings = Vec::new();
+    for index in 0..devices.len() {
+        let cap = &devices[index];
+        let Kind::Capacitor(capacitance, initial) = cap.kind else {
+            continue;
+        };
+        let mut resistance = cap.series_resistance;
+        let mut path = vec![cap.id];
+        let mut trace = |mut node, mut previous| {
+            while let [a, b] = attached[&node].as_slice() {
+                let next = if *a == previous { *b } else { *a };
+                let device = &devices[next];
+                match device.kind {
+                    Kind::Resistance(ohm) => resistance += ohm,
+                    Kind::Ammeter => {}
+                    _ => break,
+                }
+                path.push(device.id);
+                node = if node == device.p { device.n } else { device.p };
+                previous = next;
+            }
+            node
+        };
+        let p = trace(cap.p, index);
+        let n = trace(cap.n, index);
+        if p == n {
+            continue;
+        }
+        let Some([source]) = sources.get(&(p.min(n), p.max(n))).map(Vec::as_slice) else {
+            continue;
+        };
+        let source = &devices[*source];
+        resistance += source.series_resistance;
+        let time_constant = resistance * capacitance;
+        if resistance > 0.0 && time_constant < step / 10.0 {
+            path.push(source.id);
+            warnings.push(Warning {
+                code: "inrushTimeStep".into(),
+                message: "Inrush current peak depends on the time step".into(),
+                part_ids: path.into_iter().map(str::to_owned).collect(),
+                time_constant_s: time_constant,
+                time_step_s: step,
+            });
+        }
+        if resistance == 0.0 {
+            let aligned_dc = match source.kind {
+                Kind::Dc(voltage) if p == source.p => initial == voltage,
+                Kind::Dc(voltage) => initial == -voltage,
+                _ => false,
+            };
+            devices[index].initial_capacitor = if aligned_dc {
+                InitialCapacitor::ZeroCurrent
+            } else {
+                InitialCapacitor::SourceConflict
+            };
+        }
+    }
+    warnings
 }
 
 fn take_index(size: &mut usize) -> usize {
@@ -357,13 +487,18 @@ fn solve_sample(
 
 fn diagnose_zero_pivot(devices: &[Device<'_>], column: usize, time: f64, h: f64) -> Error {
     let failed_branch = devices.iter().find(|device| device.branch == Some(column));
-    let initial_current =
+    let initial_inductor_current =
         |device: &Device<'_>| h == 0.0 && matches!(device.kind, Kind::Inductor(..));
+    let free_initial_capacitor =
+        |device: &Device<'_>| h == 0.0 && device.initial_capacitor == InitialCapacitor::ZeroCurrent;
     let ideal_voltage = |device: &Device<'_>| {
         !device.is_open_switch()
             && match device.kind {
                 Kind::Resistance(_) | Kind::Voltmeter | Kind::Inductor(..) => false,
-                Kind::Capacitor(..) => h == 0.0,
+                Kind::Capacitor(..) => {
+                    h == 0.0 && device.series_resistance == 0.0 && !free_initial_capacitor(device)
+                }
+                Kind::Dc(_) | Kind::Sine(..) => device.series_resistance == 0.0,
                 _ => true,
             }
     };
@@ -376,7 +511,8 @@ fn diagnose_zero_pivot(devices: &[Device<'_>], column: usize, time: f64, h: f64)
             device.branch != Some(column) && ideal_voltage(device)
         } else {
             !device.is_open_switch()
-                && !initial_current(device)
+                && !initial_inductor_current(device)
+                && !free_initial_capacitor(device)
                 && !matches!(device.kind, Kind::Voltmeter)
         };
         if !connects {
@@ -419,18 +555,32 @@ fn diagnose_zero_pivot(devices: &[Device<'_>], column: usize, time: f64, h: f64)
                 ids.push(id);
                 node = previous;
             }
-            return report("Ideal voltage constraint loop", device.id, &ids);
+            let loop_devices = || devices.iter().filter(|device| ids.contains(&device.id));
+            let reason = if loop_devices().any(|device| {
+                h == 0.0 && device.initial_capacitor == InitialCapacitor::SourceConflict
+            }) || (loop_devices()
+                .any(|device| matches!(device.kind, Kind::Capacitor(..)))
+                && loop_devices().any(|device| matches!(device.kind, Kind::Dc(_) | Kind::Sine(..))))
+            {
+                "Ideal voltage constraint loop (add capacitor ESR or source internal resistance)"
+            } else {
+                "Ideal voltage constraint loop"
+            };
+            return report(reason, device.id, &ids);
         }
     } else if !paths.contains_key(&None) {
         let boundary: Vec<_> = devices
             .iter()
             .filter(|device| {
-                (device.is_open_switch() || initial_current(device))
+                (device.is_open_switch() || initial_inductor_current(device))
                     && paths.contains_key(&device.p) != paths.contains_key(&device.n)
             })
             .collect();
         let ids: Vec<_> = boundary.iter().map(|device| device.id).collect();
-        if let Some(inductor) = boundary.iter().find(|device| initial_current(device)) {
+        if let Some(inductor) = boundary
+            .iter()
+            .find(|device| initial_inductor_current(device))
+        {
             return report(
                 "Initial inductor current cutset with no voltage-defined return path",
                 inductor.id,
@@ -503,11 +653,18 @@ fn stamp(system: &mut System, device: &Device<'_>, time: f64, interior: f64, h: 
             let z = inductance / h;
             (true, -z, -z * current)
         }
-        Kind::Capacitor(capacitance, voltage) => (true, -h / capacitance, voltage),
-        Kind::Dc(voltage) => (true, 0.0, voltage),
+        Kind::Capacitor(..)
+            if h == 0.0 && device.initial_capacitor == InitialCapacitor::ZeroCurrent =>
+        {
+            (false, 1.0, 0.0)
+        }
+        Kind::Capacitor(capacitance, voltage) => {
+            (true, -(device.series_resistance + h / capacitance), voltage)
+        }
+        Kind::Dc(voltage) => (true, -device.series_resistance, voltage),
         Kind::Sine(amplitude, frequency) => (
             true,
-            0.0,
+            -device.series_resistance,
             amplitude * (std::f64::consts::TAU * time * frequency).sin(),
         ),
         Kind::Pulse(pulse) => (
