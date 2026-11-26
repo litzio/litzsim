@@ -845,7 +845,7 @@ export function Editor({ ui, adapter }) {
             : <ui.Status tone="error" label="실행 실패" />;
 
   const query_ = query.trim().toLowerCase();
-  const categories = libraryCategories(sheet.layout.controlKinds).map(group => ({
+  const categories = libraryCategories(sheet.layout).map(group => ({
     ...group,
     parts: group.parts.filter(part => !query_ || [part.label, part.type, part.key ?? "", group.label]
       .some(text => text.toLowerCase().includes(query_))),

@@ -12,7 +12,7 @@ import {
   applyToAll, autoRange, axisFor, defaultRun, formatValue, keepSignals, keepView, niceStep, panRange, readTimeAxis, ticks,
   timeAxisProblem, zoomAxis, zoomRange,
 } from "./plot.js";
-import { CATEGORIES, PARTS, RECORDING_LABELS, ROTATE_SHORTCUT, libraryCategories, shortcutOf } from "./parts.js";
+import { CATEGORIES, DUTY_UPDATE_LABELS, PARTS, RECORDING_LABELS, ROTATE_SHORTCUT, libraryCategories, shortcutOf } from "./parts.js";
 import {
   deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex, selectionBox,
   undoRenamed, wireStyle,
@@ -104,15 +104,22 @@ test("the control library, recording and wire styles follow the core layout", as
     { op: "connect", a: "CONST1.out", b: "SUM1.in1" },
     { op: "setRecording", id: "SUM1", quantity: "output", enabled: true },
   ]);
-  const { controlKinds, pins, segments, signalNets, symbols } = sheet.layout;
-  const control = libraryCategories(controlKinds).find(group => group.id === "control");
+  const { pins, segments, signalNets, symbols } = sheet.layout;
+  const categories = libraryCategories(sheet.layout);
+  const control = categories.find(group => group.id === "control");
   assert.equal(control.label, "제어");
-  assert.deepEqual(control.parts.slice(0, 9).map(part => [part.type, part.key]), [
+  assert.deepEqual(control.parts.map(part => [part.type, part.key]), [
     ["pwm", "P"], ["voltageSensor", undefined], ["currentSensor", undefined], ["constant", undefined],
     ["step", undefined], ["ramp", undefined], ["sum", undefined], ["gain", undefined], ["limiter", undefined],
+    ["integrator", undefined], ["pi", undefined], ["dutyPwm", undefined],
   ]);
-  const future = libraryCategories(["futureBlock"]).find(group => group.id === "control").parts.at(-1);
+  assert.ok(categories.find(group => group.id === "switches").parts.some(part => part.type === "timedSwitch"));
+  const future = libraryCategories({ controlKinds: ["futureBlock"] }).find(group => group.id === "control").parts.at(-1);
   assert.deepEqual(future, { type: "futureBlock", label: "futureBlock" });
+  const buck = await call("inspect", { file: `${root}examples/buck-voltage-loop.litzsim` });
+  const { layout: loop } = await apply(buck, [{ op: "add", type: "pwm", grid: [0, 15] }]);
+  assert.equal(DUTY_UPDATE_LABELS[loop.symbols.find(symbol => symbol.id === "PWM").dutyUpdateTiming], "주기 시작");
+  assert.equal(loop.symbols.find(symbol => symbol.id === "PWM1").dutyUpdateTiming, undefined);
   const sum = symbols.find(symbol => symbol.id === "SUM1");
   assert.deepEqual(sum.recordable.map(quantity => RECORDING_LABELS[quantity]), ["출력 기록"]);
   assert.deepEqual(sheet.document.parts.SUM1.record, { output: true });

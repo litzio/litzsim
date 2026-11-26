@@ -262,6 +262,7 @@ fn new_parts_take_short_designators_and_skip_used_numbers() {
         "capacitor",
         "diode",
         "nmos",
+        "timedSwitch",
         "pwm",
         "voltmeter",
         "ammeter",
@@ -272,8 +273,15 @@ fn new_parts_take_short_designators_and_skip_used_numbers() {
     assert_eq!(
         result.receipt.created,
         [
-            "AM1", "C2", "D1", "GND1", "L1", "PWM1", "Q1", "R2", "V2", "V3", "VM1"
+            "AM1", "C2", "D1", "GND1", "L1", "PWM1", "Q1", "R2", "SW1", "V2", "V3", "VM1"
         ]
+    );
+    assert_eq!(
+        result.document.0.parts["SW1"].parameters,
+        BTreeMap::from([
+            ("initiallyClosed".into(), 0.0.into()),
+            ("switchTime_s".into(), 0.001.into()),
+        ])
     );
     for id in ["V1", "R1", "C1", "GND", "VC"] {
         assert_eq!(result.document.0.parts[id], rc.0.parts[id]);
@@ -522,6 +530,43 @@ fn added_voltage_probe_round_trips_with_its_ground_reference() {
         json!(inspection.measurements["VP1"]),
         json!({"quantity": "voltage", "unit": "V", "fromPin": "p", "toPin": null})
     );
+}
+
+#[test]
+fn feedback_parts_round_trip_through_save_layout_and_undo() {
+    let original = Document::from_bytes(BUCK).unwrap();
+    let revision = original.revision();
+    let ops: Vec<Operation> = serde_json::from_value(json!([
+        {"op": "add", "type": "integrator", "grid": [-2, 0]},
+        {"op": "add", "type": "pi", "grid": [1, 0]},
+        {"op": "add", "type": "dutyPwm", "grid": [4, 0]},
+        {"op": "delete", "id": "PWM"},
+        {"op": "connect", "a": "PWM1.out", "b": "Q1.g"},
+        {"op": "connect", "a": "PWM1.ref", "b": "Q1.s"},
+        {"op": "connect", "a": "PI1.out", "b": "PWM1.duty"},
+        {"op": "connect", "a": "INT1.out", "b": "PI1.in"},
+        {"op": "add", "type": "constant"},
+        {"op": "connect", "a": "CONST1.out", "b": "INT1.in"},
+        {"op": "setParameter", "id": "INT1", "key": "initialValue", "value": 0.25},
+        {"op": "setParameter", "id": "PI1", "key": "ki", "value": 125},
+        {"op": "setRecording", "id": "PI1", "quantity": "output", "enabled": true},
+        {"op": "setSimulation", "key": "controlSamplePeriod_s", "value": 0.0001}
+    ]))
+    .unwrap();
+    let edited = apply(&original, &revision, &ops).unwrap();
+    assert!(edited.document.inspect().missing_pins.is_empty());
+    let folder = SaveTestDirectory::new("feedback-parts");
+    let path = folder.0.join("feedback.litzsim");
+    save(&path, &edited.document, SaveMode::New).unwrap();
+    let opened = open(&path).unwrap();
+    assert_eq!(opened.document, edited.document);
+    assert_eq!(opened.revision, edited.receipt.after_revision);
+    assert_eq!(
+        json!(crate::layout::layout(&opened.document)),
+        json!(crate::layout::layout(&edited.document)),
+    );
+    let restored = undo(&opened.document, &opened.revision, &revision, &original).unwrap();
+    assert_eq!(restored.document.to_bytes(), original.to_bytes());
 }
 
 #[test]

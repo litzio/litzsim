@@ -50,10 +50,12 @@ export function partLabel(type) {
   return PARTS[type]?.label ?? (Object.hasOwn(CONTROL_LABELS, type) ? CONTROL_LABELS[type] : type);
 }
 
-export function libraryCategories(controlKinds) {
-  return CATEGORIES.map(group => group.id === "control"
-    ? { ...group, parts: [...group.parts, ...controlKinds.map(type => ({ type, label: partLabel(type) }))] }
-    : group);
+export function libraryCategories({ controlKinds, powerSwitchKinds }) {
+  const coreKinds = { control: controlKinds, switches: powerSwitchKinds };
+  return CATEGORIES.map(group => ({
+    ...group,
+    parts: [...group.parts, ...(coreKinds[group.id] ?? []).map(type => ({ type, label: partLabel(type) }))],
+  }));
 }
 
 export const RECORDING_LABELS = { voltage: "전압 기록", current: "전류 기록", output: "출력 기록" };

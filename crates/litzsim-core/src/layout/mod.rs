@@ -59,6 +59,7 @@ fn add([x, y]: Point, [dx, dy]: Point) -> Point {
 pub struct Layout<'a> {
     pub revision: String,
     pub control_kinds: Vec<&'static str>,
+    pub power_switch_kinds: Vec<&'static str>,
     pub signal_nets: BTreeSet<&'a str>,
     pub symbols: Vec<Symbol<'a>>,
     pub pins: BTreeMap<String, Pin<'a>>,
@@ -81,6 +82,8 @@ pub struct Symbol<'a> {
     pub bounds: Rect,
     pub strokes: Vec<Stroke>,
     pub recordable: &'static [RecordQuantity],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duty_update_timing: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_arrow: Option<Arrow>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,9 +225,11 @@ struct Obstacle<'a> {
 /// Compute the schematic from the normalized document, in scene units.
 pub fn layout(document: &Document) -> Layout<'_> {
     let inspection = document.inspect();
+    let (control_kinds, power_switch_kinds) = symbols::library_kinds();
     let mut result = Layout {
         revision: inspection.revision,
-        control_kinds: symbols::control_kinds(),
+        control_kinds,
+        power_switch_kinds,
         signal_nets: Default::default(),
         symbols: Vec::new(),
         pins: BTreeMap::new(),

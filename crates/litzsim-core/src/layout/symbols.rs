@@ -22,8 +22,7 @@ fn diode(x: i32) -> [Stroke; 2] {
     ]
 }
 
-// The library exposes definitions by kind. List the control symbols here so
-// adding a symbol also makes it available to the editor.
+// Signal blocks that share the rectangular symbol and label placement.
 const CONTROL_SYMBOLS: &[&str] = &[
     "voltageSensor",
     "currentSensor",
@@ -33,16 +32,23 @@ const CONTROL_SYMBOLS: &[&str] = &[
     "sum",
     "gain",
     "limiter",
+    "integrator",
+    "pi",
 ];
 
-pub(super) fn control_kinds() -> Vec<&'static str> {
+pub(super) fn library_kinds() -> (Vec<&'static str>, Vec<&'static str>) {
     CONTROL_SYMBOLS
         .iter()
         .copied()
-        // The timed switch has its own circuit symbol.
-        .chain(["timedSwitch"])
-        .filter(|kind| part_definition(kind).is_some())
-        .collect()
+        // These two parts have their own circuit symbols.
+        .chain(["dutyPwm", "timedSwitch"])
+        .partition(|kind| {
+            let definition = part_definition(kind).expect("defined library part");
+            definition
+                .pins
+                .iter()
+                .any(|pin| definition.pin_kind(pin).is_signal())
+        })
 }
 
 fn control_block(kind: &str) -> Vec<Stroke> {
@@ -144,6 +150,10 @@ fn strokes(kind: &str) -> Vec<Stroke> {
             strokes.extend(diode(0));
             strokes
         }
+        "timedSwitch" => vec![
+            line(&[[0, -32], [0, -12]]),
+            line(&[[0, 32], [0, 12], [12, -7]]),
+        ],
         "nmos" => {
             let mut strokes = vec![
                 line(&[[-32, 0], [-22, 0]]),
@@ -197,7 +207,7 @@ fn strokes(kind: &str) -> Vec<Stroke> {
             line(&[[0, 12], [0, 32]]),
             line(&[[-4, 24], [0, 30], [4, 24]]),
         ],
-        "voltmeter" | "pwm" | "sine" => {
+        "voltmeter" | "pwm" | "dutyPwm" | "sine" => {
             let mut strokes = vec![
                 Stroke::Circle {
                     center: [0, 0],
@@ -209,7 +219,7 @@ fn strokes(kind: &str) -> Vec<Stroke> {
             ];
             match kind {
                 "voltmeter" => {}
-                "pwm" => strokes.push(line(&[
+                "pwm" | "dutyPwm" => strokes.push(line(&[
                     [-13, 6],
                     [-7, 6],
                     [-7, -6],
@@ -226,6 +236,9 @@ fn strokes(kind: &str) -> Vec<Stroke> {
                     },
                 ]),
                 _ => unreachable!(),
+            }
+            if kind == "dutyPwm" {
+                strokes.push(line(&[[-32, 0], [-20, 0]]));
             }
             strokes
         }
@@ -283,6 +296,7 @@ fn value_text(part: &LayoutPart<'_>) -> Option<String> {
         "dc" => ("voltage_V", "V", 1.0),
         "sine" => ("amplitude_V", "V RMS", std::f64::consts::FRAC_1_SQRT_2),
         "pwm" => ("frequency_Hz", "Hz", 1.0),
+        "timedSwitch" => ("switchTime_s", "s", 1.0),
         _ => return None,
     };
     let value = part.parameters[key].as_f64().expect("validated parameter") * scale;
@@ -403,8 +417,29 @@ pub(super) fn geometry<'a>(
             ));
         }
     }
+    if kind == "timedSwitch" {
+        for (pin, y) in [("p", -22), ("n", 22)] {
+            labels.push(caption(
+                id,
+                LabelKind::Terminal,
+                pin.into(),
+                Some(pin),
+                at([-11, y]),
+            ));
+        }
+    }
     let mut current_arrow = None;
-    let mut meter_mark = None;
+    let mut meter_mark = match kind {
+        "pi" => Some(MeterMark {
+            at: center,
+            text: "PI",
+        }),
+        "integrator" => Some(MeterMark {
+            at: center,
+            text: "∫",
+        }),
+        _ => None,
+    };
     if let Some(measurement) = measurement {
         if measurement.quantity == "current" {
             let from = offset(measurement.from_pin);
@@ -483,6 +518,7 @@ pub(super) fn geometry<'a>(
         bounds,
         strokes,
         recordable: definition.recordable(),
+        duty_update_timing: definition.duty_update_timing,
         current_arrow,
         meter_mark,
     };

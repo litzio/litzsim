@@ -42,6 +42,8 @@ pub struct PartDefinition {
     pub id_prefix: &'static str,
     /// Forces the voltage between its two terminals; one net on both is a short.
     pub voltage_source: bool,
+    /// When the PWM captures the duty for its next switching period.
+    pub duty_update_timing: Option<&'static str>,
     /// Terminal roles in pin order. An empty slice means all are electrical.
     pin_kinds: &'static [PinKind],
 }
@@ -122,9 +124,17 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "ground" => (&["ref"], &[]),
         "diode" => (&["a", "k"], &[]),
         "nmos" => (&["d", "g", "s"], &[]),
+        "timedSwitch" => (
+            &["p", "n"],
+            &[("initiallyClosed", 0.0), ("switchTime_s", 1e-3)],
+        ),
         "pwm" => (
             &["out", "ref"],
             &[("frequency_Hz", 10000.0), ("duty", 0.5), ("high_V", 10.0)],
+        ),
+        "dutyPwm" => (
+            &["out", "ref", "duty"],
+            &[("frequency_Hz", 10000.0), ("high_V", 10.0)],
         ),
         "voltmeter" | "ammeter" => (&["p", "n"], &[]),
         "voltageProbe" => (&["p"], &[]),
@@ -145,6 +155,20 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "sum" => (&["in1", "in2", "out"], &[("sign1", 1.0), ("sign2", -1.0)]),
         "gain" => (&["in", "out"], &[("gain", 1.0)]),
         "limiter" => (&["in", "out"], &[("min", 0.0), ("max", 1.0)]),
+        "integrator" => (
+            &["in", "out"],
+            &[("initialValue", 0.0), ("min", -1.0), ("max", 1.0)],
+        ),
+        "pi" => (
+            &["in", "out"],
+            &[
+                ("kp", 1.0),
+                ("ki", 1.0),
+                ("initialIntegral", 0.0),
+                ("min", 0.0),
+                ("max", 1.0),
+            ],
+        ),
         _ => return None,
     };
     let measurement = match kind {
@@ -173,7 +197,8 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "currentSensor" => &[[-1, 0], [1, 0], [0, -1]],
         "constant" | "step" | "ramp" => &[[1, 0]],
         "sum" => &[[-1, -1], [-1, 1], [1, 0]],
-        "gain" | "limiter" => &[[-1, 0], [1, 0]],
+        "gain" | "limiter" | "integrator" | "pi" => &[[-1, 0], [1, 0]],
+        "dutyPwm" => &[[0, -1], [0, 1], [-1, 0]],
         _ => &[[0, -1], [0, 1]],
     };
     let id_prefix = match kind {
@@ -184,7 +209,8 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "ground" => "GND",
         "diode" => "D",
         "nmos" => "Q",
-        "pwm" => "PWM",
+        "timedSwitch" => "SW",
+        "pwm" | "dutyPwm" => "PWM",
         "voltmeter" => "VM",
         "voltageProbe" => "VP",
         "voltageSensor" => "VS",
@@ -195,6 +221,8 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "sum" => "SUM",
         "gain" => "GAIN",
         "limiter" => "LIM",
+        "integrator" => "INT",
+        "pi" => "PI",
         _ => "AM",
     };
     Some(PartDefinition {
@@ -204,18 +232,20 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         measurement,
         recording_pins: match kind {
             "nmos" => Some(["d", "s"]),
-            "dc" | "sine" | "resistor" | "inductor" | "capacitor" | "diode" => {
+            "dc" | "sine" | "resistor" | "inductor" | "capacitor" | "diode" | "timedSwitch" => {
                 Some([pins[0], pins[1]])
             }
             _ => None,
         },
         id_prefix,
-        voltage_source: matches!(kind, "dc" | "sine" | "pwm"),
+        voltage_source: matches!(kind, "dc" | "sine" | "pwm" | "dutyPwm"),
+        duty_update_timing: (kind == "dutyPwm").then_some("cycleStart"),
         pin_kinds: match kind {
             "voltageSensor" | "currentSensor" => &[Electrical, Electrical, SignalOutput],
             "constant" | "step" | "ramp" => &[SignalOutput],
             "sum" => &[SignalInput, SignalInput, SignalOutput],
-            "gain" | "limiter" => &[SignalInput, SignalOutput],
+            "gain" | "limiter" | "integrator" | "pi" => &[SignalInput, SignalOutput],
+            "dutyPwm" => &[Electrical, Electrical, SignalInput],
             _ => &[],
         },
     })

@@ -22,6 +22,19 @@ enum Equation {
         min: f64,
         max: f64,
     },
+    Integrator {
+        state: f64,
+        min: f64,
+        max: f64,
+    },
+    Pi {
+        state: f64,
+        kp: f64,
+        ki: f64,
+        min: f64,
+        max: f64,
+    },
+    DutyPwm,
 }
 
 impl Equation {
@@ -69,13 +82,36 @@ impl Equation {
                 Self::Sum(a, b)
             }
             "gain" => Self::Gain(param("gain")),
-            "limiter" => {
+            "limiter" | "integrator" | "pi" => {
                 let (min, max) = (param("min"), param("max"));
                 if min > max {
-                    return Err(Error::invalid(id, "Limiter min must not exceed max"));
+                    let name = match part.kind.as_str() {
+                        "limiter" => "Limiter",
+                        "integrator" => "Integrator",
+                        _ => "PI",
+                    };
+                    return Err(Error::invalid(
+                        id,
+                        format!("{name} min must not exceed max"),
+                    ));
                 }
-                Self::Limiter { min, max }
+                match part.kind.as_str() {
+                    "integrator" => Self::Integrator {
+                        state: param("initialValue").clamp(min, max),
+                        min,
+                        max,
+                    },
+                    "pi" => Self::Pi {
+                        state: param("initialIntegral"),
+                        kp: param("kp"),
+                        ki: param("ki"),
+                        min,
+                        max,
+                    },
+                    _ => Self::Limiter { min, max },
+                }
             }
+            "dutyPwm" => Self::DutyPwm,
             _ => unreachable!("control library and equations use the same block types"),
         })
     }
@@ -85,6 +121,7 @@ struct Block<'a> {
     id: &'a str,
     equation: Equation,
     inputs: Vec<usize>,
+    needs_sense: bool,
 }
 
 pub(super) struct Control<'a> {
@@ -92,6 +129,7 @@ pub(super) struct Control<'a> {
     order: Vec<usize>,
     values: Vec<f64>,
     recorded: Vec<usize>,
+    pwm_inputs: BTreeMap<&'a str, usize>,
     period: f64,
     tick: u64,
 }
@@ -106,6 +144,7 @@ impl<'a> Control<'a> {
                 part_definition(&part.kind)
                     .expect("validated part")
                     .is_control()
+                    || part.kind == "dutyPwm"
             })
             .collect();
         if parts.is_empty() {
@@ -128,6 +167,7 @@ impl<'a> Control<'a> {
         }
         let mut blocks = Vec::new();
         let mut recorded = Vec::new();
+        let mut pwm_inputs = BTreeMap::new();
         for (id, part) in parts {
             let definition = part_definition(&part.kind).expect("validated part");
             let mut inputs = Vec::new();
@@ -149,13 +189,25 @@ impl<'a> Control<'a> {
             if part.record.output {
                 recorded.push(blocks.len());
             }
+            if part.kind == "dutyPwm" {
+                pwm_inputs.insert(id.as_str(), blocks.len());
+            }
             blocks.push(Block {
                 id,
                 equation: Equation::from_part(id, part)?,
                 inputs,
+                needs_sense: false,
             });
         }
         let order = evaluation_order(&blocks)?;
+        for &index in &order {
+            let block = &blocks[index];
+            blocks[index].needs_sense = matches!(block.equation, Equation::Sensor(..))
+                || block
+                    .inputs
+                    .iter()
+                    .any(|&driver| blocks[driver].needs_sense);
+        }
         let period = circuit.simulation.control_sample_period_s.ok_or_else(|| {
             Error::invalid(
                 "controlSamplePeriod_s",
@@ -168,6 +220,7 @@ impl<'a> Control<'a> {
             order,
             values,
             recorded,
+            pwm_inputs,
             period,
             tick: 0,
         }))
@@ -181,35 +234,92 @@ impl<'a> Control<'a> {
         same_clock_time(self.next_sample(), time)
     }
 
+    pub(super) fn pwm_input(&self, id: &str) -> Option<usize> {
+        self.pwm_inputs.get(id).copied()
+    }
+
+    pub(super) fn held(&self, index: usize) -> f64 {
+        self.values[index]
+    }
+
+    /// Seed duties that can be determined without the initial electrical solve.
+    pub(super) fn prepare_initial(&mut self) -> Result<(), Error> {
+        self.evaluate(Some(false), false, |_, _| {
+            unreachable!("sensor-independent block")
+        })?;
+        Ok(())
+    }
+
     /// Evaluate direct dependencies in order, then hold all values until the next tick.
     pub(super) fn sample(
         &mut self,
+        initial_prepared: bool,
+        include_unrecorded_changes: bool,
+        sense: impl FnMut(&str, RecordQuantity) -> f64,
+    ) -> Result<bool, Error> {
+        let changed = self.evaluate(
+            initial_prepared.then_some(true),
+            include_unrecorded_changes,
+            sense,
+        )?;
+        self.tick += 1;
+        Ok(changed)
+    }
+
+    fn evaluate(
+        &mut self,
+        needs_sense: Option<bool>,
+        include_unrecorded_changes: bool,
         mut sense: impl FnMut(&str, RecordQuantity) -> f64,
     ) -> Result<bool, Error> {
         let time = self.next_sample();
         let mut changed = false;
         for &index in &self.order {
-            let block = &self.blocks[index];
+            let block = &mut self.blocks[index];
+            if needs_sense.is_some_and(|required| block.needs_sense != required) {
+                continue;
+            }
             let input = |pin: usize| self.values[block.inputs[pin]];
-            let value = match block.equation {
-                Equation::Sensor(quantity, gain) => sense(block.id, quantity) * gain,
-                Equation::Constant(value) => value,
+            let value = match &mut block.equation {
+                Equation::Sensor(quantity, gain) => sense(block.id, *quantity) * *gain,
+                Equation::Constant(value) => *value,
                 Equation::Step { at, before, after } => {
-                    if at > time && !same_clock_time(at, time) {
-                        before
+                    if *at > time && !same_clock_time(*at, time) {
+                        *before
                     } else {
-                        after
+                        *after
                     }
                 }
                 Equation::Ramp {
                     start,
                     slope,
                     final_value,
-                } => ((time - start).max(0.0) * slope)
+                } => ((time - *start).max(0.0) * *slope)
                     .clamp(final_value.min(0.0), final_value.max(0.0)),
-                Equation::Sum(a, b) => a * input(0) + b * input(1),
-                Equation::Gain(gain) => gain * input(0),
-                Equation::Limiter { min, max } => input(0).clamp(min, max),
+                Equation::Sum(a, b) => *a * input(0) + *b * input(1),
+                Equation::Gain(gain) => *gain * input(0),
+                Equation::Limiter { min, max } => input(0).clamp(*min, *max),
+                Equation::Integrator { state, min, max } => {
+                    *state = (*state + input(0) * self.period).clamp(*min, *max);
+                    *state
+                }
+                Equation::Pi {
+                    state,
+                    kp,
+                    ki,
+                    min,
+                    max,
+                } => {
+                    let error = input(0);
+                    let increment = (*ki * error) * self.period;
+                    let integral = *state + increment;
+                    let output = *kp * error + integral;
+                    if !((output > *max && increment > 0.0) || (output < *min && increment < 0.0)) {
+                        *state = integral;
+                    }
+                    output.clamp(*min, *max)
+                }
+                Equation::DutyPwm => input(0).clamp(0.0, 1.0),
             };
             if !value.is_finite() {
                 return Err(Error::invalid(
@@ -217,12 +327,13 @@ impl<'a> Control<'a> {
                     format!("Non-finite control output at {time} s"),
                 ));
             }
-            if value != self.values[index] && self.recorded.binary_search(&index).is_ok() {
+            if value != self.values[index]
+                && (include_unrecorded_changes || self.recorded.binary_search(&index).is_ok())
+            {
                 changed = true;
             }
             self.values[index] = value;
         }
-        self.tick += 1;
         Ok(changed)
     }
 
