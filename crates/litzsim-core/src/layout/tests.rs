@@ -204,6 +204,59 @@ fn examples_are_connected_clear_and_deterministic() {
 }
 
 #[test]
+fn example_voltmeters_take_manhattan_paths_to_their_rails() {
+    for (name, bytes) in [("rc", RC), ("rlc", RLC), ("buck", BUCK)] {
+        let doc = Document::from_bytes(bytes).unwrap();
+        let drawing = layout(&doc);
+        for id in ["VC.p", "VC.n"] {
+            let pin = &drawing.pins[id];
+            let mut previous = None;
+            let mut at = pin.at;
+            let mut length = 0;
+            let mut turns = 0;
+            let mut previous_axis = None;
+            loop {
+                let next = drawing
+                    .segments
+                    .iter()
+                    .filter(|wire| Some(wire.net_id) == pin.net_id)
+                    .filter_map(|wire| {
+                        if wire.from == at {
+                            Some(wire.to)
+                        } else if wire.to == at {
+                            Some(wire.from)
+                        } else {
+                            None
+                        }
+                    })
+                    .find(|next| Some(*next) != previous)
+                    .unwrap_or_else(|| panic!("{name} {id}: disconnected at {at:?}"));
+                let axis = usize::from(next[0] == at[0]);
+                turns += usize::from(previous_axis.is_some_and(|prior| prior != axis));
+                length += (next[axis] - at[axis]).abs();
+                previous_axis = Some(axis);
+                previous = Some(at);
+                at = next;
+                let at_rail = drawing
+                    .junctions
+                    .iter()
+                    .any(|j| j.at == at && Some(j.net_id) == pin.net_id)
+                    || drawing
+                        .pins
+                        .values()
+                        .any(|p| p.at == at && p.net_id == pin.net_id);
+                if at_rail {
+                    break;
+                }
+            }
+            let manhattan = (at[0] - pin.at[0]).abs() + (at[1] - pin.at[1]).abs();
+            assert_eq!(length, manhattan, "{name} {id} to {at:?}: {turns} turns");
+            assert!(turns <= 1, "{name} {id} to {at:?}: {turns} turns");
+        }
+    }
+}
+
+#[test]
 fn crossing_has_one_horizontal_jump_and_continuous_vertical_run_in_both_net_orders() {
     for (horizontal, vertical) in [("a", "b"), ("b", "a")] {
         let mut fixture = json!({
@@ -234,6 +287,23 @@ fn crossing_has_one_horizontal_jump_and_continuous_vertical_run_in_both_net_orde
             wire.net_id == vertical && wire.from == [0, -96] && wire.to == [0, 96]
         }));
         assert!(result.junctions.is_empty());
+
+        fixture["nets"] = json!({"tree": ["left.ref", "right.ref", "top.n"]});
+        let doc = self::document(&fixture);
+        let tee = layout(&doc);
+        check_geometry(&doc, &tee);
+        assert!(tee.issues.is_empty());
+        assert!(tee.jumps.is_empty());
+        assert_eq!(tee.junctions.len(), 1);
+        assert_eq!(tee.junctions[0].at, [0, 0]);
+        assert_eq!(tee.junctions[0].net_id, "tree");
+        assert_eq!(
+            tee.segments
+                .iter()
+                .filter(|wire| [wire.from, wire.to].contains(&[0, 0]))
+                .count(),
+            3
+        );
     }
 
     let mut buck: Value = serde_json::from_slice(BUCK).unwrap();

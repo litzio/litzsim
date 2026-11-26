@@ -309,7 +309,7 @@ pub(super) fn geometry<'a>(
                     LabelKind::Polarity,
                     mark.into(),
                     Some(pin),
-                    at([-31, 3 * position[1] / 5]),
+                    at([-35, position[1] / 2]),
                 ));
             }
         }
@@ -414,6 +414,18 @@ pub(super) fn place_labels<'a>(
                 })
                 .find(|&bounds| {
                     let near_terminal = terminal.is_none_or(|pin| {
+                        if matches!(label.kind, LabelKind::Polarity) {
+                            let origin = centers[pin.part_id];
+                            let axis = usize::from(pin.at[1] != origin[1]);
+                            let clear_rail = if pin.at[axis] < origin[axis] {
+                                bounds.min[axis] > pin.at[axis]
+                            } else {
+                                bounds.max[axis] < pin.at[axis]
+                            };
+                            if !clear_rail {
+                                return false;
+                            }
+                        }
                         let center = [0, 1].map(|axis| (bounds.min[axis] + bounds.max[axis]) / 2);
                         let distance =
                             |at: Point| (at[0] - center[0]).abs() + (at[1] - center[1]).abs();

@@ -25,6 +25,7 @@ impl Axis {
 type Tree = BTreeMap<Point, Vec<Point>>;
 type GridPins<'a> = BTreeMap<Point, Vec<(&'a str, &'a Pin<'a>)>>;
 type State = (Point, Option<Axis>);
+type Cost = (usize, i64);
 
 // Search a grid of representative rows and columns rather than stepping over
 // every empty cell between distant terminals. The steps still follow the grid.
@@ -88,11 +89,23 @@ fn distance(a: Point, b: Point) -> i64 {
     (a[0] - b[0]).abs() + (a[1] - b[1]).abs()
 }
 
+// Exact cost of the best unobstructed path, with the incoming axis preserved.
+fn estimate((point, previous_axis): State, goal: Point) -> Cost {
+    let turns = match (point[0] != goal[0], point[1] != goal[1]) {
+        (true, true) => 1,
+        (true, false) => usize::from(previous_axis == Some(Axis::Vertical)),
+        (false, true) => usize::from(previous_axis == Some(Axis::Horizontal)),
+        (false, false) => 0,
+    };
+    (turns, distance(point, goal))
+}
+
 impl Board<'_, '_> {
     fn path(
         &self,
         net: &str,
         start: Point,
+        incoming_axis: Option<Axis>,
         goals: &BTreeSet<Point>,
         avoid: &BTreeSet<Point>,
     ) -> Option<Vec<Point>> {
@@ -102,22 +115,24 @@ impl Board<'_, '_> {
         {
             return None;
         }
-        let estimate = |point| {
+        let lower_bound = |state| {
             goals
                 .iter()
-                .map(|&goal| distance(point, goal))
+                .map(|&goal| estimate(state, goal))
                 .min()
                 .unwrap()
         };
-        let initial: State = (start, None);
-        let mut best = HashMap::from([(initial, (0, None))]);
+        let initial = (start, incoming_axis);
+        let start_cost: Cost = (0, 0);
+        let mut best = HashMap::from([(initial, (start_cost, None))]);
         let mut queue = BinaryHeap::new();
         let mut sequence = 0;
+        let initial_bound = lower_bound(initial);
         queue.push(Reverse((
-            estimate(start),
-            estimate(start),
+            initial_bound,
+            initial_bound,
             sequence,
-            0,
+            start_cost,
             initial,
         )));
 
@@ -153,8 +168,8 @@ impl Board<'_, '_> {
                     continue;
                 }
                 let next_state = (next, Some(axis));
-                let turn = previous_axis.is_some_and(|prev| prev != axis);
-                let next_cost = cost + distance(point, next) + if turn { 8 } else { 0 };
+                let turn = usize::from(previous_axis.is_some_and(|prev| prev != axis));
+                let next_cost = (cost.0 + turn, cost.1 + distance(point, next));
                 if best
                     .get(&next_state)
                     .is_some_and(|(old, _)| *old <= next_cost)
@@ -162,11 +177,11 @@ impl Board<'_, '_> {
                     continue;
                 }
                 best.insert(next_state, (next_cost, Some(state)));
-                let lower_bound = estimate(next);
+                let bound = lower_bound(next_state);
                 sequence += 1;
                 queue.push(Reverse((
-                    next_cost + lower_bound,
-                    lower_bound,
+                    (next_cost.0 + bound.0, next_cost.1 + bound.1),
+                    bound,
                     sequence,
                     next_cost,
                     next_state,
@@ -250,6 +265,7 @@ impl Board<'_, '_> {
         }
         let mut path = vec![start];
         let mut avoid: BTreeSet<_> = tree.keys().copied().collect();
+        let mut incoming_axis = None;
         for (i, &waypoint) in waypoints.iter().enumerate() {
             let previous = *path.last().unwrap();
             if waypoint == previous {
@@ -259,7 +275,14 @@ impl Board<'_, '_> {
             if path.contains(&waypoint) || (tree.contains_key(&waypoint) && !joins_tree) {
                 return None;
             }
-            let leg = self.path(net, previous, &BTreeSet::from([waypoint]), &avoid)?;
+            let leg = self.path(
+                net,
+                previous,
+                incoming_axis,
+                &BTreeSet::from([waypoint]),
+                &avoid,
+            )?;
+            incoming_axis = leg.last_chunk().map(|&[a, b]| Axis::between(a, b));
             avoid.extend(leg.iter().take(leg.len() - 1).copied());
             path.extend(leg.into_iter().skip(1));
         }
@@ -268,7 +291,7 @@ impl Board<'_, '_> {
             .filter(|goal| !path[..path.len() - 1].contains(goal))
             .copied()
             .collect();
-        let leg = self.path(net, *path.last().unwrap(), &goals, &avoid)?;
+        let leg = self.path(net, *path.last().unwrap(), incoming_axis, &goals, &avoid)?;
         path.extend(leg.into_iter().skip(1));
         Some(path)
     }
@@ -476,5 +499,28 @@ fn collect_segments<'a>(
                 terminals: [root_id, representative[&point]],
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_cost_prefers_fewer_turns_then_shorter_length() {
+        let start = [0, 0];
+        let goals = BTreeSet::from([[32, 32], [128, 0], [160, 0]]);
+        let board = Board {
+            grid: Grid::new(goals.iter().copied().chain([start]), &[]),
+            obstacles: &[],
+            pins: BTreeMap::new(),
+            bends: BTreeMap::new(),
+            wires: BTreeMap::new(),
+        };
+        let path = board
+            .path("net", start, None, &goals, &BTreeSet::new())
+            .unwrap();
+        assert_eq!(path.last(), Some(&[128, 0]));
+        assert!(path.iter().all(|point| point[1] == 0));
     }
 }
