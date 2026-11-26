@@ -32,6 +32,48 @@ impl Drop for TestDirectory {
 }
 
 #[test]
+fn probe_requires_ground_before_run_admission_and_reports_an_unconnected_pin() {
+    let directory = TestDirectory::new("probe-diagnostics");
+    let file = directory.0.join("probe.litzsim");
+    let mut circuit: Value =
+        serde_json::from_str(include_str!("../../../examples/buck-probe.litzsim")).unwrap();
+    circuit["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|pin| pin != "VP1.p");
+    std::fs::write(&file, serde_json::to_vec(&circuit).unwrap()).unwrap();
+    let detached = directory.run(&["run", "probe.litzsim", "probe.litzwave"], false);
+    assert_eq!(detached["error"]["code"], "invalidCircuit");
+    assert_eq!(detached["error"]["targetId"], "VP1.p");
+    assert_eq!(detached["error"]["message"], "Unconnected pins: VP1.p");
+
+    circuit["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VP1.p"));
+    circuit["parts"].as_object_mut().unwrap().remove("GND");
+    circuit["layout"].as_object_mut().unwrap().remove("GND");
+    circuit["nets"]["ground"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|pin| pin != "GND.ref");
+    std::fs::write(&file, serde_json::to_vec(&circuit).unwrap()).unwrap();
+    let foreground = directory.run(&["run", "probe.litzsim", "probe.litzwave"], false);
+    let background = directory.run(&["start", "probe.litzsim"], false);
+    assert_eq!(foreground["error"], background["error"]);
+    assert_eq!(background["error"]["code"], "invalidCircuit");
+    assert_eq!(background["error"]["targetId"], "VP1");
+    assert!(
+        background["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("VP1")
+    );
+    assert!(!directory.0.join("probe.litzwave").exists());
+    assert!(!directory.0.join("runs").exists());
+}
+
+#[test]
 fn run_publishes_ordered_original_rows_and_rejects_invalid_circuits() {
     use litzsim_core::{circuit::Document, solver, waves};
 

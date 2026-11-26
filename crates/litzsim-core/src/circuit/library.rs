@@ -6,7 +6,8 @@ pub struct Measurement {
     pub quantity: &'static str,
     pub unit: &'static str,
     pub from_pin: &'static str,
-    pub to_pin: &'static str,
+    /// None uses the circuit's reference ground.
+    pub to_pin: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -67,25 +68,27 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
             &[("frequency_Hz", 10000.0), ("duty", 0.5), ("high_V", 10.0)],
         ),
         "voltmeter" | "ammeter" => (&["p", "n"], &[]),
+        "voltageProbe" => (&["p"], &[]),
         _ => return None,
     };
     let measurement = match kind {
-        "voltmeter" => Some(Measurement {
+        "voltmeter" | "voltageProbe" => Some(Measurement {
             quantity: "voltage",
             unit: "V",
             from_pin: pins[0],
-            to_pin: pins[1],
+            to_pin: pins.get(1).copied(),
         }),
         "ammeter" => Some(Measurement {
             quantity: "current",
             unit: "A",
             from_pin: pins[0],
-            to_pin: pins[1],
+            to_pin: Some(pins[1]),
         }),
         _ => None,
     };
     let pin_offsets: &[_] = match kind {
         "ground" => &[[0, -1]],
+        "voltageProbe" => &[[0, 1]],
         // The body diode's anode is at S and cathode at D.
         "nmos" => &[[0, -1], [-1, 0], [0, 1]],
         "resistor" | "inductor" | "ammeter" => &[[-1, 0], [1, 0]],
@@ -102,6 +105,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "nmos" => "Q",
         "pwm" => "PWM",
         "voltmeter" => "VM",
+        "voltageProbe" => "VP",
         _ => "AM",
     };
     Some(PartDefinition {

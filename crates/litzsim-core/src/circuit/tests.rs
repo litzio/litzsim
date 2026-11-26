@@ -486,6 +486,39 @@ impl Drop for SaveTestDirectory {
 }
 
 #[test]
+fn added_voltage_probe_round_trips_with_its_ground_reference() {
+    let original = Document::from_bytes(BUCK).unwrap();
+    let edited = apply(
+        &original,
+        &original.revision(),
+        &[
+            Operation::Add {
+                kind: "voltageProbe".into(),
+                grid: Some([11, 2]),
+            },
+            Operation::Connect {
+                a: "VP1.p".into(),
+                b: "Q1.s".into(),
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(edited.receipt.created, ["VP1"]);
+    let folder = SaveTestDirectory::new("probe");
+    let path = folder.0.join("probe.litzsim");
+    save(&path, &edited.document, SaveMode::New).unwrap();
+    let opened = open(&path).unwrap();
+    assert_eq!(opened.document, edited.document);
+    assert_eq!(opened.revision, edited.receipt.after_revision);
+    let inspection = opened.document.inspect();
+    assert_eq!(inspection.pin_nets["VP1.p"], Some("sw"));
+    assert_eq!(
+        json!(inspection.measurements["VP1"]),
+        json!({"quantity": "voltage", "unit": "V", "fromPin": "p", "toPin": null})
+    );
+}
+
+#[test]
 fn save_guards_raw_bytes_and_serializes_competing_writers() {
     let folder = SaveTestDirectory::new("save");
     let directory = &folder.0;

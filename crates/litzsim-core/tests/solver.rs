@@ -17,6 +17,41 @@ fn channel(wave: &litzsim_core::waves::Waveform, name: &str) -> usize {
     wave.channels().iter().position(|c| c.name == name).unwrap()
 }
 
+#[test]
+fn buck_probe_matches_a_two_pin_voltmeter_without_changing_existing_samples() {
+    let original = simulate(&Document::from_bytes(BUCK.as_bytes()).unwrap(), || false).unwrap();
+    let mut value: Value =
+        serde_json::from_str(include_str!("../../../examples/buck-probe.litzsim")).unwrap();
+    value["parts"]["VM1"] = json!({"type": "voltmeter", "parameters": {}});
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VM1.p"));
+    value["nets"]["ground"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VM1.n"));
+    let measured = simulate(&document(&value), || false).unwrap();
+    let columns: Vec<_> = original
+        .channels()
+        .iter()
+        .map(|c| channel(&measured, &c.name))
+        .collect();
+    let probe = channel(&measured, "VP1_V");
+    let meter = channel(&measured, "VM1_V");
+    assert_eq!(measured.channels()[probe].unit, "V");
+    assert_eq!(measured.rows().count(), original.rows().count());
+    for (before, after) in original.rows().zip(measured.rows()) {
+        assert_eq!(after[probe].to_bits(), after[meter].to_bits());
+        assert!(
+            columns
+                .iter()
+                .enumerate()
+                .all(|(index, &column)| before[index].to_bits() == after[column].to_bits())
+        );
+    }
+}
+
 fn singular_circuit(parts: Value, nets: Value, reason: &str, ids: &[&str]) {
     let mut value = json!({
         "version": 1,

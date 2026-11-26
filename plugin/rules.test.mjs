@@ -9,7 +9,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { startRequest } from "./host.mjs";
 import { applyToAll, autoRange, axisFor, defaultRun, formatValue, niceStep, panRange, ticks, zoomAxis, zoomRange } from "./plot.js";
-import { PARTS, ROTATE_SHORTCUT, shortcutOf } from "./parts.js";
+import { CATEGORIES, PARTS, ROTATE_SHORTCUT, shortcutOf } from "./parts.js";
 import { deleteSelection, isDirty, nearestPair, selectInBox, selectedSegmentIndex, selectionBox } from "./rules.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -75,6 +75,16 @@ test("R places a resistor and Shift+R rotates the selection", () => {
   assert.equal(PARTS.resistor.key, "R");
   assert.equal(shortcutOf({ key: "R", shiftKey: true }), ROTATE_SHORTCUT);
   assert.equal(ROTATE_SHORTCUT, "Shift+R");
+});
+
+test("the measurement library offers the node voltage probe on N", () => {
+  const meters = CATEGORIES.find(group => group.id === "meters");
+  assert.equal(meters.label, "측정");
+  assert.ok(meters.parts.includes(PARTS.voltageProbe));
+  assert.equal(PARTS.voltageProbe.label, "노드 전압계");
+  assert.equal(PARTS.voltageProbe.key, "N");
+  assert.equal(shortcutOf({ key: "n" }), PARTS.voltageProbe.key);
+  assert.deepEqual(Object.values(PARTS).filter(part => part.key === "N"), [PARTS.voltageProbe]);
 });
 
 test("a new circuit with only a changed simulation setting is unsaved", async () => {

@@ -23,9 +23,10 @@ export const CATEGORIES = [
   },
   { id: "control", label: "제어", parts: [{ type: "pwm", label: "PWM 신호", key: "P" }] },
   {
-    id: "meters", label: "계측", parts: [
+    id: "meters", label: "측정", parts: [
       { type: "ammeter", label: "전류계", key: "A" },
       { type: "voltmeter", label: "전압계", key: "Shift+V" },
+      { type: "voltageProbe", label: "노드 전압계", key: "N" },
     ],
   },
 ];
