@@ -566,6 +566,111 @@ fn file_commands_round_trip_and_reject_failed_batches() {
 }
 
 #[test]
+fn deleting_a_part_before_reusing_its_id_reports_the_deletion_and_undo_restores_file() {
+    let folder = TestDirectory::new("rename-reused-id");
+    let file = folder.0.join("buck.litzsim");
+    let original = litzsim_core::circuit::Document::from_bytes(include_bytes!(
+        "../../../examples/buck.litzsim"
+    ))
+    .unwrap()
+    .to_bytes();
+    std::fs::write(&file, &original).unwrap();
+    std::fs::write(folder.0.join("snapshot.litzsim"), &original).unwrap();
+    std::fs::write(
+        folder.0.join("ops.json"),
+        r#"[{"op":"delete","id":"R1"},{"op":"rename","id":"VC","newId":"R1"}]"#,
+    )
+    .unwrap();
+    let inspect = folder.run(&["inspect", "buck.litzsim", "--json"], true);
+    let before = inspect["revision"].as_str().unwrap();
+    let edited = folder.run(
+        &[
+            "apply",
+            "buck.litzsim",
+            "--expect",
+            before,
+            "--ops",
+            "ops.json",
+        ],
+        true,
+    );
+    let receipt = &edited["receipt"];
+    assert_eq!(receipt["deleted"], json!(["R1"]));
+    assert_eq!(receipt["renamed"], json!({"VC": "R1"}));
+    assert_eq!(receipt["created"], json!([]));
+    assert_eq!(receipt["modified"], json!([]));
+    assert_eq!(edited["document"]["parts"]["R1"]["type"], "voltmeter");
+
+    folder.run(
+        &[
+            "undo",
+            "buck.litzsim",
+            "--expect",
+            receipt["afterRevision"].as_str().unwrap(),
+            "--before",
+            before,
+            "--previous",
+            "snapshot.litzsim",
+        ],
+        true,
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), original);
+}
+
+#[test]
+fn renaming_a_buck_capacitor_preserves_output_voltage_within_relative_tolerance() {
+    use litzsim_core::waves;
+
+    let folder = TestDirectory::new("rename-capacitor");
+    std::fs::write(
+        folder.0.join("buck.litzsim"),
+        include_bytes!("../../../examples/buck.litzsim"),
+    )
+    .unwrap();
+    folder.run(&["run", "buck.litzsim", "before.litzwave"], true);
+    let inspect = folder.run(&["inspect", "buck.litzsim", "--json"], true);
+    std::fs::write(
+        folder.0.join("ops.json"),
+        r#"[{"op":"rename","id":"C1","newId":"Zlast"}]"#,
+    )
+    .unwrap();
+    let edited = folder.run(
+        &[
+            "apply",
+            "buck.litzsim",
+            "--expect",
+            inspect["revision"].as_str().unwrap(),
+            "--ops",
+            "ops.json",
+        ],
+        true,
+    );
+    assert_eq!(edited["receipt"]["renamed"], json!({"C1": "Zlast"}));
+    folder.run(&["run", "buck.litzsim", "after.litzwave"], true);
+
+    let before = waves::read(&folder.0.join("before.litzwave")).unwrap();
+    let after = waves::read(&folder.0.join("after.litzwave")).unwrap();
+    assert_eq!(before.channels(), after.channels());
+    assert_eq!(before.rows().len(), after.rows().len());
+    assert!(before.rows().len() > 0);
+    let column = before
+        .channels()
+        .iter()
+        .position(|channel| channel.name == "VC_V")
+        .unwrap();
+    for (old, new) in before.rows().zip(after.rows()) {
+        assert_eq!(old[0], new[0]);
+        let (old_voltage, new_voltage) = (old[column], new[column]);
+        let scale = old_voltage.abs().max(new_voltage.abs());
+        assert!(
+            (old_voltage - new_voltage).abs() <= 1e-9 * scale,
+            "VC_V at {} s: {old_voltage} vs {new_voltage}",
+            old[0]
+        );
+    }
+}
+
+#[test]
 fn renaming_a_recorded_inductor_preserves_samples_and_undo_restores_file() {
     use litzsim_core::waves;
 

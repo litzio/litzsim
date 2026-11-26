@@ -1,6 +1,6 @@
 use super::{CircuitV1, Document, Error, Mirror, Part, RecordQuantity, part_definition};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase", deny_unknown_fields)]
@@ -93,8 +93,7 @@ pub struct Receipt {
     pub modified: Vec<String>,
     pub deleted: Vec<String>,
     pub nets: BTreeMap<String, NetChange>,
-    /// Parts that kept their data under a new ID, as old ID → new ID.
-    /// They are not listed in `created` or `deleted`.
+    /// Surviving parts with a new ID, as old ID → new ID.
     pub renamed: BTreeMap<String, String>,
     /// Voltage sources whose two terminals share one net after, but not before.
     pub shorted_sources: Vec<String>,
@@ -113,8 +112,13 @@ pub fn apply(
 ) -> Result<EditResult, Error> {
     let before = check_revision(document, expected_revision)?;
     let mut next = document.clone();
-    // Current ID → ID before the batch, for parts renamed in this batch.
-    let mut origins = BTreeMap::new();
+    // Current ID → original ID, only for surviving parts from before the batch.
+    let mut origins: BTreeMap<&str, &str> = document
+        .0
+        .parts
+        .keys()
+        .map(|id| (id.as_str(), id.as_str()))
+        .collect();
     let mut remaining = ops.iter().enumerate().peekable();
     while let Some((index, op)) = remaining.next() {
         let result = match op {
@@ -133,22 +137,19 @@ pub fn apply(
                 to,
             } => insert_in_branch(&mut next, kind, terminals, *from, *to),
             Operation::Rename { id, new_id } => next.0.rename(id, new_id).map(|()| {
-                let origin = origins.remove(id).unwrap_or_else(|| id.clone());
-                origins.insert(new_id.clone(), origin);
+                if let Some(origin) = origins.remove(id.as_str()) {
+                    origins.insert(new_id, origin);
+                }
+            }),
+            Operation::Delete { id } => next.0.apply(op).map(|()| {
+                origins.remove(id.as_str());
             }),
             _ => next.0.apply(op),
         };
         result.map_err(|error| operation_failed(error, index))?;
     }
-    let renamed = origins
-        .into_iter()
-        .filter(|(id, origin)| {
-            id != origin && document.0.parts.contains_key(origin) && next.0.parts.contains_key(id)
-        })
-        .map(|(id, origin)| (origin, id))
-        .collect();
     Ok(EditResult {
-        receipt: receipt(document, &next, before, renamed),
+        receipt: receipt(document, &next, before, &origins),
         document: next,
     })
 }
@@ -177,9 +178,17 @@ pub fn undo(
         error.message = "Previous snapshot does not match the receipt's before revision".into();
         return Err(error);
     }
+    // Undo compares snapshots, matching parts by ID.
+    let origins = previous
+        .0
+        .parts
+        .keys()
+        .filter(|id| current.0.parts.contains_key(*id))
+        .map(|id| (id.as_str(), id.as_str()))
+        .collect();
     Ok(EditResult {
         document: previous.clone(),
-        receipt: receipt(current, previous, before, BTreeMap::new()),
+        receipt: receipt(current, previous, before, &origins),
     })
 }
 
@@ -584,17 +593,8 @@ fn receipt(
     before: &Document,
     after: &Document,
     before_revision: String,
-    renamed: BTreeMap<String, String>,
+    origins: &BTreeMap<&str, &str>,
 ) -> Receipt {
-    let origins: BTreeMap<&str, &str> = renamed
-        .iter()
-        .map(|(old, new)| (new.as_str(), old.as_str()))
-        .collect();
-    // The ID a part of `after` had in `before`; none for a part new to this edit.
-    let origin = |id: &str| match origins.get(id) {
-        Some(old) => Some((*old).to_owned()),
-        None => (!renamed.contains_key(id)).then(|| id.to_owned()),
-    };
     let mut receipt = Receipt {
         before_revision,
         after_revision: after.revision(),
@@ -602,21 +602,25 @@ fn receipt(
         modified: Vec::new(),
         deleted: Vec::new(),
         nets: BTreeMap::new(),
-        renamed: BTreeMap::new(),
+        renamed: origins
+            .iter()
+            .filter(|(id, old)| id != old)
+            .map(|(&id, &old)| (old.to_owned(), id.to_owned()))
+            .collect(),
         shorted_sources: Vec::new(),
     };
     for (id, part) in &after.0.parts {
-        match origin(id).and_then(|old| Some((before.0.parts.get(&old)?, old))) {
+        match origins.get(id.as_str()).copied() {
             None => receipt.created.push(id.clone()),
-            Some((prior, old))
-                if prior != part
-                    || before.0.layout.get(&old) != after.0.layout.get(id)
+            Some(old)
+                if &before.0.parts[old] != part
+                    || before.0.layout.get(old) != after.0.layout.get(id)
                     || part_definition(&part.kind).unwrap().pins.iter().any(|pin| {
                         let bend = |document: &Document, id: &str| {
                             let bends = document.0.bends.as_ref()?;
                             bends.get(&format!("{id}.{pin}")).cloned()
                         };
-                        bend(before, &old) != bend(after, id)
+                        bend(before, old) != bend(after, id)
                     }) =>
             {
                 receipt.modified.push(id.clone())
@@ -624,11 +628,12 @@ fn receipt(
             Some(_) => {}
         }
     }
+    let survivors: BTreeSet<&str> = origins.values().copied().collect();
     receipt.deleted = before
         .0
         .parts
         .keys()
-        .filter(|id| !renamed.contains_key(*id) && !after.0.parts.contains_key(*id))
+        .filter(|id| !survivors.contains(id.as_str()))
         .cloned()
         .collect();
     for id in before.0.nets.keys().chain(
@@ -665,12 +670,11 @@ fn receipt(
             };
             definition.voltage_source
                 && shorted(&after.0, id)
-                && !origin(id).is_some_and(|old| {
-                    before.0.parts.contains_key(&old) && shorted(&before.0, &old)
-                })
+                && !origins
+                    .get(id.as_str())
+                    .is_some_and(|old| shorted(&before.0, old))
         })
         .map(|(id, _)| id.clone())
         .collect();
-    receipt.renamed = renamed;
     receipt
 }

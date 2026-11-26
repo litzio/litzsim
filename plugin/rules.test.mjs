@@ -146,6 +146,12 @@ test("the name field sends one rename, follows the new ID and shows why the core
   assert.ok(renamed.layout.labels.some(label => label.partId === "Vout" && label.text === "Vout"));
   assert.deepEqual(renamedIds(["VC", "R1"], renamed.receipt.renamed), ["Vout", "R1"]);
   assert.deepEqual(renamedIds(["Vout"], undoRenamed(renamed.receipt)), ["VC"]);
+  const constructorNamed = await call("apply", {
+    document: sheet.document, expectedRevision: sheet.revision, ops: renameOps("VC", "constructor"),
+  });
+  assert.deepEqual(renamedIds(["VC"], constructorNamed.receipt.renamed), ["constructor"]);
+  assert.deepEqual(renamedIds(["constructor"], {}), ["constructor"]);
+  assert.deepEqual(renamedIds(["constructor"], undoRenamed(constructorNamed.receipt)), ["VC"]);
   const undone = await call("undo", {
     document: renamed.document, expectedAfter: renamed.layout.revision, expectedBefore: sheet.revision, previous: sheet.document,
   });

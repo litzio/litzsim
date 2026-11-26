@@ -66,7 +66,7 @@ export function renameOps(id, text) {
 
 /** Selected IDs after an edit whose receipt renamed parts (`renamed` maps old ID → new ID). */
 export function renamedIds(ids, renamed = {}) {
-  return ids.map(id => renamed[id] ?? id);
+  return ids.map(id => Object.hasOwn(renamed, id) ? renamed[id] : id);
 }
 
 /** Undoing an edit gives its renamed parts their old IDs back. */

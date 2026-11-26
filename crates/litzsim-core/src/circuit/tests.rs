@@ -899,6 +899,44 @@ fn rename_updates_every_reference_round_trips_and_names_the_channel() {
 }
 
 #[test]
+fn receipt_distinguishes_new_parts_from_surviving_parts_with_reused_ids() {
+    let buck = Document::from_bytes(BUCK).unwrap();
+    let revision = buck.revision();
+    let add_resistor = || Operation::Add {
+        kind: "resistor".into(),
+        grid: None,
+    };
+    let delete = |id: &str| Operation::Delete { id: id.into() };
+
+    let replaced = apply(&buck, &revision, &[delete("R1"), add_resistor()]).unwrap();
+    assert_eq!(replaced.receipt.created, ["R1"]);
+    assert_eq!(replaced.receipt.deleted, ["R1"]);
+    assert!(replaced.receipt.modified.is_empty());
+    assert!(replaced.receipt.renamed.is_empty());
+
+    let edited = apply(
+        &buck,
+        &revision,
+        &[
+            rename("R1", "R2"),
+            delete("R2"),
+            add_resistor(),
+            rename("R1", "R2"),
+            rename("VC", "Vout"),
+            Operation::Move {
+                id: "Vout".into(),
+                grid: [30, 5],
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(edited.receipt.created, ["R2"]);
+    assert_eq!(edited.receipt.deleted, ["R1"]);
+    assert_eq!(edited.receipt.modified, ["Vout"]);
+    assert_eq!(json!(edited.receipt.renamed), json!({"VC": "Vout"}));
+}
+
+#[test]
 fn rename_rejects_invalid_or_taken_ids_without_changing_the_document() {
     let buck = Document::from_bytes(BUCK).unwrap();
     let revision = buck.revision();
