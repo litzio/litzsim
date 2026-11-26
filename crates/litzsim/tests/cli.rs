@@ -445,10 +445,6 @@ fn file_commands_round_trip_and_reject_failed_batches() {
     assert_eq!(original["pinNets"]["Q1.g"], "gate");
     assert_eq!(original["pinPositions"]["Q1.g"], json!([7, 2]));
     assert_eq!(original["measurements"]["VC"]["fromPin"], "p");
-    let original_document = litzsim_core::circuit::open(&directory.join("buck.litzsim"))
-        .unwrap()
-        .document;
-    let canonical_before = original_document.to_bytes();
 
     let apply = |ok| {
         run(
@@ -535,11 +531,10 @@ fn file_commands_round_trip_and_reject_failed_batches() {
     let final_read = run(&["inspect", "buck.litzsim", "--json"], true);
     assert_eq!(final_read["document"], original["document"]);
     assert_eq!(final_read["pinPositions"], original["pinPositions"]);
-    assert_eq!(final_read["diskRevision"], before);
-    assert_eq!(
-        std::fs::read(directory.join("buck.litzsim")).unwrap(),
-        canonical_before
-    );
+    assert_eq!(final_read["diskRevision"], original["diskRevision"]);
+    assert_eq!(restored["diskRevision"], final_read["diskRevision"]);
+    assert_eq!(restored["document"], final_read["document"]);
+    assert_eq!(std::fs::read(directory.join("buck.litzsim")).unwrap(), BUCK);
     assert_eq!(
         run(&["layout", "buck.litzsim", "--json"], true),
         original_layout
@@ -569,13 +564,9 @@ fn file_commands_round_trip_and_reject_failed_batches() {
 fn deleting_a_part_before_reusing_its_id_reports_the_deletion_and_undo_restores_file() {
     let folder = TestDirectory::new("rename-reused-id");
     let file = folder.0.join("buck.litzsim");
-    let original = litzsim_core::circuit::Document::from_bytes(include_bytes!(
-        "../../../examples/buck.litzsim"
-    ))
-    .unwrap()
-    .to_bytes();
-    std::fs::write(&file, &original).unwrap();
-    std::fs::write(folder.0.join("snapshot.litzsim"), &original).unwrap();
+    let original = include_bytes!("../../../examples/buck.litzsim");
+    std::fs::write(&file, original).unwrap();
+    std::fs::write(folder.0.join("snapshot.litzsim"), original).unwrap();
     std::fs::write(
         folder.0.join("ops.json"),
         r#"[{"op":"delete","id":"R1"},{"op":"rename","id":"VC","newId":"R1"}]"#,

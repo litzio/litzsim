@@ -54,6 +54,33 @@ pub(super) fn save_with_canonicalize(
     mode: SaveMode<'_>,
     canonicalize: impl FnMut(&Path) -> io::Result<PathBuf>,
 ) -> Result<String, Error> {
+    save_bytes(path, &document.to_bytes(), mode, canonicalize, true)
+}
+
+/// Restore the exact bytes of a snapshot already validated by the caller.
+pub fn save_snapshot(
+    path: &Path,
+    bytes: &[u8],
+    expected_disk_revision: &str,
+) -> Result<String, Error> {
+    save_bytes(
+        path,
+        bytes,
+        SaveMode::Replace {
+            expected_disk_revision,
+        },
+        |path| path.canonicalize(),
+        false,
+    )
+}
+
+fn save_bytes(
+    path: &Path,
+    bytes: &[u8],
+    mode: SaveMode<'_>,
+    canonicalize: impl FnMut(&Path) -> io::Result<PathBuf>,
+    preserve_equivalent: bool,
+) -> Result<String, Error> {
     let path = save_path(path, canonicalize)
         .map_err(|error| save_io_error("resolve the save path for", path, error))?;
     if path.file_name().is_none() {
@@ -75,18 +102,18 @@ pub(super) fn save_with_canonicalize(
     lock.lock()
         .map_err(|error| save_io_error("lock", &path, error))?;
 
-    let bytes = document.to_bytes();
     let existing = check_destination(&path, &mode)?;
     if let Some(existing) = existing {
         if existing == bytes
-            || Document::read(&existing).is_ok_and(|(current, has_explicit_defaults)| {
-                !has_explicit_defaults && current.to_bytes() == bytes
-            })
+            || (preserve_equivalent
+                && Document::read(&existing).is_ok_and(|(current, has_explicit_defaults)| {
+                    !has_explicit_defaults && current.to_bytes() == bytes
+                }))
         {
             return Ok(revision(&existing));
         }
     }
-    let staged = StagedFile::write(&path, |file| file.write_all(&bytes))
+    let staged = StagedFile::write(&path, |file| file.write_all(bytes))
         .map_err(|error| save_io_error("stage", &path, error))?;
     match mode {
         SaveMode::New => {
@@ -103,7 +130,7 @@ pub(super) fn save_with_canonicalize(
             replace_file(&staged.0, &path, &mode, |from, to| fs::rename(from, to))?;
         }
     }
-    Ok(revision(&bytes))
+    Ok(revision(bytes))
 }
 
 pub(super) fn replace_file(

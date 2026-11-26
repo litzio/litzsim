@@ -8,7 +8,7 @@ pub use edit::{EditResult, MirrorAxis, NetChange, Operation, Receipt, apply, und
 #[cfg(windows)]
 pub use file::REPLACE_RETRY_DELAYS;
 pub(crate) use file::StagedFile;
-pub use file::{Opened, SaveMode, open, save};
+pub use file::{Opened, SaveMode, open, save, save_snapshot};
 pub use library::{Measurement, PartDefinition, RecordQuantity, part_definition};
 
 use serde::de::{Error as _, MapAccess, Visitor};
