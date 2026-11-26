@@ -235,6 +235,7 @@ fn admit(
             "expected": expected_revision, "actual": revision,
         }));
     }
+    solver::validate_probe_reference(document).map_err(|err| json!(err))?;
     let root = directory.canonicalize().map_err(io_error)?.join("runs");
     if root.to_str().is_none() {
         return Err(error(

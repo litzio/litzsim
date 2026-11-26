@@ -98,6 +98,15 @@ fn strokes(kind: &str) -> Vec<Stroke> {
             line(&[[-32, 0], [-20, 0]]),
             line(&[[20, 0], [32, 0]]),
         ],
+        "voltageProbe" => vec![
+            Stroke::Circle {
+                center: [0, 0],
+                radius: 12,
+                filled: false,
+            },
+            line(&[[0, 12], [0, 32]]),
+            line(&[[-4, 24], [0, 30], [4, 24]]),
+        ],
         "voltmeter" | "pwm" | "sine" => {
             let mut strokes = vec![
                 Stroke::Circle {
@@ -293,8 +302,9 @@ pub(super) fn geometry<'a>(
     let mut current_arrow = None;
     let mut meter_mark = None;
     if let Some(measurement) = measurement {
-        let [from, to] = [offset(measurement.from_pin), offset(measurement.to_pin)];
         if measurement.quantity == "current" {
+            let from = offset(measurement.from_pin);
+            let to = offset(measurement.to_pin.expect("current meter return pin"));
             let tip = to[0] / 3;
             let back = tip - 5 * (to[0] - from[0]).signum();
             current_arrow = Some(Arrow {
@@ -311,17 +321,16 @@ pub(super) fn geometry<'a>(
                 at: center,
                 text: "V",
             });
-            for (pin, mark, position) in [
-                (measurement.from_pin, "+", from),
-                (measurement.to_pin, "−", to),
-            ] {
-                labels.push(caption(
-                    id,
-                    LabelKind::Polarity,
-                    mark.into(),
-                    Some(pin),
-                    at([-35, position[1] / 2]),
-                ));
+            if let Some(to_pin) = measurement.to_pin {
+                for (pin, mark) in [(measurement.from_pin, "+"), (to_pin, "−")] {
+                    labels.push(caption(
+                        id,
+                        LabelKind::Polarity,
+                        mark.into(),
+                        Some(pin),
+                        at([-35, offset(pin)[1] / 2]),
+                    ));
+                }
             }
         }
     }

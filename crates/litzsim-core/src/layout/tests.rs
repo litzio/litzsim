@@ -7,6 +7,36 @@ const RC: &[u8] = include_bytes!("../../../../examples/rc.litzsim");
 const RLC: &[u8] = include_bytes!("../../../../examples/rlc.litzsim");
 const BUCK: &[u8] = include_bytes!("../../../../examples/buck.litzsim");
 
+#[test]
+fn buck_probe_routes_its_only_terminal_without_overlapping_labels() {
+    let document =
+        Document::from_bytes(include_bytes!("../../../../examples/buck-probe.litzsim")).unwrap();
+    let result = layout(&document);
+    check_geometry(&document, &result);
+    let pins: Vec<_> = result
+        .pins
+        .iter()
+        .filter(|(_, pin)| pin.part_id == "VP1")
+        .collect();
+    assert_eq!(pins.len(), 1);
+    assert_eq!(pins[0].0, "VP1.p");
+    assert_eq!(pins[0].1.net_id, Some("sw"));
+    assert_eq!(pins[0].1.at, [352, 96]);
+    let symbol = result
+        .symbols
+        .iter()
+        .find(|symbol| symbol.id == "VP1")
+        .unwrap();
+    assert_eq!(symbol.meter_mark.as_ref().unwrap().text, "V");
+    assert!(
+        result
+            .labels
+            .iter()
+            .any(|label| label.part_id == "VP1" && label.text == "VP1")
+    );
+    assert!(result.issues.is_empty(), "{:?}", result.issues);
+}
+
 fn document(value: &Value) -> Document {
     Document::from_bytes(&serde_json::to_vec(value).unwrap()).unwrap()
 }

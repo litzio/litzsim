@@ -293,7 +293,26 @@ impl Device<'_> {
     }
 }
 
+/// Reject ground-referenced probes before a background run is admitted.
+pub fn validate_probe_reference(document: &Document) -> Result<(), Error> {
+    let parts = &document.circuit().parts;
+    if !parts.values().any(|part| part.kind == "ground")
+        && let Some((id, _)) = parts.iter().find(|(_, part)| {
+            part_definition(&part.kind)
+                .and_then(|definition| definition.measurement)
+                .is_some_and(|measurement| measurement.to_pin.is_none())
+        })
+    {
+        return Err(Error::invalid(
+            id,
+            format!("Voltage probe {id} requires a reference ground"),
+        ));
+    }
+    Ok(())
+}
+
 fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
+    validate_probe_reference(document)?;
     let circuit = document.circuit();
     let pin_nets = circuit.pin_nets();
     let missing: Vec<_> = pin_nets
@@ -346,8 +365,8 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
         let kind = device_kind(id, part)?;
         let (p, n) = match definition.measurement {
             Some(probe) => (probe.from_pin, probe.to_pin),
-            None if matches!(kind, Kind::Nmos(_)) => ("d", "s"),
-            None => (definition.pins[0], definition.pins[1]),
+            None if matches!(kind, Kind::Nmos(_)) => ("d", Some("s")),
+            None => (definition.pins[0], Some(definition.pins[1])),
         };
         let branch =
             (!matches!(kind, Kind::Resistance(_) | Kind::Voltmeter)).then(|| take_index(&mut size));
@@ -355,7 +374,7 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize), Error> {
             id,
             kind,
             p: pin_node(id.as_str(), p),
-            n: pin_node(id.as_str(), n),
+            n: n.and_then(|pin| pin_node(id.as_str(), pin)),
             branch,
             probe_unit: definition.measurement.map(|probe| probe.unit),
             series_resistance,
@@ -490,7 +509,7 @@ fn device_kind(id: &str, part: &Part) -> Result<Kind, Error> {
         }
         "diode" => Kind::Diode,
         "nmos" => Kind::Nmos(None),
-        "voltmeter" => Kind::Voltmeter,
+        "voltmeter" | "voltageProbe" => Kind::Voltmeter,
         "ammeter" => Kind::Ammeter,
         kind => {
             return Err(Error::invalid(
