@@ -152,7 +152,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
                 ("finalValue", 1.0),
             ],
         ),
-        "sum" => (&["in1", "in2", "out"], &[("sign1", 1.0), ("sign2", -1.0)]),
+        "sum" => (&["out"], &[]),
         "gain" => (&["in", "out"], &[("gain", 1.0)]),
         "limiter" => (&["in", "out"], &[("min", 0.0), ("max", 1.0)]),
         "integrator" => (
@@ -196,7 +196,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "voltageSensor" => &[[0, -1], [0, 1], [1, 0]],
         "currentSensor" => &[[-1, 0], [1, 0], [0, -1]],
         "constant" | "step" | "ramp" => &[[1, 0]],
-        "sum" => &[[-1, -1], [-1, 1], [1, 0]],
+        "sum" => &[[1, 0]],
         "gain" | "limiter" | "integrator" | "pi" => &[[-1, 0], [1, 0]],
         "dutyPwm" => &[[0, -1], [0, 1], [-1, 0]],
         _ => &[[0, -1], [0, 1]],
@@ -243,7 +243,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         pin_kinds: match kind {
             "voltageSensor" | "currentSensor" => &[Electrical, Electrical, SignalOutput],
             "constant" | "step" | "ramp" => &[SignalOutput],
-            "sum" => &[SignalInput, SignalInput, SignalOutput],
+            "sum" => &[SignalOutput],
             "gain" | "limiter" | "integrator" | "pi" => &[SignalInput, SignalOutput],
             "dutyPwm" => &[Electrical, Electrical, SignalInput],
             _ => &[],

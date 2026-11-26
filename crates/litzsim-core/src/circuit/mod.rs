@@ -1,6 +1,7 @@
 mod edit;
 mod file;
 mod library;
+mod sum;
 #[cfg(test)]
 mod tests;
 
@@ -11,13 +12,14 @@ pub(crate) use file::StagedFile;
 pub use file::{Opened, SaveMode, open, save, save_snapshot};
 pub(crate) use library::PinKind;
 pub use library::{Measurement, PartDefinition, RecordQuantity, part_definition};
+pub(crate) use sum::Sum;
 
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::fmt;
+use std::{borrow::Cow, collections::BTreeMap};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,6 +146,38 @@ impl Record {
 }
 
 impl Part {
+    pub(crate) fn sum(&self) -> Option<Sum> {
+        (self.kind == "sum").then(|| Sum::read("sum", &self.parameters).expect("validated sum"))
+    }
+
+    pub(crate) fn pins(&self) -> Vec<(Cow<'static, str>, [i32; 2], PinKind)> {
+        if let Some(sum) = self.sum() {
+            return sum
+                .ports()
+                .enumerate()
+                .map(|(index, (_, offset))| {
+                    (
+                        format!("in{}", index + 1).into(),
+                        offset,
+                        PinKind::SignalInput,
+                    )
+                })
+                .chain([(
+                    "out".into(),
+                    [sum.output_column(), 0],
+                    PinKind::SignalOutput,
+                )])
+                .collect();
+        }
+        let definition = part_definition(&self.kind).expect("validated part");
+        definition
+            .pins
+            .iter()
+            .zip(definition.pin_offsets)
+            .map(|(&pin, &offset)| (pin.into(), offset, definition.pin_kind(pin)))
+            .collect()
+    }
+
     fn series_resistance_at_default(&self) -> Option<&'static str> {
         let (key, default) = part_definition(&self.kind)?.series_resistance()?;
         (self.parameters.get(key)?.as_f64() == Some(default)).then_some(key)
@@ -269,6 +303,7 @@ pub(crate) struct LayoutPart<'a> {
     pub kind: &'a str,
     pub parameters: &'a BTreeMap<String, Value>,
     pub placement: Placement,
+    pub sum: Option<Sum>,
 }
 
 impl Document {
@@ -278,6 +313,7 @@ impl Document {
             kind: &part.kind,
             parameters: &part.parameters,
             placement: self.0.layout.get(id).copied().unwrap_or_default(),
+            sum: part.sum(),
         })
     }
 
@@ -314,6 +350,12 @@ impl Document {
     fn read(bytes: &[u8]) -> Result<(Self, bool), Error> {
         let mut circuit: CircuitV1 = serde_json::from_slice(bytes)
             .map_err(|error| Error::new("invalidCircuit", error.to_string()))?;
+        let mut has_legacy_sum = false;
+        for (id, part) in &mut circuit.parts {
+            if part.kind == "sum" {
+                has_legacy_sum |= Sum::migrate_legacy(id, &mut part.parameters)?;
+            }
+        }
         circuit.validate()?;
         let mut has_explicit_resistance_defaults = false;
         for position in circuit.layout.values_mut() {
@@ -330,10 +372,16 @@ impl Document {
                 }
             }
             for value in part.parameters.values_mut() {
-                *value = value.as_f64().expect("validated parameter").into();
+                if let Some(number) = value.as_f64() {
+                    *value = number.into();
+                }
             }
         }
-        Ok((Self(circuit), has_explicit_resistance_defaults))
+        // An unchanged legacy document keeps its entire original snapshot.
+        Ok((
+            Self(circuit),
+            has_explicit_resistance_defaults && !has_legacy_sum,
+        ))
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -370,9 +418,9 @@ impl Document {
         for (id, part) in &self.0.parts {
             let definition = part_definition(&part.kind).expect("validated part");
             let position = self.0.layout.get(id).copied().unwrap_or_default();
-            for (pin, offset) in definition.pins.iter().zip(definition.pin_offsets) {
+            for (pin, offset, _) in part.pins() {
                 let terminal = format!("{id}.{pin}");
-                pin_positions.insert(terminal, position.pin_position(*offset));
+                pin_positions.insert(terminal, position.pin_position(offset));
             }
             if let Some(measurement) = definition.measurement {
                 measurements.insert(id.as_str(), measurement);
@@ -404,8 +452,7 @@ impl CircuitV1 {
     pub(crate) fn pin_nets(&self) -> BTreeMap<String, Option<&str>> {
         let mut pin_nets = BTreeMap::new();
         for (id, part) in &self.parts {
-            let definition = part_definition(&part.kind).expect("validated part");
-            for pin in definition.pins {
+            for (pin, _, _) in part.pins() {
                 pin_nets.insert(format!("{id}.{pin}"), None);
             }
         }
@@ -445,6 +492,10 @@ impl CircuitV1 {
                     id,
                     "part does not support waveform recording",
                 ));
+            }
+            if part.kind == "sum" {
+                Sum::read(id, &part.parameters)?;
+                continue;
             }
             for (key, value) in &part.parameters {
                 if !definition.defaults.iter().any(|(name, _)| name == key) {
@@ -499,13 +550,19 @@ impl CircuitV1 {
 
     pub(crate) fn require_pin(&self, terminal: &str) -> Result<PinKind, Error> {
         if let Some((id, pin)) = terminal.split_once('.')
-            && let Some(definition) = self
-                .parts
-                .get(id)
-                .and_then(|part| part_definition(&part.kind))
-            && definition.pins.contains(&pin)
+            && let Some(part) = self.parts.get(id)
         {
-            return Ok(definition.pin_kind(pin));
+            if part.kind == "sum" {
+                if let Some((_, _, kind)) = part.pins().into_iter().find(|(name, _, _)| name == pin)
+                {
+                    return Ok(kind);
+                }
+            } else {
+                let definition = part_definition(&part.kind).expect("validated part");
+                if definition.pins.contains(&pin) {
+                    return Ok(definition.pin_kind(pin));
+                }
+            }
         }
         Err(Error::invalid(terminal, "unknown terminal"))
     }

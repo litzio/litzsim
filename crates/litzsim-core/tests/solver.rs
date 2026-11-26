@@ -20,6 +20,41 @@ fn channel(wave: &litzsim_core::waves::Waveform, name: &str) -> usize {
 }
 
 #[test]
+fn sum_uses_numbered_inputs_in_list_order() {
+    for (inputs, values, expected) in [
+        ("+-", vec![7.0, 2.0], 5.0),
+        ("|+-", vec![2.0, 7.0], -5.0),
+        ("++|--", vec![8.0, 4.0, 3.0, 2.0], 7.0),
+        ("3", vec![1e16, -1e16, 1.0], 1.0),
+        ("--+", vec![1e16, -1.0, 1e16], 0.0),
+        ("-", vec![7.0], -7.0),
+    ] {
+        let mut value = json!({
+            "version": 1,
+            "simulation": {"stopTime_s": 1, "timeStep_s": 1, "controlSamplePeriod_s": 1},
+            "parts": {"SUM": {"type": "sum", "parameters": {
+                "inputs": inputs, "iconShape": "round"
+            }, "record": {"output": true}}},
+            "nets": {},
+            "layout": {}
+        });
+        for (index, sample) in values.into_iter().enumerate() {
+            let number = index + 1;
+            let source = format!("SRC{number}");
+            value["parts"][&source] = json!({"type": "constant", "parameters": {"value": sample}});
+            value["nets"][format!("net{number}")] =
+                json!([format!("{source}.out"), format!("SUM.in{number}")]);
+        }
+        let wave = simulate(&document(&value), || false).unwrap();
+        assert_eq!(
+            wave.rows().next().unwrap()[channel(&wave, "SUM_out")],
+            expected,
+            "{inputs}"
+        );
+    }
+}
+
+#[test]
 fn control_blocks_sample_in_dependency_order_and_hold_between_ticks() {
     let wave = simulate(&Document::from_bytes(CONTROL.as_bytes()).unwrap(), || false).unwrap();
     let columns = ["CONST1", "RAMP1", "STEP1", "SUM1", "SUM2", "GAIN1", "LIM1"].map(|id| {

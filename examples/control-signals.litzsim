@@ -9,8 +9,8 @@
     "CONST1": {"type": "constant", "parameters": {"value": 2}, "record": {"output": true}},
     "RAMP1": {"type": "ramp", "parameters": {"startTime_s": 0.125, "slope_per_s": 4, "finalValue": 3}, "record": {"output": true}},
     "STEP1": {"type": "step", "parameters": {"stepTime_s": 0.625, "before": 1, "after": -1}, "record": {"output": true}},
-    "SUM1": {"type": "sum", "parameters": {"sign1": 1, "sign2": -1}, "record": {"output": true}},
-    "SUM2": {"type": "sum", "parameters": {"sign1": 1, "sign2": -1}, "record": {"output": true}},
+    "SUM1": {"type": "sum", "parameters": {"inputs": "|+-", "iconShape": "round"}, "record": {"output": true}},
+    "SUM2": {"type": "sum", "parameters": {"inputs": "|+-", "iconShape": "round"}, "record": {"output": true}},
     "GAIN1": {"type": "gain", "parameters": {"gain": -2}, "record": {"output": true}},
     "LIM1": {"type": "limiter", "parameters": {"min": 0.25, "max": 1.25}, "record": {"output": true}}
   },

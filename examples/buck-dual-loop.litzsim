@@ -25,13 +25,13 @@
       "type": "ramp",
       "parameters": {"startTime_s": 0, "slope_per_s": 2500, "finalValue": 5}
     },
-    "ERR_V": {"type": "sum", "parameters": {"sign1": 1, "sign2": -1}},
+    "ERR_V": {"type": "sum", "parameters": {"inputs": "|+-", "iconShape": "round"}},
     "PI_V": {
       "type": "pi",
       "parameters": {"kp": 2.212, "ki": 8338, "initialIntegral": 0, "min": 0.25, "max": 4}
     },
     "I_REF": {"type": "limiter", "parameters": {"min": 0.25, "max": 4}},
-    "ERR_I": {"type": "sum", "parameters": {"sign1": 1, "sign2": -1}},
+    "ERR_I": {"type": "sum", "parameters": {"inputs": "|+-", "iconShape": "round"}},
     "PI_I": {
       "type": "pi",
       "parameters": {"kp": 0.262, "ki": 823, "initialIntegral": 0, "min": 0, "max": 0.9},

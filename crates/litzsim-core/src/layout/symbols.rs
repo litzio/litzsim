@@ -2,7 +2,7 @@ use super::{
     Arrow, GRID_PITCH, Issue, Label, LabelKind, LabelMetrics, MeterMark, Obstacle, Pin, Point,
     Rect, Stroke, Symbol, Target, add, scene,
 };
-use crate::circuit::{LayoutPart, Measurement, Mirror, PinKind, Placement, part_definition};
+use crate::circuit::{LayoutPart, Measurement, Mirror, PinKind, Placement, Sum, part_definition};
 use std::collections::BTreeMap;
 
 type LocalPoint = [i32; 2];
@@ -81,7 +81,6 @@ fn control_block(kind: &str) -> Vec<Stroke> {
         "constant" => body.push(line(&[[-12, 0], [12, 0]])),
         "step" => body.push(line(&[[-12, 6], [0, 6], [0, -6], [12, -6]])),
         "ramp" => body.push(line(&[[-12, 6], [-8, 6], [5, -6], [12, -6]])),
-        "sum" => body.push(line(&[[7, -9], [-7, -9], [1, 0], [-7, 9], [7, 9]])),
         "gain" => body.extend([
             line(&[[-6, -9], [-6, 9]]),
             line(&[[6, -9], [-6, 0], [6, 9]]),
@@ -90,6 +89,56 @@ fn control_block(kind: &str) -> Vec<Stroke> {
         _ => {}
     }
     body
+}
+
+fn sum_strokes(sum: &Sum) -> Vec<Stroke> {
+    let pitch = GRID_PITCH as i32;
+    let column = sum.output_column();
+    let radius = column * pitch - if column == 1 { 10 } else { 24 };
+    let mut strokes = if sum.round {
+        vec![Stroke::Circle {
+            center: [0, 0],
+            radius,
+            filled: false,
+        }]
+    } else {
+        let top = -(sum.rows() / 2) * pitch - 12;
+        let bottom = top + (sum.rows() - 1) * pitch + 24;
+        vec![
+            line(&[
+                [-20, top],
+                [20, top],
+                [20, bottom],
+                [-20, bottom],
+                [-20, top],
+            ]),
+            line(&[[9, -9], [-5, -9], [3, 0], [-5, 9], [9, 9]]),
+        ]
+    };
+    for (plus, offset) in sum.ports() {
+        let tip = offset.map(|value| value * pitch);
+        let (edge, mark) = if sum.round {
+            let [x, y] = tip.map(f64::from);
+            let distance = x.hypot(y);
+            let at = |r| tip.map(|n| (f64::from(n) / distance * f64::from(r)).round() as i32);
+            (at(radius), at(radius - 8))
+        } else {
+            ([-20, tip[1]], [-13, tip[1]])
+        };
+        let [x, y] = mark;
+        strokes.extend([line(&[edge, tip]), line(&[[x - 4, y], [x + 4, y]])]);
+        if plus {
+            strokes.push(line(&[[x, y - 4], [x, y + 4]]));
+        }
+    }
+    strokes.extend([
+        line(&[
+            [if sum.round { radius } else { 20 }, 0],
+            [column * pitch, 0],
+        ]),
+        output_tip([column, 0]),
+    ]);
+    strokes
 }
 
 fn output_tip([column, row]: LocalPoint) -> Stroke {
@@ -281,9 +330,13 @@ fn transform_bounds(local: Rect, placement: Placement, center: Point) -> Rect {
     )
 }
 
-pub(super) fn ink_bounds(kind: &str, placement: Placement) -> impl Iterator<Item = Rect> {
+pub(super) fn ink_bounds(
+    kind: &str,
+    placement: Placement,
+    sum: Option<&Sum>,
+) -> impl Iterator<Item = Rect> {
     let center = scene([placement.x.into(), placement.y.into()]);
-    strokes(kind)
+    sum.map_or_else(|| strokes(kind), sum_strokes)
         .into_iter()
         .map(move |stroke| transform_bounds(local_bounds(&stroke), placement, center))
 }
@@ -378,21 +431,17 @@ pub(super) fn geometry<'a>(
             .expect("defined terminal");
         definition.pin_offsets[index].map(|n| n * GRID_PITCH as i32)
     };
-    let mut strokes = strokes(kind);
-    for (&pin, &pin_offset) in definition.pins.iter().zip(definition.pin_offsets) {
-        if definition.pin_kind(pin) == PinKind::SignalOutput {
-            strokes.push(output_tip(pin_offset));
-        }
-    }
-    if kind == "sum" {
-        for (pin, key) in [("in1", "sign1"), ("in2", "sign2")] {
-            let [_, y] = offset(pin);
-            strokes.push(line(&[[-15, y], [-7, y]]));
-            if part.parameters[key].as_f64().expect("validated sign") > 0.0 {
-                strokes.push(line(&[[-11, y - 4], [-11, y + 4]]));
+    let strokes = if let Some(sum) = &part.sum {
+        sum_strokes(sum)
+    } else {
+        let mut strokes = strokes(kind);
+        for (&pin, &pin_offset) in definition.pins.iter().zip(definition.pin_offsets) {
+            if definition.pin_kind(pin) == PinKind::SignalOutput {
+                strokes.push(output_tip(pin_offset));
             }
         }
-    }
+        strokes
+    };
     let local = strokes
         .iter()
         .map(local_bounds)

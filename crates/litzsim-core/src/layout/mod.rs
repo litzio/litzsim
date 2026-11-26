@@ -1,7 +1,7 @@
 mod routing;
 mod symbols;
 
-use crate::circuit::{Document, Error, RecordQuantity, part_definition};
+use crate::circuit::{Document, Error, RecordQuantity};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -244,12 +244,11 @@ pub fn layout(document: &Document) -> Layout<'_> {
     for part in document.layout_parts() {
         let measurement = inspection.measurements.get(part.id);
         let (symbol, labels) = symbols::geometry(part, measurement);
-        let definition = part_definition(symbol.kind).expect("validated part");
-        for pin in definition.pins {
+        for (pin, _, kind) in document.circuit().parts[symbol.id].pins() {
             let id = format!("{}.{pin}", symbol.id);
             let at = scene(inspection.pin_positions[&id]);
             let net_id = inspection.pin_nets[&id];
-            let signal_direction = match definition.pin_kind(pin) {
+            let signal_direction = match kind {
                 crate::circuit::PinKind::Electrical => None,
                 crate::circuit::PinKind::SignalInput => Some("input"),
                 crate::circuit::PinKind::SignalOutput => Some("output"),
@@ -366,11 +365,11 @@ pub(crate) fn series_part_overlap<'a>(
     placement: crate::circuit::Placement,
     endpoints: [Point; 2],
 ) -> Option<&'a str> {
-    let inserted: Vec<_> = symbols::ink_bounds(kind, placement).collect();
+    let inserted: Vec<_> = symbols::ink_bounds(kind, placement, None).collect();
     document
         .layout_parts()
         .find(|part| {
-            symbols::ink_bounds(part.kind, part.placement).any(|neighbor| {
+            symbols::ink_bounds(part.kind, part.placement, part.sum.as_ref()).any(|neighbor| {
                 inserted.iter().any(|&stroke| {
                     // A lead may meet its neighbor at the end of the cut.
                     stroke.intersection(neighbor).is_some_and(|contact| {

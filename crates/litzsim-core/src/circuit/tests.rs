@@ -84,14 +84,14 @@ fn resistance_defaults_stay_out_of_files_and_remain_editable() {
     let explicit = Document::from_bytes(&serde_json::to_vec(&explicit).unwrap()).unwrap();
     assert_eq!(explicit.to_bytes(), original.to_bytes());
 
-    let set_esr = |document: &Document, value| {
+    let set_esr = |document: &Document, value: f64| {
         apply(
             document,
             &document.revision(),
             &[Operation::SetParameter {
                 id: "C1".into(),
                 key: "esr_ohm".into(),
-                value,
+                value: value.into(),
             }],
         )
         .unwrap()
@@ -326,7 +326,7 @@ fn builds_archived_buck_topology_using_only_apply() {
             ops.push(Operation::SetParameter {
                 id: new_id.clone(),
                 key: key.clone(),
-                value: value.as_f64().unwrap(),
+                value: value.clone(),
             });
         }
     }

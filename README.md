@@ -70,7 +70,7 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 | `move` | `id`, `grid: [x,y]` |
 | `rotate` | `id`. 현재 자세에서 시계 방향으로 90° 회전합니다. |
 | `mirror` | `id`, `axis`(`horizontal`은 좌우, `vertical`은 상하). 회로도 축을 기준으로 반전합니다. |
-| `setParameter` | `id`, `key`(예: `resistance_ohm`), `value` |
+| `setParameter` | `id`, `key`(예: `resistance_ohm`), `value`(합산의 `inputs`와 `iconShape`는 문자열) |
 | `setRecording` | `id`, `quantity`(`voltage`, `current`, `output` 중 하나), `enabled`(`true` 또는 `false`). 지원 여부는 `layout`의 소자별 `recordable` 배열에 표시됩니다. |
 | `connect` | `a`, `b`(`Q1.g`처럼 소자 ID와 단자명) |
 | `disconnect` | `pin` |
@@ -83,6 +83,8 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 ### 회로 파일과 상주 모드
 
 `.litzsim` v1의 `parts`, `nets`, `layout`, `bends`, `simulation`을 읽고 안정된 순서와 숫자 표기로 저장합니다. `layout`의 `rotation`은 기존 0/90/180/270° 규약을 따릅니다. 선택 필드 `mirror`는 회전 후 적용할 반전 방향입니다. 양축 반전(`both`)은 180°를 더한 회전으로 정규화하고, 0° 회전과 반전 없음은 해당 필드를 생략합니다. 반전과 회전 후에도 단자 이름, 네트, 계기 극성은 유지합니다.
+
+`version`은 1을 유지합니다. 합산의 `parameters`에는 문자열 `inputs`와 `iconShape`를 저장합니다. 기존 숫자형 `sign1`과 `sign2`는 열 때 같은 부호 순서의 원형 합산으로 변환합니다. 수정 없이 같은 파일에 저장하면 기존 파일 바이트를 유지하고, 회로를 수정해 저장하면 새 파라미터를 씁니다.
 
 `voltageProbe`는 v1 소자 종류이며, 단자 `p` 하나와 빈 `parameters` 객체를 사용합니다. 새 소자는 `VP1`처럼 번호를 붙입니다. `inspect`에서 노드 전압계의 `fromPin`은 `p`, `toPin`은 접지 기준을 뜻하는 `null`입니다. 연결과 배치는 다른 소자와 같은 `nets`와 `layout`에 저장합니다.
 
@@ -148,12 +150,16 @@ Litzio 화면의 **측정 → 노드 전압계** 또는 `N`으로 배치한 뒤,
 | `constant` | `CONST` | — | — | `out` | `value`를 출력합니다. |
 | `step` | `STEP` | — | — | `out` | `stepTime_s` 전에는 `before`, 해당 시각부터 `after`를 출력합니다. |
 | `ramp` | `RAMP` | — | — | `out` | `startTime_s`부터 0에서 `slope_per_s` 기울기로 변하며 `finalValue`에 도달하면 유지합니다. |
-| `sum` | `SUM` | — | `in1`, `in2` | `out` | `sign1 × in1 + sign2 × in2`. 부호는 각각 +1 또는 −1입니다. |
+| `sum` | `SUM` | — | `in1`…`inN` | `out` | `inputs` 문자열의 부호를 순서대로 적용해 스칼라를 합산합니다. `iconShape`는 `round` 또는 `rectangular`입니다. |
 | `gain` | `GAIN` | — | `in` | `out` | `gain × in`을 출력합니다. |
 | `limiter` | `LIM` | — | `in` | `out` | 입력을 `min` 이상, `max` 이하로 제한합니다. |
 | `integrator` | `INT` | — | `in` | `out` | `initialValue`에서 시작해 입력을 적분합니다. `min`, `max`는 적분 상태와 출력에 함께 적용됩니다. |
 | `pi` | `PI` | — | `in` | `out` | 비례 이득 `kp`, 적분 이득 `ki`, 적분 상태 초기값 `initialIntegral`, 출력 한계 `min`, `max`를 지정합니다. |
 | `dutyPwm` | `PWM` | `out`, `ref` | `duty` | — | 양의 `frequency_Hz`와 `high_V`를 지정합니다. `out`은 NMOS의 게이트, `ref`는 소스에 연결합니다. |
+
+합산의 **입력 부호**에 `+`와 `-`를 나열하면 각 부호에 입력 하나가 생깁니다. `|`는 빈 자리입니다. 예를 들어 `++|--`는 입력 네 개를 차례대로 더하고, 더하고, 빼고, 뺍니다. 양의 정수를 문자열로 넣으면 모두 덧셈이며 `"3"`은 `+++`와 같습니다. 한 블록은 최대 65,535자리를 받습니다. 새 합산은 제어 오차 계산에 맞춘 `|+-`와 원형으로 시작합니다. [Simulink Sum](https://kr.mathworks.com/help/simulink/slref/sum.html)의 기본 부호 목록은 `|++`입니다.
+
+**모양**에서 원형과 사각형을 선택합니다. 원형의 자리는 12시부터 반시계 방향으로, 사각형은 위에서 아래로 배치하고 출력은 오른쪽에 둡니다. 연결된 단자를 없애려면 먼저 연결을 끊습니다. 잘못된 부호 목록이나 연결을 없애는 편집은 거절되고 입력 칸에 오류가 표시됩니다.
 
 제어 블록을 사용하는 회로는 `simulation.controlSamplePeriod_s`에 양의 샘플 주기 Ts를 지정합니다. 해석기는 0, Ts, 2Ts, …에서 스텝을 나눕니다. 센서는 그 시각까지 적분한 전기 해의 왼쪽 극한을 읽습니다. 스위치 에지와 겹쳐도 다음 구간의 스위치 상태로 다시 풀기 전에 읽습니다. 시각 0에서는 초기조건 해를 읽습니다. 모든 블록은 해당 샘플의 입력을 의존 순서에 따라 평가하며, 새 출력은 그 시각부터 다음 샘플까지 유지됩니다(ZOH). 제어 블록이 없는 회로는 이 설정에 따른 스텝 분할이 없습니다.
 

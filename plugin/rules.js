@@ -93,3 +93,6 @@ export function renameProblem(error) {
   if (/invalid new ID/.test(message)) return "영문자로 시작하고 영문자·숫자·밑줄(_)만 쓸 수 있습니다.";
   return message || "이름을 바꾸지 못했습니다.";
 }
+export function sumParameterOps(id, key, value) {
+  return [{ op: "setParameter", id, key, value }];
+}

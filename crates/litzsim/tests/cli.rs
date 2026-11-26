@@ -283,6 +283,124 @@ fn timed_switch_edit_saves_and_undo_restores_the_original_circuit() {
 }
 
 #[test]
+fn legacy_sum_save_and_port_edits_preserve_the_expected_bytes() {
+    use std::fs;
+
+    let folder = TestDirectory::new("sum");
+    let file = "circuit.litzsim";
+    let path = folder.0.join(file);
+    let current = include_str!("../../../examples/control-signals.litzsim");
+    let legacy = current.replace(
+        r#""inputs": "|+-", "iconShape": "round""#,
+        r#""sign1": 1, "sign2": -1"#,
+    );
+    assert_ne!(legacy, current);
+    fs::write(&path, &legacy).unwrap();
+    fs::write(folder.0.join("before.litzsim"), &legacy).unwrap();
+    fs::write(folder.0.join("current.litzsim"), current).unwrap();
+    let opened = folder.run(&["inspect", file, "--json"], true);
+    let revision = opened["revision"].as_str().unwrap();
+    assert_eq!(
+        opened["document"]["parts"]["SUM1"]["parameters"],
+        json!({"inputs": "|+-", "iconShape": "round"})
+    );
+    folder.run(&["run", file, "legacy.litzwave"], true);
+    folder.run(&["run", "current.litzsim", "current.litzwave"], true);
+    assert_eq!(
+        fs::read(folder.0.join("legacy.litzwave")).unwrap(),
+        fs::read(folder.0.join("current.litzwave")).unwrap()
+    );
+
+    let apply = |expected: &str, ops: Value, ok: bool| {
+        fs::write(folder.0.join("ops.json"), ops.to_string()).unwrap();
+        folder.run(
+            &["apply", file, "--expect", expected, "--ops", "ops.json"],
+            ok,
+        )
+    };
+    let noop = apply(revision, json!([]), true);
+    assert_eq!(noop["diskRevision"], opened["diskRevision"]);
+    assert_eq!(fs::read(&path).unwrap(), legacy.as_bytes());
+
+    let edited = apply(
+        revision,
+        json!([
+            {"op": "setParameter", "id": "SUM1", "key": "inputs", "value": "|+--"},
+            {"op": "connect", "a": "STEP1.out", "b": "SUM1.in3"}
+        ]),
+        true,
+    );
+    let edited_revision = edited["receipt"]["afterRevision"].as_str().unwrap();
+    let edited_bytes = fs::read(&path).unwrap();
+    fs::write(folder.0.join("expanded.litzsim"), &edited_bytes).unwrap();
+    let reopened = folder.run(&["inspect", file, "--json"], true);
+    assert_eq!(reopened["document"], edited["document"]);
+    assert_eq!(reopened["revision"], edited_revision);
+    assert!(
+        edited_bytes
+            .windows(b"\"inputs\"".len())
+            .any(|word| word == b"\"inputs\"")
+    );
+
+    let shrink = json!({"op": "setParameter", "id": "SUM1", "key": "inputs", "value": "|+-"});
+    let refused = apply(
+        edited_revision,
+        json!([
+            {"op": "move", "id": "SUM1", "grid": [100, 100]},
+            shrink
+        ]),
+        false,
+    );
+    assert_eq!(refused["error"]["targetId"], "SUM1");
+    assert_eq!(refused["error"]["operation"], 2);
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("SUM1.in3")
+    );
+    assert_eq!(fs::read(&path).unwrap(), edited_bytes);
+
+    let shrunk = apply(
+        edited_revision,
+        json!([
+            {"op": "disconnect", "pin": "SUM1.in3"},
+            shrink
+        ]),
+        true,
+    );
+    assert_eq!(shrunk["receipt"]["afterRevision"], revision);
+    folder.run(
+        &[
+            "undo",
+            file,
+            "--expect",
+            revision,
+            "--before",
+            edited_revision,
+            "--previous",
+            "expanded.litzsim",
+        ],
+        true,
+    );
+    assert_eq!(fs::read(&path).unwrap(), edited_bytes);
+    folder.run(
+        &[
+            "undo",
+            file,
+            "--expect",
+            edited_revision,
+            "--before",
+            revision,
+            "--previous",
+            "before.litzsim",
+        ],
+        true,
+    );
+    assert_eq!(fs::read(&path).unwrap(), legacy.as_bytes());
+}
+
+#[test]
 fn control_connections_are_checked_on_load_and_edit_and_undo_restores_bytes() {
     use std::fs;
 
