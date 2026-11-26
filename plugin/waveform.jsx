@@ -315,7 +315,7 @@ export function Waveform({ ui, adapter, file, revision, preferredRun, onBack }) 
   // Live drawing state, read by native input handlers between React renders.
   const live = useRef({
     view: [0, 1], full: [0, 1], exact: null, ranges: new Map(), cursor: [0, 0], seq: 0, frames: 0,
-    waiting: false, measuring: false, measureAgain: false, input: null, drag: null, width: 0, closed: false,
+    waiting: false, measuring: false, measureAgain: false, measureSeq: 0, input: null, drag: null, width: 0, closed: false,
   }).current;
   const run = runs?.find(item => item.runId === runId) ?? null;
   Object.assign(live, { run, graphs, cursorsOn });
@@ -383,21 +383,26 @@ export function Waveform({ ui, adapter, file, revision, preferredRun, onBack }) 
     });
   }
 
+  /** Cursor values and statistics from the core for A (from) and B (to); a reply for older cursors is dropped. */
   function fetchMeasure() {
     const current = live.run;
     const channels = shownChannels(live.graphs);
-    if (!current || !live.cursorsOn || !channels.length || live.closed) return;
+    if (!current || !live.cursorsOn || live.closed) return;
+    live.measureSeq += 1;
+    if (!channels.length) {
+      setReadout(null);
+      return;
+    }
     if (live.measuring) {
       live.measureAgain = true;
       return;
     }
     live.measuring = true;
     live.measureAgain = false;
+    const seq = live.measureSeq;
     const cursor = [...live.cursor];
-    adapter.call("measure", {
-      file, runId: current.runId, channels, from_s: Math.min(...cursor), to_s: Math.max(...cursor),
-    }).then(response => {
-      if (live.run === current && !live.closed) setReadout({ cursor, swapped: cursor[0] > cursor[1], channels: response.channels });
+    adapter.call("measure", { file, runId: current.runId, channels, from_s: cursor[0], to_s: cursor[1] }).then(response => {
+      if (seq === live.measureSeq && live.run === current && !live.closed) setReadout({ cursor, ...response });
     }).catch(failure => { if (!live.closed) fail(failure); })
       .finally(() => {
         live.measuring = false;
@@ -628,15 +633,14 @@ export function Waveform({ ui, adapter, file, revision, preferredRun, onBack }) 
     status: run && run.revision !== revision ? <ui.Status tone="warning" label="현재 회로와 다른 실행" /> : null,
   };
   const editingIndex = graphs.findIndex(graph => graph.id === editing);
+  // The core sends A as `from`, B as `to` and their differences; the screen only formats them.
   const readoutRows = readout?.channels.map(series => {
-    const [a, b] = readout.swapped ? [series.to, series.from] : [series.from, series.to];
     const value = number => formatValue(number, series.unit);
     return {
-      signal: series.name, a: value(a.value), b: value(b.value), delta: value(b.value - a.value),
+      signal: series.name, a: value(series.from.value), b: value(series.to.value), delta: value(series.delta),
       average: value(series.average), rms: value(series.rms), minimum: value(series.minimum), maximum: value(series.maximum),
     };
   }) ?? [];
-  const span = readout ? Math.abs(readout.cursor[1] - readout.cursor[0]) : 0;
 
   if (!runs || !run) {
     return <ui.ScreenLayout fillHeight back={header.back} description={header.description}>
@@ -693,8 +697,8 @@ export function Waveform({ ui, adapter, file, revision, preferredRun, onBack }) 
           {readout ? <>
             <span>{`A ${formatValue(readout.cursor[0], "s")}`}</span>
             <span>{`B ${formatValue(readout.cursor[1], "s")}`}</span>
-            <span>{`Δt ${formatValue(span, "s")}`}</span>
-            <span>{`1/Δt ${span > 0 ? formatValue(1 / span, "Hz") : "—"}`}</span>
+            <span>{`Δt ${formatValue(readout.deltaTime_s, "s")}`}</span>
+            <span>{`1/|Δt| ${readout.frequency_Hz === null ? "—" : formatValue(readout.frequency_Hz, "Hz")}`}</span>
           </> : <span>그래프에 신호를 추가하면 커서 값을 표시합니다.</span>}
         </div>
         {readoutRows.length > 0 && <div style={styles.tableWrap}>

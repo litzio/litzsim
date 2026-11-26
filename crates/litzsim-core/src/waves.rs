@@ -168,9 +168,85 @@ mod tests {
         assert!(close(clipped.average.unwrap(), 1.0));
         assert_eq!(clipped.from.row, 0);
 
-        assert!(ramp.measure(&channels, 3.0, 2.0).is_err());
+        // Cursors in either order: the same interval, signed differences.
+        let reversed = ramp.measure(&channels, 7.5, 2.5).unwrap();
+        let (forward, backward) = (&measured.channels[0], &reversed.channels[0]);
+        assert_eq!(
+            (backward.average, backward.rms),
+            (forward.average, forward.rms)
+        );
+        assert_eq!((forward.delta, backward.delta), (5.0, -5.0));
+        assert_eq!((measured.delta_time, reversed.delta_time), (5.0, -5.0));
+        assert_eq!(
+            (measured.frequency, reversed.frequency),
+            (Some(0.2), Some(0.2))
+        );
+        assert_eq!(ramp.measure(&channels, 3.0, 3.0).unwrap().frequency, None);
+        assert!(ramp.measure(&channels, f64::NAN, 2.0).is_err());
         assert!(ramp.measure(&["missing".into()], 0.0, 1.0).is_err());
         assert!(ramp.measure(&[], 0.0, 1.0).is_err());
+    }
+
+    #[test]
+    fn two_rows_at_one_time_are_a_discontinuity() {
+        // 0 V until t = 2, then 1 V: rows (2, 0) and (2, 1) are the left and right limits.
+        let mut step = Waveform::new([Channel {
+            name: "probe".into(),
+            unit: "V".into(),
+        }]);
+        let samples = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (3.0, 1.0),
+            (4.0, 1.0),
+        ];
+        for (t, v) in samples {
+            step.push(t, [v].into_iter());
+        }
+        let channels = ["probe".to_string()];
+        let measure = |from, to| {
+            let mut measured = step.measure(&channels, from, to).unwrap();
+            measured.channels.remove(0)
+        };
+        // Across the edge: half the interval at 1 V; the extremes are both limits.
+        let across = measure(1.5, 2.5);
+        assert_eq!(across.average, Some(0.5));
+        assert!((across.rms.unwrap() - 0.5_f64.sqrt()).abs() < 1e-15);
+        assert_eq!((across.minimum, across.maximum), (Some(0.0), Some(1.0)));
+        // Ending on the edge takes its left limit, starting there its right limit.
+        let before = measure(1.0, 2.0);
+        assert_eq!((before.average, before.maximum), (Some(0.0), Some(0.0)));
+        let after = measure(2.0, 3.0);
+        assert_eq!((after.average, after.minimum), (Some(1.0), Some(1.0)));
+        // Cursors: exactly on the edge read the left row, just after it the right row.
+        let on = measure(2.0, 2.0);
+        assert_eq!((on.from.row, on.average), (2, Some(0.0)));
+        assert_eq!(measure(2.1, 2.1).from.row, 3);
+        // The envelope keeps both rows, so the plot draws a vertical edge.
+        let view = step.view(&channels, 0.0, 4.0, 4).unwrap();
+        let rows: Vec<_> = view.channels[0]
+            .points
+            .iter()
+            .map(|point| point.row)
+            .collect();
+        assert!(rows.contains(&2) && rows.contains(&3), "{rows:?}");
+
+        // Files keep the pair; a third row at one time is refused.
+        let path =
+            std::env::temp_dir().join(format!("litzsim-edge-{}.litzwave", std::process::id()));
+        let _ = fs::remove_file(&path);
+        stage(&path, &step).unwrap();
+        assert_eq!(read(&path).unwrap().rows().len(), 6);
+        fs::remove_file(&path).unwrap();
+        let mut triple = Waveform::new(step.channels()[1..].iter().cloned());
+        for (t, v) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (1.0, 2.0)] {
+            triple.push(t, [v].into_iter());
+        }
+        stage(&path, &triple).unwrap();
+        assert!(read(&path).is_err());
+        fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -272,12 +348,16 @@ pub fn read(path: &Path) -> io::Result<Waveform> {
         samples.push(value);
     }
     let wave = Waveform { channels, samples };
-    let mut last_time = f64::NEG_INFINITY;
+    // Two rows at the same time are the left and right limits of a discontinuity.
+    let mut last = (f64::NEG_INFINITY, false);
     for row in wave.rows() {
-        if row[0] <= last_time {
-            return Err(invalid("waveform time must strictly increase"));
+        let repeated = row[0] == last.0;
+        if row[0] < last.0 || (repeated && last.1) {
+            return Err(invalid(
+                "waveform time must increase, with at most two rows at one time",
+            ));
         }
-        last_time = row[0];
+        last = (row[0], repeated);
     }
     Ok(wave)
 }
@@ -340,6 +420,12 @@ pub struct Series<'a> {
 #[serde(rename_all = "camelCase")]
 pub struct Measurement<'a> {
     pub time_range: [f64; 2],
+    /// `to - from`; negative when the second cursor is earlier.
+    #[serde(rename = "deltaTime_s")]
+    pub delta_time: f64,
+    /// `1 / |to - from|`, null when the cursors coincide.
+    #[serde(rename = "frequency_Hz")]
+    pub frequency: Option<f64>,
     pub channels: Vec<Statistics<'a>>,
 }
 
@@ -351,6 +437,8 @@ pub struct Statistics<'a> {
     pub unit: &'a str,
     pub from: Point,
     pub to: Point,
+    /// `to.value - from.value`.
+    pub delta: f64,
     pub average: Option<f64>,
     pub rms: Option<f64>,
     pub minimum: Option<f64>,
@@ -447,7 +535,8 @@ impl Waveform {
         })
     }
 
-    /// Values at two cursor times and statistics of the interval between them.
+    /// Values at two cursor times, in either order, their differences and
+    /// statistics of the interval between them.
     ///
     /// Each cursor reports the original row nearest to its time (the earlier
     /// row on a tie). The statistics treat the signal as the straight lines
@@ -455,13 +544,14 @@ impl Waveform {
     /// `from..=to` covered by the result: the time average, RMS, minimum and
     /// maximum, with interpolated values at both ends of the interval.
     pub fn measure(&self, channels: &[String], from: f64, to: f64) -> io::Result<Measurement<'_>> {
-        if !from.is_finite() || !to.is_finite() || from > to || channels.is_empty() {
-            return Err(invalid(
-                "Expected finite cursor times in order and channels",
-            ));
+        if !from.is_finite() || !to.is_finite() || channels.is_empty() {
+            return Err(invalid("Expected finite cursor times and channels"));
         }
         let last = self.rows().len() - 1;
-        let (low, high) = (from.max(self.row(0)[0]), to.min(self.row(last)[0]));
+        let (low, high) = (
+            from.min(to).max(self.row(0)[0]),
+            from.max(to).min(self.row(last)[0]),
+        );
         let (from_row, to_row) = (self.nearest(from), self.nearest(to));
         let channels = self
             .columns(channels)?
@@ -473,11 +563,13 @@ impl Waveform {
                     value: self.row(row)[column],
                 };
                 let interval = (low <= high).then(|| self.interval(column, low, high));
+                let (from, to) = (point(from_row), point(to_row));
                 Statistics {
                     name: &self.channels[column].name,
                     unit: &self.channels[column].unit,
-                    from: point(from_row),
-                    to: point(to_row),
+                    delta: to.value - from.value,
+                    from,
+                    to,
                     average: interval.map(|stats| stats.0),
                     rms: interval.map(|stats| stats.1),
                     minimum: interval.map(|stats| stats.2),
@@ -485,8 +577,11 @@ impl Waveform {
                 }
             })
             .collect();
+        let delta_time = to - from;
         Ok(Measurement {
             time_range: [from, to],
+            delta_time,
+            frequency: (delta_time != 0.0).then(|| 1.0 / delta_time.abs()),
             channels,
         })
     }
@@ -523,26 +618,39 @@ impl Waveform {
         }
     }
 
-    /// The value on the line between the original rows around `time`, inside the result.
-    fn value_at(&self, column: usize, time: f64) -> f64 {
-        let after = self.time_bound(|t| t <= time);
-        if after == self.rows().len() {
-            return self.row(after - 1)[column];
+    /// The value on the line between the original rows around `time`, inside
+    /// the result. At a discontinuity (two rows at `time`) `after` picks the
+    /// right limit and otherwise the left limit.
+    fn value_at(&self, column: usize, time: f64, after: bool) -> f64 {
+        let next = if after {
+            self.time_bound(|t| t <= time)
+        } else {
+            self.time_bound(|t| t < time)
+        };
+        if next == self.rows().len() {
+            return self.row(next - 1)[column];
         }
-        let (a, b) = (self.row(after - 1), self.row(after));
+        if next == 0 || self.row(next)[0] == time {
+            return self.row(next)[column];
+        }
+        let (a, b) = (self.row(next - 1), self.row(next));
         a[column] + (b[column] - a[column]) * (time - a[0]) / (b[0] - a[0])
     }
 
     /// Average, RMS, minimum and maximum of the joined rows over `low..=high`.
+    /// The interval starts with the right limit and ends with the left limit
+    /// of a discontinuity; its two rows add no area. A zero-width interval at
+    /// a discontinuity takes the left limit, as the cursor rows do.
     fn interval(&self, column: usize, low: f64, high: f64) -> (f64, f64, f64, f64) {
-        let first = self.value_at(column, low);
         if low == high {
-            return (first, first.abs(), first, first);
+            let value = self.value_at(column, low, false);
+            return (value, value.abs(), value, value);
         }
+        let first = self.value_at(column, low, true);
         let inside = self.time_bound(|t| t <= low)..self.time_bound(|t| t < high);
         let knots = std::iter::once((low, first))
             .chain(inside.map(|row| (self.row(row)[0], self.row(row)[column])))
-            .chain(std::iter::once((high, self.value_at(column, high))));
+            .chain(std::iter::once((high, self.value_at(column, high, false))));
         let (mut area, mut square, mut minimum, mut maximum) = (0.0, 0.0, first, first);
         let mut previous = (low, first);
         for (t, value) in knots.skip(1) {
@@ -598,13 +706,30 @@ impl Waveform {
             for row in [low.min(high), low.max(high)] {
                 // Include the immediate neighbors of a sharp peak, even when
                 // one of the neighbors belongs to a different pixel bucket.
-                if row > 0 && row + 1 < self.rows().len() {
-                    let before = self.row(row - 1)[column];
+                // Two rows at one time are both sides of a discontinuity; a
+                // peak there is judged against the rows around the pair.
+                let rows = self.rows().len();
+                let twin = |a: usize, b: usize| self.row(a)[0] == self.row(b)[0];
+                let start = if row > 0 && twin(row - 1, row) {
+                    row - 1
+                } else {
+                    row
+                };
+                let end = if row + 1 < rows && twin(row, row + 1) {
+                    row + 1
+                } else {
+                    row
+                };
+                if start > 0 && end + 1 < rows {
+                    let before = self.row(start - 1)[column];
                     let value = self.row(row)[column];
-                    let after = self.row(row + 1)[column];
-                    if (value > before && value > after) || (value < before && value < after) {
-                        let first = (row - 1).max(visible.start);
-                        let last = (row + 1).min(visible.end - 1);
+                    let after = self.row(end + 1)[column];
+                    let level = self.row(start)[column] == self.row(end)[column];
+                    if level
+                        && ((value > before && value > after) || (value < before && value < after))
+                    {
+                        let first = (start - 1).max(visible.start);
+                        let last = (end + 1).min(visible.end - 1);
                         for sample in first..=last {
                             self.push_point(series, sample, column);
                         }

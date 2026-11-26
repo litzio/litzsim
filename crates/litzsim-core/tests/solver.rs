@@ -280,8 +280,14 @@ fn buck_matches_ccm_and_dcm_through_two_pwm_periods() {
             let mut maximum_error = 0.0_f64;
             let mut saw_falling_edge = false;
             let mut saw_rising_edge = false;
+            let mut previous = f64::NAN;
+            let mut right_limits = 0;
             for row in wave.rows() {
                 let t = row[0];
+                // A second row at an edge time is its right limit: the switch
+                // state of the next interval with the same inductor current.
+                let right = t == previous;
+                previous = t;
                 let (phase, start) = if t <= PERIOD {
                     (t, initial)
                 } else {
@@ -294,10 +300,21 @@ fn buck_matches_ccm_and_dcm_through_two_pwm_periods() {
                 };
                 maximum_error = maximum_error.max((row[il] - reference).abs());
                 assert!(row[diode] >= -1e-9, "reverse diode current at {t}");
-                if phase > 0.0 && phase <= FALLING {
+                let at = |edge: f64| (phase - edge).abs() <= 1e-12;
+                if phase > 0.0 && phase <= FALLING && !(right && at(FALLING)) {
                     assert!(
                         row[diode].abs() < 1e-9,
                         "diode current during PWM high at {t}"
+                    );
+                }
+                if right && at(FALLING) {
+                    assert_eq!(row[diode], row[il], "diode takes the current at {t}");
+                }
+                right_limits += usize::from(right);
+                if right && (at(0.0) || at(PERIOD)) {
+                    assert!(
+                        row[diode].abs() < 1e-9,
+                        "diode current after turn-on at {t}"
                     );
                 }
                 if t <= PERIOD {
@@ -310,6 +327,8 @@ fn buck_matches_ccm_and_dcm_through_two_pwm_periods() {
                 saw_rising_edge |= t == PERIOD;
             }
             assert!(saw_falling_edge && saw_rising_edge, "PWM edges absent");
+            // Falling edges each period and rising edges between periods.
+            assert_eq!(right_limits, 2 * cycles - 1, "right-limit rows");
             assert!(maximum_error <= 1e-9, "buck error {maximum_error}");
             assert!((peak - reference_peak).abs() <= 1e-9, "peak {peak}");
             if initial == 0.0 {
@@ -371,9 +390,17 @@ fn nmos_body_diode_conducts_source_to_drain_while_gate_is_low() {
     let wave = simulate(&document(&value), || false).unwrap();
     let ammeter = channel(&wave, "I_A");
     let voltmeter = channel(&wave, "V_V");
+    let mut previous = f64::NAN;
     for row in wave.rows() {
         assert!((row[ammeter] - 0.5).abs() <= 1e-12);
-        let voltage = if row[0] <= 50e-6 { -10.0 } else { 0.0 };
+        // The second row at the 50 µs edge is its right limit, with the gate low.
+        let right = row[0] == previous;
+        previous = row[0];
+        let voltage = if row[0] < 50e-6 || (row[0] == 50e-6 && !right) {
+            -10.0
+        } else {
+            0.0
+        };
         assert!((row[voltmeter] - voltage).abs() <= 1e-12);
     }
 }
@@ -401,4 +428,89 @@ fn stops_between_samples_and_rejects_an_unsupported_gate_driver_before_sampling(
     .unwrap_err();
     assert_eq!(error.target_id.as_deref(), Some("Q1"));
     assert!(error.message.contains("PWM"));
+}
+
+/// Review repro: buck with a gate–source voltmeter VG. After the 50 µs falling
+/// edge the gate is 0 V; the joined rows must not invent a ramp across it.
+#[test]
+fn switching_edges_are_recorded_on_both_sides_and_measured_as_discontinuities() {
+    let mut value: Value = serde_json::from_str(BUCK).unwrap();
+    value["parts"]["VG"] = json!({"type": "voltmeter", "parameters": {}});
+    value["nets"]["gate"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VG.p"));
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VG.n"));
+    let wave = simulate(&document(&value), || false).unwrap();
+    let rows: Vec<_> = wave.rows().collect();
+    let [vg, vc, il, diode] = ["VG_V", "VC_V", "L1_A", "D1_A"].map(|name| channel(&wave, name));
+    let channels: Vec<String> = ["VG_V", "VC_V", "L1_A"].map(String::from).to_vec();
+
+    // The first falling edge has a left (gate high) and a right (gate low) row.
+    let left = (0..rows.len() - 1)
+        .find(|&r| rows[r][0] == rows[r + 1][0])
+        .unwrap();
+    let (te, right) = (rows[left][0], left + 1);
+    assert!((te - 50e-6).abs() < 1e-18);
+    assert_eq!((rows[left][vg], rows[right][vg]), (10.0, 0.0));
+    assert_eq!(rows[right][diode], rows[right][il]);
+    for column in [vc, il] {
+        assert_eq!(rows[left][column], rows[right][column], "continuous signal");
+    }
+
+    // 50.02–50.08 µs lies after the edge: the gate is 0 V throughout.
+    let after = wave.measure(&channels, 50.02e-6, 50.08e-6).unwrap();
+    let gate = &after.channels[0];
+    for stat in [gate.average, gate.rms, gate.minimum, gate.maximum] {
+        assert!(stat.unwrap().abs() <= 1e-12, "{stat:?}");
+    }
+    assert_eq!(gate.from.row, right);
+
+    // Across the edge: 10 V up to te, 0 V after, so by hand mean 10·(te−a)/(b−a).
+    let (a, b) = (49.95e-6, 50.05e-6);
+    let across = wave.measure(&channels, a, b).unwrap();
+    let gate = &across.channels[0];
+    let high = (te - a) / (b - a);
+    assert!((gate.average.unwrap() - 10.0 * high).abs() <= 1e-9);
+    assert!((gate.rms.unwrap() - (100.0 * high).sqrt()).abs() <= 1e-9);
+    assert_eq!((gate.minimum, gate.maximum), (Some(0.0), Some(10.0)));
+    // A cursor exactly on the edge reads the left limit.
+    assert_eq!(
+        wave.measure(&channels, te, te).unwrap().channels[0]
+            .from
+            .row,
+        left
+    );
+
+    // Continuous signals: the same straight-line statistics as without the
+    // right-limit row, computed here from the rows with that row removed.
+    let joined: Vec<_> = (0..rows.len()).filter(|&r| r != right).collect();
+    for (index, column) in [(1, vc), (2, il)] {
+        let at = |t: f64| {
+            let k = joined.iter().position(|&r| rows[r][0] > t).unwrap();
+            let (p, q) = (rows[joined[k - 1]], rows[joined[k]]);
+            p[column] + (q[column] - p[column]) * (t - p[0]) / (q[0] - p[0])
+        };
+        let mut knots = vec![(a, at(a))];
+        knots.extend(
+            joined
+                .iter()
+                .filter(|&&r| rows[r][0] > a && rows[r][0] < b)
+                .map(|&r| (rows[r][0], rows[r][column])),
+        );
+        knots.push((b, at(b)));
+        let (mut area, mut square) = (0.0, 0.0);
+        for pair in knots.windows(2) {
+            let (h, p, q) = (pair[1].0 - pair[0].0, pair[0].1, pair[1].1);
+            area += h * (p + q) / 2.0;
+            square += h * (p * p + p * q + q * q) / 3.0;
+        }
+        let stats = &across.channels[index];
+        let scale = rows.iter().map(|row| row[column].abs()).fold(0.0, f64::max);
+        assert!((stats.average.unwrap() - area / (b - a)).abs() <= 1e-12 * scale);
+        assert!((stats.rms.unwrap() - (square / (b - a)).sqrt()).abs() <= 1e-12 * scale);
+    }
 }

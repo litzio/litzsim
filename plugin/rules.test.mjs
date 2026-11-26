@@ -216,6 +216,12 @@ test("the waveform window opens the newest completed run of the circuit folder a
     assert.equal(measured.channels[1].minimum, voltage.minimum);
     assert.equal(measured.channels[1].to.row, run.rows - 1);
     assert.ok(measured.channels[1].average > voltage.minimum && measured.channels[1].average < voltage.maximum);
+    // The table shows A (from) and B (to) as sent and the core's differences.
+    const swapped = await call("measure", startRequest({ ...request, from_s: run.timeRange[1], to_s: run.timeRange[0] }));
+    assert.equal(swapped.deltaTime_s, -measured.deltaTime_s);
+    assert.equal(swapped.frequency_Hz, 1 / (run.timeRange[1] - run.timeRange[0]));
+    assert.equal(swapped.channels[1].delta, swapped.channels[1].to.value - swapped.channels[1].from.value);
+    assert.equal(swapped.channels[1].average, measured.channels[1].average);
   } finally {
     rmSync(folder, { recursive: true, force: true });
   }

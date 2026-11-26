@@ -889,10 +889,15 @@ fn managed_buck_wave_matches_the_original_rows_and_failed_runs_have_no_wave() {
                 }
             }
             if column == 2 {
-                assert!(rows[from..=to].iter().enumerate().all(|(index, row)| {
-                    index + from == peak || row[column] < rows[peak][column]
-                }));
-                assert!((peak - 1..=peak + 1).all(|row| points.contains(&row)));
+                // The current peak sits on a switching edge, recorded as left and
+                // right limit rows at one time with the same (continuous) value.
+                let tops: Vec<_> = (from..=to)
+                    .filter(|&row| rows[row][column] == rows[peak][column])
+                    .collect();
+                assert!(tops.iter().all(|&row| rows[row][0] == rows[peak][0]));
+                assert!(tops.len() <= 2);
+                let (first, last) = (tops[0], *tops.last().unwrap());
+                assert!((first - 1..=last + 1).all(|row| points.contains(&row)));
             }
         }
     }
@@ -916,13 +921,26 @@ fn managed_buck_wave_matches_the_original_rows_and_failed_runs_have_no_wave() {
         true,
     );
     assert_eq!(measured["timeRange"], json!([a, b]));
+    assert_eq!(measured["deltaTime_s"], b - a);
+    assert_eq!(measured["frequency_Hz"], 1.0 / (b - a));
+    // Nearest row; of two rows at one (edge) time, the one on the cursor's side,
+    // and the left limit when the cursor is exactly on the edge.
     let nearest = |t: f64| {
         (0..rows.len())
-            .min_by(|&x, &y| (rows[x][0] - t).abs().total_cmp(&(rows[y][0] - t).abs()))
+            .min_by(|&x, &y| {
+                (rows[x][0] - t)
+                    .abs()
+                    .total_cmp(&(rows[y][0] - t).abs())
+                    .then(if rows[x][0] < t { y.cmp(&x) } else { x.cmp(&y) })
+            })
             .unwrap()
     };
     for (channel, column) in [(0, 2), (1, 3)] {
         let stats = &measured["channels"][channel];
+        assert_eq!(
+            stats["delta"].as_f64().unwrap(),
+            stats["to"]["value"].as_f64().unwrap() - stats["from"]["value"].as_f64().unwrap()
+        );
         for (cursor, time) in [("from", a), ("to", b)] {
             let row = nearest(time);
             assert_eq!(stats[cursor]["row"], row);
