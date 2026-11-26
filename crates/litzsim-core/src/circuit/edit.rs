@@ -32,7 +32,7 @@ pub enum Operation {
         quantity: RecordQuantity,
         enabled: bool,
     },
-    /// `timeStep_s`, `stopTime_s` or `outputStep_s` in `simulation`.
+    /// Change an integration, output or control timing setting.
     SetSimulation {
         key: String,
         value: f64,
@@ -292,17 +292,14 @@ impl CircuitV1 {
             } => {
                 let part = self.require_part(id)?;
                 let definition = part_definition(&part.kind).expect("validated part");
-                if definition.recording_pins.is_none() {
+                if !definition.recordable().contains(quantity) {
                     return Err(Error::invalid(
                         id,
                         "part does not support waveform recording",
                     ));
                 }
                 let record = &mut self.parts.get_mut(id).unwrap().record;
-                match quantity {
-                    RecordQuantity::Voltage => record.voltage = *enabled,
-                    RecordQuantity::Current => record.current = *enabled,
-                }
+                record.set(*quantity, *enabled);
             }
             Operation::SetSimulation { key, value } => {
                 let simulation = &mut self.simulation;
@@ -310,6 +307,7 @@ impl CircuitV1 {
                     "timeStep_s" => simulation.time_step_s = *value,
                     "stopTime_s" => simulation.stop_time_s = *value,
                     "outputStep_s" => simulation.output_step_s = Some(*value),
+                    "controlSamplePeriod_s" => simulation.control_sample_period_s = Some(*value),
                     _ => {
                         return Err(Error::invalid(
                             "simulation",
@@ -420,6 +418,14 @@ impl CircuitV1 {
         if a == b || left.is_some() && left == right {
             return Ok(());
         }
+        self.validate_net(
+            [a, b].into_iter().chain(
+                [left, right]
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|net| self.nets[net].iter().map(String::as_str)),
+            ),
+        )?;
         // Keep the first pin's net when merging, as in the archived editor.
         let id = left
             .or(right)
@@ -517,9 +523,28 @@ fn insert_in_branch(
 ) -> Result<(), Error> {
     let definition =
         part_definition(kind).ok_or_else(|| Error::invalid(kind, "unknown part type"))?;
-    let &[first, second] = definition.pins else {
+    if definition.is_control() && kind != "currentSensor" {
+        return Err(Error::invalid(
+            kind,
+            "expected a part for electrical series insertion",
+        ));
+    }
+    let mut electrical = definition
+        .pins
+        .iter()
+        .copied()
+        .filter(|pin| !definition.pin_kind(pin).is_signal());
+    let (Some(first), Some(second), None) =
+        (electrical.next(), electrical.next(), electrical.next())
+    else {
         return Err(Error::invalid(kind, "expected a two-terminal part"));
     };
+    if document.0.require_pin(&terminals[0])?.is_signal() {
+        return Err(Error::invalid(
+            &terminals[0],
+            "expected an electrical branch",
+        ));
+    }
     let (net, far) = crate::layout::branch_cut(document, terminals, from, to)?;
     // Center the part on the segment and turn its first pin toward `from`.
     let pitch = crate::layout::GRID_PITCH;
@@ -544,13 +569,14 @@ fn insert_in_branch(
         })
         .filter(|&rotation| rotation != 0);
     let length = from[0].abs_diff(to[0]) + from[1].abs_diff(to[1]);
-    if kind == "ammeter"
+    if matches!(kind, "ammeter" | "currentSensor")
         && length <= (3 * pitch) as u64
-        && let Some(neighbor) = crate::layout::ammeter_overlap(document, placement, [from, to])
+        && let Some(neighbor) =
+            crate::layout::series_part_overlap(document, kind, placement, [from, to])
     {
         return Err(Error::invalid(
             neighbor,
-            format!("ammeter would overlap {neighbor} on this short segment"),
+            format!("{kind} would overlap {neighbor} on this short segment"),
         ));
     }
     let circuit = &mut document.0;

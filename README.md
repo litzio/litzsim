@@ -71,13 +71,13 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 | `rotate` | `id`. 현재 자세에서 시계 방향으로 90° 회전합니다. |
 | `mirror` | `id`, `axis`(`horizontal`은 좌우, `vertical`은 상하). 회로도 축을 기준으로 반전합니다. |
 | `setParameter` | `id`, `key`(예: `resistance_ohm`), `value` |
-| `setRecording` | `id`, `quantity`(`voltage` 또는 `current`), `enabled`(`true` 또는 `false`). 지원 여부는 `layout`의 소자별 `recordable` 배열에 표시됩니다. |
+| `setRecording` | `id`, `quantity`(`voltage`, `current`, `output` 중 하나), `enabled`(`true` 또는 `false`). 지원 여부는 `layout`의 소자별 `recordable` 배열에 표시됩니다. |
 | `connect` | `a`, `b`(`Q1.g`처럼 소자 ID와 단자명) |
 | `disconnect` | `pin` |
 | `delete` | `id` |
 | `rename` | `id`, `newId`. 소자의 ID를 바꾸고 `nets`의 단자, `layout`, `bends`를 함께 고칩니다. 새 ID는 영문자로 시작하는 영문자·숫자·밑줄 32자 이하이고, 회로의 다른 소자 ID와 대소문자를 무시하고 달라야 합니다. 같은 ID, 빈 ID, 규칙 위반은 바꿀 소자 ID를 `targetId`로 담은 오류로 일괄 편집을 취소합니다. 파일 규격은 v1 그대로입니다. |
-| `setSimulation` | `key`(`timeStep_s`, `stopTime_s`, `outputStep_s`), `value` |
-| `insertInBranch` | `type`(두 단자 소자, 예: `ammeter`), `layout` 선분의 `terminals`, `from`, `to`. 선분을 끊고 소자를 직렬로 넣습니다. 첫 단자(전류계 `p`)는 `terminals[0]` 쪽에 연결하므로 전류계는 `terminals[0]` 쪽에서 `terminals[1]` 쪽으로 흐르는 전류를 잽니다. 3격자 이하에서 전류계와 이웃 기호의 획이 겹치면 연산을 거절합니다. [가지에 끼우기](docs/layout.md#가지에-끼우기) |
+| `setSimulation` | `key`(`timeStep_s`, `stopTime_s`, `outputStep_s`, `controlSamplePeriod_s`), `value` |
+| `insertInBranch` | `type`(예: `ammeter`, `currentSensor`), `layout` 전기 선분의 `terminals`, `from`, `to`. 선분을 끊고 소자를 직렬로 넣습니다. 첫 전기 단자(전류계와 전류 센서의 `p`)는 `terminals[0]` 쪽에 연결하므로 `terminals[0]`에서 `terminals[1]` 쪽으로 흐르는 전류가 양수입니다. 3격자 이하에서 전류계나 전류 센서가 이웃 기호와 겹치면 연산을 거절합니다. [가지에 끼우기](docs/layout.md#가지에-끼우기) |
 | `removeBranch` | `layout` 선분의 `terminals`, `from`, `to`. 선택한 선분에서 네트를 나누고, 단자가 하나만 남은 쪽은 미접속으로 만듭니다. [가지 끊기](docs/layout.md#가지-끊기) |
 
 ### 회로 파일과 상주 모드
@@ -86,7 +86,7 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 
 `voltageProbe`는 v1 소자 종류이며, 단자 `p` 하나와 빈 `parameters` 객체를 사용합니다. 새 소자는 `VP1`처럼 번호를 붙입니다. `inspect`에서 노드 전압계의 `fromPin`은 `p`, `toPin`은 접지 기준을 뜻하는 `null`입니다. 연결과 배치는 다른 소자와 같은 `nets`와 `layout`에 저장합니다.
 
-각 소자의 선택 필드 `record`에는 켜진 항목만 저장합니다(예: `{"current":true}`). `voltage`와 `current`는 모두 기본값이 `false`이며 둘 다 꺼져 있으면 `record`를 생략합니다.
+각 소자의 선택 필드 `record`에는 켜진 항목만 저장합니다(예: `{"current":true}`). `voltage`, `current`, `output`은 기본값이 `false`이며 모두 꺼져 있으면 `record`를 생략합니다.
 
 RC·RLC·벅 예제는 [examples](examples/)에 있습니다. [노드 전압계 벅 예제](examples/buck-probe.litzsim)는 스위칭 노드 `sw`에 `VP1.p`를 연결합니다. PFC 예제는 지원 범위 밖 제어 설정이 있어 읽기를 거절합니다. 회로 파일에는 revision이나 Undo 기록을 저장하지 않습니다. 저장 중에는 시스템 임시 폴더의 경로별 OS 잠금을 사용합니다. 신규 저장은 하드 링크를 지원하는 파일시스템에서 완성된 파일을 원자적으로 게시합니다. 동일한 회로로 덮어쓰면 기존 바이트와 `diskRevision`을 유지합니다. 저항 기본값이 파일에 명시돼 있으면 저장할 때 그 키를 생략합니다.
 
@@ -108,7 +108,7 @@ Windows에서 저장 경로 해석이나 교체가 접근 거부 또는 공유 �
 
 결과 파일의 시간은 증가하며, 같은 시각의 두 행은 그 시각의 불연속입니다. 앞 행이 왼쪽 극한, 뒤 행이 오른쪽 극한이고, 한 시각에 세 행 이상은 두지 않습니다. 해석은 PWM 에지 시각을 기록할 때 그 직전 구간의 스위치 상태로 푼 행(왼쪽 극한) 뒤에 오른쪽 극한 행을 하나 더 기록합니다. 오른쪽 극한은 커패시터 전압과 인덕터 전류를 그대로 두고 다음 구간의 스위치 상태로 푼 값입니다. 예를 들어 벅의 하강 에지에서는 게이트 전압이 10 V에서 0 V로, 다이오드 전류가 0에서 인덕터 전류로 바뀌고 인덕터 전류와 출력 전압은 같습니다. 저장 간격으로 기록하지 않는 에지 시각에는 두 행 모두 남지 않습니다. 오른쪽 극한 행은 이후 계산에 쓰지 않으므로 다른 행의 값을 바꾸지 않습니다.
 
-`timeStep_s`는 적분 간격입니다. PWM 에지가 스텝 사이에 있으면 그 시각에서 스텝을 나눕니다. `outputStep_s`를 생략하면 PWM 에지를 포함한 모든 적분 결과를 저장합니다. 적분 간격의 정수배를 지정하면 해당 시간 격자에서만 저장합니다. 두 경우 모두 시각 0과 `stopTime_s`의 표본을 포함합니다. 전압계는 p−n, 전류계는 p→n 방향을 사용합니다. 미접속 단자와 지원 범위 밖 모델은 실행 전에 진단합니다.
+`timeStep_s`는 적분 간격입니다. PWM 에지가 스텝 사이에 있으면 그 시각에서 스텝을 나눕니다. `outputStep_s`를 생략하면 PWM 에지를 포함한 모든 적분 결과를 저장합니다. 적분 간격의 정수배를 지정하면 해당 시간 격자에서만 저장합니다. 두 경우 모두 시각 0과 `stopTime_s`의 표본을 포함합니다. 전압계는 p−n, 전류계는 p→n 방향을 사용합니다. 미접속 전기 단자와 지원 범위 밖 모델은 적분 전에 진단합니다.
 
 노드 전압계는 전류를 흘리지 않고 `p`의 전압에서 접지 전압을 뺀 값을 `VP1_V` 같은 채널에 기록합니다. 접지 소자가 없으면 실행 요청을 거절하고 노드 전압계 ID를 알립니다.
 
@@ -120,7 +120,7 @@ Litzio 화면의 **측정 → 노드 전압계** 또는 `N`으로 배치한 뒤,
 
 저항이 0 Ω인 경로에서 DC 전원과 커패시터의 초기 전압이 단자 극성까지 일치하면 커패시터 전류를 0 A로 초기화합니다. 초기 전압이 다르면 `singularCircuit`에 ESR 또는 전원 내부 저항을 추가하라는 안내가 나옵니다. 이상 전압 제약의 루프, 초기 인덕터 전류에 귀로가 없는 회로, 열린 스위치로 고립된 노드도 특이 행렬을 일으킬 수 있습니다. 구조적 원인을 확인하면 `targetId`에 관련 소자 하나를, `message`에 실패 시각과 원인 및 관련 소자 ID를 표시합니다.
 
-`.litzwave` 파일은 8바이트 서명 `LITZWV02`, 행 수(u64), 채널 메타데이터의 바이트 길이(u32), UTF-8 JSON 채널 배열, 원본 데이터 순서로 저장합니다. 채널 배열의 첫 항목은 `{"name":"time","unit":"s"}`입니다. 이어지는 항목은 `VC_V` 같은 채널 이름과 `V` 또는 `A` 단위를 담습니다. 원본 데이터는 시간순 고정 폭 행으로 구성되며, 각 행에 채널 배열 순서대로 IEEE 754 binary64 값이 들어갑니다. 모든 바이너리 숫자는 리틀엔디언입니다.
+`.litzwave` 파일은 8바이트 서명 `LITZWV02`, 행 수(u64), 채널 메타데이터의 바이트 길이(u32), UTF-8 JSON 채널 배열, 원본 데이터 순서로 저장합니다. 채널 배열의 첫 항목은 `{"name":"time","unit":"s"}`입니다. 이어지는 항목은 `VC_V` 같은 채널 이름과 단위(`V`, `A`, 제어 신호의 `1`)를 담습니다. 원본 데이터는 시간순 고정 폭 행으로 구성되며, 각 행에 채널 배열 순서대로 IEEE 754 binary64 값이 들어갑니다. 모든 바이너리 숫자는 리틀엔디언입니다.
 
 ### 소자별 파형 기록
 
@@ -134,6 +134,27 @@ Litzio 화면의 **측정 → 노드 전압계** 또는 `N`으로 배치한 뒤,
 | 접지, PWM, 전압계, 전류계, 노드 전압계 | 해당 없음 | 해당 없음 |
 
 전압원과 커패시터 기록은 내부 저항이나 ESR을 포함한 외부 단자 기준입니다. 계기의 고유 채널은 항상 기록됩니다.
+
+### 샘플 제어 신호
+
+아래 소자는 `.litzsim` v1의 `parts`에 추가할 수 있습니다. 표의 신호 단자는 기존 `nets`에서 `GAIN1.in`처럼 지정합니다. `layout` 응답은 신호 단자에 `signalDirection`(`input` 또는 `output`)을 표시합니다. 한 신호 출력은 여러 입력을 구동할 수 있습니다. 실행하려면 각 신호 입력의 네트에 출력이 하나 있어야 합니다. 파일을 읽거나 배선을 편집할 때 한 네트에 전기 단자와 신호 단자를 섞거나 신호 출력 둘을 연결하면 관련 소자 ID로 오류를 반환합니다. 해석은 구동되지 않은 입력과 대수 루프도 소자 ID로 진단합니다.
+
+| `type` | ID 접두어 | 전기 단자 | 신호 입력 | 신호 출력 | `parameters`와 동작 |
+| --- | --- | --- | --- | --- | --- |
+| `voltageSensor` | `VS` | `p`, `n` | — | `out` | `gain` × (p−n 전압). 회로에 전류를 흘리지 않습니다. |
+| `currentSensor` | `CS` | `p`, `n` | — | `out` | `gain` × (p→n 전류). 측정할 가지에 직렬로 연결합니다. |
+| `constant` | `CONST` | — | — | `out` | `value`를 출력합니다. |
+| `step` | `STEP` | — | — | `out` | `stepTime_s` 전에는 `before`, 해당 시각부터 `after`를 출력합니다. |
+| `ramp` | `RAMP` | — | — | `out` | `startTime_s`부터 0에서 `slope_per_s` 기울기로 변하며 `finalValue`에 도달하면 유지합니다. |
+| `sum` | `SUM` | — | `in1`, `in2` | `out` | `sign1 × in1 + sign2 × in2`. 부호는 각각 +1 또는 −1입니다. |
+| `gain` | `GAIN` | — | `in` | `out` | `gain × in`을 출력합니다. |
+| `limiter` | `LIM` | — | `in` | `out` | 입력을 `min` 이상, `max` 이하로 제한합니다. |
+
+제어 블록을 사용하는 회로는 `simulation.controlSamplePeriod_s`에 양의 샘플 주기 Ts를 지정합니다. 해석기는 0, Ts, 2Ts, …에서 스텝을 나눕니다. 센서는 그 시각까지 적분한 전기 해의 왼쪽 극한을 읽습니다. PWM 에지와 겹쳐도 다음 구간의 스위치 상태로 다시 풀기 전에 읽습니다. 시각 0에서는 초기조건 해를 읽습니다. 모든 블록은 해당 샘플의 입력을 의존 순서에 따라 평가하며, 새 출력은 그 시각부터 다음 샘플까지 유지됩니다(ZOH). 제어 블록이 없는 회로는 이 설정에 따른 스텝 분할이 없습니다.
+
+`setRecording`에서 `quantity: "output"`을 켜면 `record: {"output":true}`로 저장하며, 파형에 `<ID>_out` 채널(단위 `1`)을 추가합니다. 시각 0에는 첫 갱신값을 기록합니다. 이후 기록 시각에 제어 출력이 바뀌면 같은 시각의 왼쪽·오른쪽 행을 기록합니다. PWM 에지와 제어 갱신이 겹치면 두 변화를 같은 두 행에 담습니다. 부동소수점 반올림 오차만큼 떨어진 적분 격자, PWM 에지, 제어 샘플과 종료 시각은 한 시각으로 처리합니다. 종료점에 합쳐진 행은 지정한 `stopTime_s`에 기록합니다. `outputStep_s`를 지정하면 그 기록 격자 밖의 샘플은 시뮬레이션에는 쓰이지만 파형에서 생략됩니다. 전체 계단 파형을 보려면 `outputStep_s`를 생략합니다.
+
+`litzsim run examples/control-signals.litzsim control-signals.litzwave`로 지령과 연산 블록 예제를 실행할 수 있습니다.
 
 ### 백그라운드 실행과 파형 조회
 

@@ -192,6 +192,8 @@ fn replacing_unedited_examples_preserves_raw_bytes() {
         include_bytes!("../../../examples/rc.litzsim").as_slice(),
         include_bytes!("../../../examples/rlc.litzsim").as_slice(),
         include_bytes!("../../../examples/buck.litzsim").as_slice(),
+        include_bytes!("../../../examples/buck-probe.litzsim").as_slice(),
+        include_bytes!("../../../examples/control-signals.litzsim").as_slice(),
     ] {
         fs::write(&path, bytes).unwrap();
         let opened = open(&path).unwrap();
@@ -223,6 +225,136 @@ fn replacing_unedited_examples_preserves_raw_bytes() {
     .unwrap();
     assert_ne!(revision, opened.disk_revision);
     assert_eq!(fs::read(&path).unwrap(), opened.document.to_bytes());
+}
+
+#[test]
+fn control_connections_are_checked_on_load_and_edit_and_undo_restores_bytes() {
+    use std::fs;
+
+    let folder = TestDirectory::new("control-signals");
+    let file = "circuit.litzsim";
+    let path = folder.0.join(file);
+    let before = include_bytes!("../../../examples/control-signals.litzsim");
+    fs::write(&path, before).unwrap();
+    let original = folder.run(&["inspect", file, "--json"], true);
+    let revision = original["revision"].as_str().unwrap();
+    let ops_file = folder.0.join("ops.json");
+    fs::write(
+        &ops_file,
+        json!([
+            {"op": "add", "type": "gain", "grid": [21, 5]},
+            {"op": "connect", "a": "GAIN1.out", "b": "GAIN2.in"},
+            {"op": "setSimulation", "key": "controlSamplePeriod_s", "value": 0.125},
+            {"op": "setRecording", "id": "GAIN2", "quantity": "output", "enabled": true}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let edited = folder.run(
+        &["apply", file, "--expect", revision, "--ops", "ops.json"],
+        true,
+    );
+    let edited_revision = edited["receipt"]["afterRevision"].as_str().unwrap();
+    let reopened = folder.run(&["inspect", file, "--json"], true);
+    assert_eq!(reopened["revision"], edited_revision);
+    assert_eq!(reopened["diskRevision"], edited["diskRevision"]);
+    assert_eq!(reopened["document"], edited["document"]);
+    assert_eq!(
+        reopened["document"]["simulation"]["controlSamplePeriod_s"],
+        0.125
+    );
+    assert_eq!(
+        reopened["document"]["nets"]["scaled"],
+        json!(["GAIN1.out", "LIM1.in", "GAIN2.in"])
+    );
+    let drawn = folder.run(&["layout", file, "--json"], true);
+    assert_eq!(drawn["pins"]["GAIN1.out"]["signalDirection"], "output");
+    assert_eq!(drawn["pins"]["GAIN2.in"]["signalDirection"], "input");
+    assert!(drawn["symbols"].as_array().unwrap().iter().all(|part| {
+        part["recordable"] == json!(["output"]) && !part["strokes"].as_array().unwrap().is_empty()
+    }));
+    let wave = folder.run(&["run", file, "result.litzwave"], true);
+    assert!(
+        wave["channels"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"name": "GAIN2_out", "unit": "1"}))
+    );
+
+    let edited_bytes = fs::read(&path).unwrap();
+    for (ops, terminals, problem) in [
+        (
+            json!([{"op": "add", "type": "resistor"},
+                {"op": "connect", "a": "GAIN2.in", "b": "R1.p"}]),
+            ["GAIN2.in", "R1.p"],
+            "signal and electrical",
+        ),
+        (
+            // Two inputs can belong to distinct driven nets. Merging from
+            // input to input still encounters both outputs.
+            json!([{"op": "connect", "a": "LIM1.in", "b": "SUM1.in1"}]),
+            ["GAIN1.out", "CONST1.out"],
+            "multiple outputs",
+        ),
+    ] {
+        fs::write(&ops_file, ops.to_string()).unwrap();
+        let response = folder.run(
+            &[
+                "apply",
+                file,
+                "--expect",
+                edited_revision,
+                "--ops",
+                "ops.json",
+            ],
+            false,
+        );
+        let error = &response["error"];
+        assert_eq!(error["operation"], ops.as_array().unwrap().len());
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains(problem) && terminals.iter().all(|pin| message.contains(pin)));
+        assert_eq!(fs::read(&path).unwrap(), edited_bytes);
+    }
+
+    for (terminal, problem) in [
+        ("LIM1.out", "multiple outputs"),
+        ("PWM.out", "signal and electrical"),
+    ] {
+        let mut malformed = reopened["document"].clone();
+        malformed["parts"]["PWM"] = json!({
+            "type": "pwm", "parameters": {"frequency_Hz": 10000, "duty": 0.5, "high_V": 10}
+        });
+        malformed["nets"]["scaled"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(terminal));
+        fs::write(folder.0.join("invalid.litzsim"), malformed.to_string()).unwrap();
+        let response = folder.run(&["inspect", "invalid.litzsim", "--json"], false);
+        assert_eq!(response["error"]["targetId"], terminal);
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains(problem)
+                && message.contains("GAIN1.out")
+                && message.contains(terminal)
+        );
+    }
+
+    fs::write(folder.0.join("previous.litzsim"), before).unwrap();
+    let restored = folder.run(
+        &[
+            "undo",
+            file,
+            "--expect",
+            edited_revision,
+            "--before",
+            revision,
+            "--previous",
+            "previous.litzsim",
+        ],
+        true,
+    );
+    assert_eq!(restored["receipt"]["afterRevision"], revision);
+    assert_eq!(fs::read(path).unwrap(), before);
 }
 
 #[test]

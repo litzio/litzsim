@@ -8,6 +8,7 @@ use std::time::Instant;
 const RC: &str = include_str!("../../../examples/rc.litzsim");
 const RLC: &str = include_str!("../../../examples/rlc.litzsim");
 const BUCK: &str = include_str!("../../../examples/buck.litzsim");
+const CONTROL: &str = include_str!("../../../examples/control-signals.litzsim");
 
 fn document(value: &Value) -> Document {
     Document::from_bytes(&serde_json::to_vec(value).unwrap()).unwrap()
@@ -15,6 +16,299 @@ fn document(value: &Value) -> Document {
 
 fn channel(wave: &litzsim_core::waves::Waveform, name: &str) -> usize {
     wave.channels().iter().position(|c| c.name == name).unwrap()
+}
+
+#[test]
+fn control_blocks_sample_in_dependency_order_and_hold_between_ticks() {
+    let wave = simulate(&Document::from_bytes(CONTROL.as_bytes()).unwrap(), || false).unwrap();
+    let columns = ["CONST1", "RAMP1", "STEP1", "SUM1", "SUM2", "GAIN1", "LIM1"].map(|id| {
+        let col = channel(&wave, &format!("{id}_out"));
+        assert_eq!(wave.channels()[col].unit, "1");
+        col
+    });
+    // Sum1 = 2 - ramp, Sum2 = step - Sum1. Gain = -2 * Sum2.
+    let expected = [
+        [2.0, 0.0, 1.0, 2.0, -1.0, 2.0, 1.25],
+        [2.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.25],
+        [2.0, 2.5, -1.0, -0.5, -0.5, 1.0, 1.0],
+        [2.0, 3.0, -1.0, -1.0, 0.0, 0.0, 0.25],
+    ];
+    // Ts = 3/8 s, h = 1/4 s. Two ticks split steps, two land on the grid.
+    // A step command at 5/8 s changes only at 3/4 s, the following tick.
+    let schedule = [
+        (0.0, 0),
+        (0.25, 0),
+        (0.375, 0),
+        (0.375, 1),
+        (0.5, 1),
+        (0.75, 1),
+        (0.75, 2),
+        (1.0, 2),
+        (1.125, 2),
+        (1.125, 3),
+        (1.25, 3),
+        (1.5, 3),
+    ];
+    assert_eq!(wave.rows().len(), schedule.len());
+    for (row, (time, values)) in wave.rows().zip(schedule) {
+        assert_eq!(row[0], time);
+        assert_eq!(columns.map(|c| row[c]), expected[values], "at {time} s");
+    }
+    let measured = wave.measure(&["LIM1_out".into()], 0.3, 0.45).unwrap();
+    assert!((measured.channels[0].average.unwrap() - 0.75).abs() <= 1e-12);
+
+    let mut decimated: Value = serde_json::from_str(CONTROL).unwrap();
+    decimated["simulation"]["outputStep_s"] = json!(0.5);
+    decimated["parts"]["RAMP1"]["parameters"]["finalValue"] = json!(6);
+    let wave = simulate(&document(&decimated), || false).unwrap();
+    let ramp = channel(&wave, "RAMP1_out");
+    let samples: Vec<_> = wave.rows().map(|row| (row[0], row[ramp])).collect();
+    // Off-grid ticks still update the held value. At stop the ramp changes
+    // from (1.125 - 0.125)*4 to (1.5 - 0.125)*4, so both limits are recorded.
+    assert_eq!(
+        samples,
+        [(0.0, 0.0), (0.5, 1.0), (1.0, 2.5), (1.5, 4.0), (1.5, 5.5)]
+    );
+
+    let mut decimal: Value = serde_json::from_str(CONTROL).unwrap();
+    decimal["simulation"]["controlSamplePeriod_s"] = json!(0.3);
+    decimal["simulation"]["stopTime_s"] = json!(1.0);
+    decimal["parts"]["STEP1"]["parameters"]["stepTime_s"] = json!(0.9);
+    let wave = simulate(&document(&decimal), || false).unwrap();
+    let step = channel(&wave, "STEP1_out");
+    assert_eq!(wave.rows().last().unwrap()[step], -1.0);
+}
+
+#[test]
+fn sampled_sensors_match_meters_and_use_the_left_limit_at_pwm_edges() {
+    let mut value: Value = serde_json::from_str(BUCK).unwrap();
+    value["simulation"]["controlSamplePeriod_s"] = json!(50e-6);
+    value["simulation"]["stopTime_s"] = json!(160e-6);
+    for (id, kind, gain) in [("VS1", "voltageSensor", 3.0), ("CS1", "currentSensor", 2.0)] {
+        value["parts"][id] = json!({
+            "type": kind, "parameters": {"gain": gain}, "record": {"output": true}
+        });
+    }
+    value["parts"]["VG"] = json!({"type": "voltmeter", "parameters": {}});
+    value["parts"]["AM1"] = json!({"type": "ammeter", "parameters": {}});
+    value["nets"]["gate"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!("VS1.n"), json!("VG.n")]);
+    let pins = value["nets"]["sw"].as_array_mut().unwrap();
+    *pins.iter_mut().find(|pin| **pin == "L1.p").unwrap() = json!("AM1.p");
+    pins.extend([json!("VS1.p"), json!("VG.p")]);
+    value["nets"]["meter"] = json!(["AM1.n", "CS1.n"]);
+    value["nets"]["coil"] = json!(["CS1.p", "L1.p"]);
+
+    let wave = simulate(&document(&value), || false).unwrap();
+    let [vg, am, vs, cs] = ["VG_V", "AM1_A", "VS1_out", "CS1_out"].map(|name| channel(&wave, name));
+    let mut rows = wave.rows().peekable();
+    let mut updates = 0;
+    let mut held = [0.0; 2];
+    while let Some(left) = rows.next() {
+        let time = left[0];
+        let right = if rows.peek().is_some_and(|row| row[0] == time) {
+            rows.next().unwrap()
+        } else {
+            left
+        };
+        if time > 0.0 {
+            assert_eq!([left[vs], left[cs]], held);
+        }
+        if (time - updates as f64 * 50e-6).abs() < 1e-18 {
+            held = [3.0 * left[vg], -2.0 * left[am]];
+            updates += 1;
+        }
+        assert_eq!(right[vs], held[0]);
+        assert!((right[cs] - held[1]).abs() <= 1e-12);
+        held[1] = right[cs];
+        if (time - 50e-6).abs() < 1e-18 {
+            assert_eq!([left[vg], right[vg], right[vs]], [-10.0, 0.0, -30.0]);
+            assert!(right[cs] < 0.0);
+        }
+        assert!(rows.peek().is_none_or(|row| row[0] > time));
+    }
+    assert_eq!(updates, 4);
+}
+
+#[test]
+fn final_control_change_at_pwm_edge_matches_the_rows_of_a_longer_run() {
+    let mut value: Value = serde_json::from_str(BUCK).unwrap();
+    let edge = 50e-6;
+    value["simulation"]["timeStep_s"] = json!(3e-7);
+    value["parts"]["VG"] = json!({"type": "voltmeter", "parameters": {}});
+    value["nets"]["gate"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VG.p"));
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VG.n"));
+
+    let at_edge = |value: &mut Value, short| {
+        value["simulation"]["stopTime_s"] = json!(if short { edge } else { 51e-6 });
+        let wave = simulate(&document(value), || false).unwrap();
+        wave.rows()
+            .filter(|row| row[0] == edge)
+            .map(<[f64]>::to_vec)
+            .collect::<Vec<_>>()
+    };
+    let electrical_stop = at_edge(&mut value, true);
+    assert_eq!(
+        electrical_stop.len(),
+        1,
+        "legacy stop has only its left limit"
+    );
+
+    value["simulation"]["controlSamplePeriod_s"] = json!(edge);
+    value["parts"]["VS"] = json!({
+        "type": "voltageSensor", "parameters": {"gain": 2}, "record": {"output": true}
+    });
+    value["parts"]["S"] = json!({
+        "type": "step", "parameters": {"stepTime_s": edge, "before": 0, "after": 1},
+        "record": {"output": true}
+    });
+    value["nets"]["gate"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VS.p"));
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VS.n"));
+    let continued = at_edge(&mut value, false);
+    assert_eq!(continued.len(), 2);
+    // VG_V drops as the step changes. VS_out holds twice the left-limit VG_V.
+    assert_eq!(continued[0][2..], [10.0, 0.0, 20.0]);
+    assert_eq!(continued[1][2..], [0.0, 1.0, 20.0]);
+    assert_eq!(at_edge(&mut value, true), continued);
+}
+
+#[test]
+fn final_pwm_control_rows_at_70_us() {
+    check_pwm_control_stop(50_000.0, 2.5e-6, 70e-6, 70e-6, 70e-6);
+}
+
+#[test]
+fn final_pwm_control_rows_at_50_us_on_the_default_grid() {
+    check_pwm_control_stop(10_000.0, 1e-7, 50e-6, 50e-6, 50e-6);
+}
+
+#[test]
+fn final_pwm_control_rows_match_with_one_ulp_clock_offsets() {
+    let adjacent = |t: f64| [t.next_down(), t, t.next_up()];
+    for (frequency, cycle) in [
+        (10_000.0, 0.0),
+        (20_000.0, 1.0),
+        (40_000.0, 2.0),
+        (50_000.0, 3.0),
+    ] {
+        let edge = (cycle + 0.5) / frequency;
+        for ticks in [7.0, 28.0, 500.0] {
+            for step in adjacent(edge / ticks) {
+                let grid = ticks * step;
+                for sample in adjacent(edge) {
+                    for boundary in [grid, edge, sample] {
+                        for stop in adjacent(boundary) {
+                            check_pwm_control_stop(frequency, step, edge, sample, stop);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn check_pwm_control_stop(frequency: f64, step: f64, edge: f64, sample: f64, stop: f64) {
+    let mut value: Value = serde_json::from_str(BUCK).unwrap();
+    value["simulation"]["timeStep_s"] = json!(step);
+    value["simulation"]["controlSamplePeriod_s"] = json!(sample);
+    value["parts"]["PWM"]["parameters"]["frequency_Hz"] = json!(frequency);
+    value["parts"]["VG"] = json!({"type": "voltmeter", "parameters": {}});
+    value["parts"]["VS"] = json!({
+        "type": "voltageSensor", "parameters": {"gain": 2}, "record": {"output": true}
+    });
+    value["parts"]["S"] = json!({
+        "type": "step", "parameters": {"stepTime_s": sample, "before": 0, "after": 1},
+        "record": {"output": true}
+    });
+    value["nets"]["gate"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!("VG.p"), json!("VS.p")]);
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!("VG.n"), json!("VS.n")]);
+    let context = format!(
+        "frequency={frequency}, step={step:?}, edge={edge:?}, Ts={sample:?}, stop={stop:?}"
+    );
+    let simulate_until = |stop, value: &mut Value| {
+        value["simulation"]["stopTime_s"] = json!(stop);
+        simulate(&document(value), || false).unwrap_or_else(|error| panic!("{context}: {error}"))
+    };
+    let short = simulate_until(stop, &mut value);
+    let long = simulate_until(edge + 1e-6, &mut value);
+    // The short run labels the merged rows with stop; the long run uses the
+    // nearby grid or clock boundary. Compare times within roundoff.
+    let time_tolerance = 8.0 * f64::EPSILON * edge;
+    let at_edge = |wave: &litzsim_core::waves::Waveform| {
+        wave.rows()
+            .filter(|row| (row[0] - edge).abs() <= time_tolerance)
+            .map(<[f64]>::to_vec)
+            .collect::<Vec<_>>()
+    };
+    let final_rows = at_edge(&short);
+    let continued = at_edge(&long);
+    assert_eq!(final_rows.len(), 2, "{context}: short");
+    assert_eq!(continued.len(), 2, "{context}: long");
+    assert_eq!(
+        short
+            .rows()
+            .rev()
+            .take(2)
+            .map(|row| row[0])
+            .collect::<Vec<_>>(),
+        [stop; 2],
+        "{context}"
+    );
+    assert_eq!(continued[0][2..], [10.0, 0.0, 20.0], "{context}");
+    assert_eq!(continued[1][2..], [0.0, 1.0, 20.0], "{context}");
+    for (final_row, continued_row) in final_rows.iter().zip(&continued) {
+        assert!(
+            (final_row[0] - continued_row[0]).abs() <= time_tolerance,
+            "{context}"
+        );
+        // Moving the solve time by one ULP may round the capacitor voltage differently.
+        assert!(
+            (final_row[1] - continued_row[1]).abs() <= 1e-12,
+            "{context}"
+        );
+        assert_eq!(final_row[2..], continued_row[2..], "{context}");
+    }
+}
+
+#[test]
+fn control_execution_reports_the_cycle_and_driverless_inputs() {
+    let mut value: Value = serde_json::from_str(CONTROL).unwrap();
+    value["nets"]["constant"] = json!(["GAIN1.out", "SUM1.in1", "LIM1.in"]);
+    value["nets"].as_object_mut().unwrap().remove("scaled");
+    value["nets"]["ramp"] = json!(["RAMP1.out", "SUM1.in2", "SUM2.in1"]);
+    value["nets"].as_object_mut().unwrap().remove("step");
+    let error = simulate(&document(&value), || false).unwrap_err();
+    assert_eq!(error.target_id.as_deref(), Some("GAIN1"));
+    assert_eq!(error.message, "Algebraic loop: GAIN1, SUM2, SUM1");
+
+    value["nets"]["constant"] = json!(["SUM1.in1", "LIM1.in"]);
+    let error = simulate(&document(&value), || false).unwrap_err();
+    assert_eq!(error.target_id.as_deref(), Some("LIM1"));
+    assert!(error.message.contains("Unconnected signal input LIM1.in"));
+    value["nets"]["constant"] = json!(["CONST1.out", "SUM1.in1"]);
+    let error = simulate(&document(&value), || false).unwrap_err();
+    assert_eq!(error.target_id.as_deref(), Some("LIM1"));
+    assert!(error.message.contains("Unconnected signal input LIM1.in"));
 }
 
 #[test]
