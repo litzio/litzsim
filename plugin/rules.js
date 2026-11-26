@@ -4,6 +4,13 @@ export const GRID = 32;
 export const SUGGEST_DISTANCE = 1.5 * GRID;
 export const EMPTY_SELECTION = { parts: [], wires: [] };
 
+/** Apply the paper accent only to nets classified as signals by the core. */
+export const SIGNAL_INK = "var(--id-color-accent-blue-paper)";
+
+export function wireStyle(signalNets, netId) {
+  return signalNets.includes(netId) ? { stroke: SIGNAL_INK, strokeWidth: 1.5 } : {};
+}
+
 /** A sheet differs from what was last saved, or from the blank/opened circuit it started as. */
 export function isDirty(revision, savedRevision) {
   return revision !== savedRevision;
@@ -51,6 +58,8 @@ export function nearestPair(layout, partId, [dx, dy] = [0, 0]) {
     const from = [pin.at[0] + dx, pin.at[1] + dy];
     for (const [b, other] of pins) {
       if (other.partId === partId || (pin.netId !== null && other.netId !== null)) continue;
+      if (Boolean(pin.signalDirection) !== Boolean(other.signalDirection)
+        || (pin.signalDirection === "output" && other.signalDirection === "output")) continue;
       const distance = Math.hypot(from[0] - other.at[0], from[1] - other.at[1]);
       if (distance <= SUGGEST_DISTANCE && (!best || distance < best.distance)) best = { a, b, from, to: other.at, distance };
     }

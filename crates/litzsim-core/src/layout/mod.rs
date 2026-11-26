@@ -58,6 +58,8 @@ fn add([x, y]: Point, [dx, dy]: Point) -> Point {
 #[serde(rename_all = "camelCase")]
 pub struct Layout<'a> {
     pub revision: String,
+    pub control_kinds: Vec<&'static str>,
+    pub signal_nets: BTreeSet<&'a str>,
     pub symbols: Vec<Symbol<'a>>,
     pub pins: BTreeMap<String, Pin<'a>>,
     pub segments: Vec<Segment<'a>>,
@@ -222,6 +224,8 @@ pub fn layout(document: &Document) -> Layout<'_> {
     let inspection = document.inspect();
     let mut result = Layout {
         revision: inspection.revision,
+        control_kinds: symbols::control_kinds(),
+        signal_nets: Default::default(),
         symbols: Vec::new(),
         pins: BTreeMap::new(),
         labels: Vec::new(),
@@ -240,17 +244,21 @@ pub fn layout(document: &Document) -> Layout<'_> {
             let id = format!("{}.{pin}", symbol.id);
             let at = scene(inspection.pin_positions[&id]);
             let net_id = inspection.pin_nets[&id];
+            let signal_direction = match definition.pin_kind(pin) {
+                crate::circuit::PinKind::Electrical => None,
+                crate::circuit::PinKind::SignalInput => Some("input"),
+                crate::circuit::PinKind::SignalOutput => Some("output"),
+            };
+            if let Some(net) = net_id.filter(|_| signal_direction.is_some()) {
+                result.signal_nets.insert(net);
+            }
             result.pins.insert(
                 id,
                 Pin {
                     part_id: symbol.id,
                     at,
                     net_id,
-                    signal_direction: match definition.pin_kind(pin) {
-                        crate::circuit::PinKind::Electrical => None,
-                        crate::circuit::PinKind::SignalInput => Some("input"),
-                        crate::circuit::PinKind::SignalOutput => Some("output"),
-                    },
+                    signal_direction,
                 },
             );
         }

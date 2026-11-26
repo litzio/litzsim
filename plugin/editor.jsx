@@ -1,5 +1,8 @@
 import React from "react";
-import { CATEGORIES, PARTS, PARAMETERS, ROTATE_SHORTCUT, formatSI, parseSI, shortcutOf } from "./parts.js";
+import {
+  CATEGORIES, DUTY_UPDATE_LABELS, PARTS, PARAMETERS, RECORDING_LABELS, ROTATE_SHORTCUT,
+  formatSI, libraryCategories, parseSI, partLabel, shortcutOf,
+} from "./parts.js";
 import { Schematic, sheetView, contentBounds } from "./schematic.jsx";
 import {
   EMPTY_SELECTION, deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex,
@@ -59,7 +62,6 @@ const ICONS = {
 const Icon = ({ name }) => <svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke="currentColor"
   strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={ICONS[name]} /></svg>;
 
-const label = type => PARTS[type]?.label ?? type;
 const formatTime = seconds => `${formatSI(seconds)} s`;
 const gridOf = ([x, y]) => [Math.round(x / GRID), Math.round(y / GRID)];
 const sheetOf = response => ({ document: response.document, revision: response.layout.revision, layout: response.layout });
@@ -142,6 +144,7 @@ const SIMULATION = [
   ["timeStep_s", "해석 간격", "s"],
   ["stopTime_s", "종료 시각", "s"],
   ["outputStep_s", "저장 간격", "s", "모든 스텝"],
+  ["controlSamplePeriod_s", "제어 샘플 주기", "s"],
 ];
 
 function Properties({ ui, sheet, selectedId, busy, edit, rename }) {
@@ -171,9 +174,11 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename }) {
     </>;
   }
   const own = pins.filter(([, pin]) => pin.partId === selectedId);
-  const recordable = sheet.layout.symbols.find(symbol => symbol.id === selectedId)?.recordable ?? [];
+  const symbol = sheet.layout.symbols.find(symbol => symbol.id === selectedId);
+  const recordable = symbol?.recordable ?? [];
+  const dutyUpdate = DUTY_UPDATE_LABELS[symbol?.dutyUpdateTiming];
   return <>
-    <h3 style={{ margin: 0 }}>{label(part.type)}</h3>
+    <h3 style={{ margin: 0 }}>{partLabel(part.type)}</h3>
     <div style={styles.group}>
       <NameField ui={ui} id={selectedId} disabled={busy} onRename={rename} />
     </div>
@@ -183,9 +188,10 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename }) {
         name={name} text={(PARAMETERS[name] ?? [name])[0]} unit={(PARAMETERS[name] ?? [name, ""])[1]} value={value}
         disabled={busy} onCommit={(key, next) => edit([{ op: "setParameter", id: selectedId, key, value: next }])} />)}
     </div>}
+    {dutyUpdate && <div style={styles.fact}><span>듀티 갱신 시점</span><span>{dutyUpdate}</span></div>}
     {recordable.length > 0 && <div style={styles.group}>
       {recordable.map(quantity => <label key={quantity} style={styles.fact}>
-        <span>{quantity === "voltage" ? "전압 기록" : "전류 기록"}</span>
+        <span>{RECORDING_LABELS[quantity]}</span>
         <input type="checkbox" checked={part.record?.[quantity] ?? false} disabled={busy}
           onChange={event => edit([{ op: "setRecording", id: selectedId, quantity, enabled: event.target.checked }])} />
       </label>)}
@@ -575,7 +581,7 @@ export function Editor({ ui, adapter }) {
 
   function insertAmmeter(index) {
     const segment = sheet.layout.segments[index];
-    if (!segment) return;
+    if (!segment || sheet.layout.signalNets.includes(segment.netId)) return;
     edit([{ op: "insertInBranch", type: "ammeter", terminals: segment.terminals, from: segment.from, to: segment.to }]);
   }
 
@@ -750,7 +756,7 @@ export function Editor({ ui, adapter }) {
     if (!active || (!active.moved && Math.hypot(event.clientX - active.x, event.clientY - active.y) < 5)) return;
     active.moved = true;
     const at = sceneFromClient(event.clientX, event.clientY);
-    setGhost(at ? { at: gridOf(at).map(value => value * GRID), label: label(active.type) } : null);
+    setGhost(at ? { at: gridOf(at).map(value => value * GRID), label: partLabel(active.type) } : null);
   }
 
   function onLibraryUp(event) {
@@ -794,7 +800,7 @@ export function Editor({ ui, adapter }) {
       if (shortcut === ROTATE_SHORTCUT && selectedId) edit([{ op: "rotate", id: selectedId }]);
       else if (shortcut === "F" && selectedId) edit([{ op: "mirror", id: selectedId, axis: "horizontal" }]);
       else if (shortcut === "Shift+F" && selectedId) edit([{ op: "mirror", id: selectedId, axis: "vertical" }]);
-      else if (shortcut === "A" && hoverSegment !== null) insertAmmeter(hoverSegment);
+      else if (shortcut === "A" && electricalBranch) insertAmmeter(hoverSegment);
       else if (BY_KEY[shortcut]) place(BY_KEY[shortcut].type);
       else handled = false;
     }
@@ -821,6 +827,7 @@ export function Editor({ ui, adapter }) {
     .filter(Boolean).join(" · ");
   const selection = selectedId && sheet.document.parts[selectedId];
   const segment = hoverSegment !== null ? sheet.layout.segments[hoverSegment] : null;
+  const electricalBranch = segment && !sheet.layout.signalNets.includes(segment.netId);
   const wire = selectedCount === 1 ? selected.wires[0] : undefined;
   const selectedWires = new Set(selected.wires);
   const runReason = running ? "실행 중입니다. 중지한 뒤 다시 실행할 수 있습니다."
@@ -838,9 +845,9 @@ export function Editor({ ui, adapter }) {
             : <ui.Status tone="error" label="실행 실패" />;
 
   const query_ = query.trim().toLowerCase();
-  const categories = CATEGORIES.map(group => ({
+  const categories = libraryCategories(sheet.layout.controlKinds).map(group => ({
     ...group,
-    parts: group.parts.filter(part => !query_ || [part.label, part.type, part.key, group.label]
+    parts: group.parts.filter(part => !query_ || [part.label, part.type, part.key ?? "", group.label]
       .some(text => text.toLowerCase().includes(query_))),
   })).filter(group => group.parts.length);
 
@@ -850,7 +857,7 @@ export function Editor({ ui, adapter }) {
       : pendingPin ? `${pendingPin}에서 연결할 단자를 누르세요 · Esc 취소`
         : wire ? `도선 선택 · ${wire.terminals.join(" – ")} · Delete / Backspace / 우클릭으로 삭제`
           : selectedCount > 1 ? `소자 ${selected.parts.length} · 도선 ${selected.wires.length} 선택 · Delete 삭제 · Esc 해제`
-            : segment ? `가지 ${segment.terminals.join(" – ")} · A 이 가지에 전류계 끼우기`
+            : electricalBranch ? `가지 ${segment.terminals.join(" – ")} · A 이 가지에 전류계 끼우기`
               : selection ? `${selectedId} 선택 · ${ROTATE_SHORTCUT} 회전 · F 좌우 반전 · Shift+F 상하 반전 · Delete 삭제 · 끌어서 이동`
                 : "빈 곳 끌기 영역 선택 · 가운데 버튼 또는 Space+끌기 이동 · R 저항 · Ctrl+' 격자 보기 · Ctrl+Z 되돌리기";
 
@@ -868,7 +875,7 @@ export function Editor({ ui, adapter }) {
     { id: "rotate", label: `회전 (${ROTATE_SHORTCUT})`, icon: null, visible: Boolean(selection), disabled: busy, run: () => edit([{ op: "rotate", id: selectedId }]) },
     { id: "mirror-h", label: "좌우 반전 (F)", icon: null, visible: Boolean(selection), disabled: busy, run: () => edit([{ op: "mirror", id: selectedId, axis: "horizontal" }]) },
     { id: "mirror-v", label: "상하 반전 (Shift+F)", icon: null, visible: Boolean(selection), disabled: busy, run: () => edit([{ op: "mirror", id: selectedId, axis: "vertical" }]) },
-    { id: "insert", label: "이 가지에 전류계 끼우기 (A)", icon: null, visible: Boolean(segment), run: () => insertAmmeter(hoverSegment) },
+    { id: "insert", label: "이 가지에 전류계 끼우기 (A)", icon: null, visible: Boolean(electricalBranch), run: () => insertAmmeter(hoverSegment) },
     { id: "delete", label: wire ? "도선 삭제" : "삭제 (Delete)", icon: null, danger: true, visible: selectedCount > 0, disabled: busy, run: () => edit(deleteSelection(selected)) },
     { id: "grid", label: "격자 보기 (Ctrl+')", icon: <span aria-label={showGrid ? "켜짐" : "꺼짐"}>{showGrid ? "✓" : "□"}</span>, visible: !selectedCount, run: () => setShowGrid(show => !show) },
   ];
@@ -931,7 +938,7 @@ export function Editor({ ui, adapter }) {
                 title={`${part.label} — 누르면 빈 자리에, 끌면 놓은 자리에 배치`}
                 onPointerDown={event => onLibraryDown(part.type, event)} onPointerMove={onLibraryMove} onPointerUp={onLibraryUp}
                 onClick={event => { if (event.detail === 0) place(part.type, freeSpot(sheet.layout, visibleCenter())); }}>
-                <span>{part.label}</span><kbd style={styles.kbd}>{part.key}</kbd>
+                <span>{part.label}</span>{part.key && <kbd style={styles.kbd}>{part.key}</kbd>}
               </button>)}
             </div>)}
             {!categories.length && <span style={{ fontSize: "var(--font-size-sm)", color: "var(--id-color-text-muted)" }}>맞는 부품이 없습니다.</span>}
@@ -950,7 +957,7 @@ export function Editor({ ui, adapter }) {
                     if (!drag.current && !area.current && !pan.current) setHoverSegment(index);
                   }}
                   onBackgroundDown={onBackgroundDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} />
-                {segment && !preview && <div style={{
+                {electricalBranch && !preview && <div style={{
                   ...styles.hint,
                   left: scaled((segment.from[0] + segment.to[0]) / 2 - view.x),
                   top: scaled((segment.from[1] + segment.to[1]) / 2 - view.y) - 10,

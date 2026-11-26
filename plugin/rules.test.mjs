@@ -12,10 +12,10 @@ import {
   applyToAll, autoRange, axisFor, defaultRun, formatValue, keepSignals, keepView, niceStep, panRange, readTimeAxis, ticks,
   timeAxisProblem, zoomAxis, zoomRange,
 } from "./plot.js";
-import { CATEGORIES, PARTS, ROTATE_SHORTCUT, shortcutOf } from "./parts.js";
+import { CATEGORIES, PARTS, RECORDING_LABELS, ROTATE_SHORTCUT, libraryCategories, shortcutOf } from "./parts.js";
 import {
   deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex, selectionBox,
-  undoRenamed,
+  undoRenamed, wireStyle,
 } from "./rules.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -95,6 +95,47 @@ test("the measurement library offers the node voltage probe on N", () => {
   assert.equal(PARTS.voltageProbe.key, "N");
   assert.equal(shortcutOf({ key: "n" }), PARTS.voltageProbe.key);
   assert.deepEqual(Object.values(PARTS).filter(part => part.key === "N"), [PARTS.voltageProbe]);
+});
+
+test("the control library, recording and wire styles follow the core layout", async () => {
+  const sheet = await apply(await rc(), [
+    { op: "add", type: "constant", grid: [1, 10] },
+    { op: "add", type: "sum", grid: [6, 11] },
+    { op: "connect", a: "CONST1.out", b: "SUM1.in1" },
+    { op: "setRecording", id: "SUM1", quantity: "output", enabled: true },
+  ]);
+  const { controlKinds, pins, segments, signalNets, symbols } = sheet.layout;
+  const control = libraryCategories(controlKinds).find(group => group.id === "control");
+  assert.equal(control.label, "제어");
+  assert.deepEqual(control.parts.slice(0, 9).map(part => [part.type, part.key]), [
+    ["pwm", "P"], ["voltageSensor", undefined], ["currentSensor", undefined], ["constant", undefined],
+    ["step", undefined], ["ramp", undefined], ["sum", undefined], ["gain", undefined], ["limiter", undefined],
+  ]);
+  const future = libraryCategories(["futureBlock"]).find(group => group.id === "control").parts.at(-1);
+  assert.deepEqual(future, { type: "futureBlock", label: "futureBlock" });
+  const sum = symbols.find(symbol => symbol.id === "SUM1");
+  assert.deepEqual(sum.recordable.map(quantity => RECORDING_LABELS[quantity]), ["출력 기록"]);
+  assert.deepEqual(sheet.document.parts.SUM1.record, { output: true });
+
+  const signal = pins["CONST1.out"].netId;
+  assert.deepEqual(signalNets, [signal]);
+  assert.ok(segments.some(segment => segment.netId === signal));
+  assert.ok(segments.some(segment => segment.netId === "input"));
+  assert.deepEqual(wireStyle(signalNets, signal), { stroke: "var(--id-color-accent-blue-paper)", strokeWidth: 1.5 });
+  assert.deepEqual(wireStyle(signalNets, "input"), {});
+  const refused = await send("apply", {
+    document: sheet.document, expectedRevision: sheet.revision,
+    ops: [{ op: "connect", a: "CONST1.out", b: "R1.p" }],
+  });
+  assert.equal(refused.ok, false);
+  assert.match(refused.error.message, /^Cannot connect signal and electrical terminals:/);
+
+  const signStroke = (symbol, y) => symbol.strokes.some(stroke => stroke.kind === "polyline"
+    && JSON.stringify(stroke.points) === JSON.stringify([[-11, y - 4], [-11, y + 4]]));
+  assert.ok(signStroke(sum, -32));
+  assert.ok(!signStroke(sum, 32));
+  const changed = await apply(sheet, [{ op: "setParameter", id: "SUM1", key: "sign2", value: 1 }]);
+  assert.ok(signStroke(changed.layout.symbols.find(symbol => symbol.id === "SUM1"), 32));
 });
 
 test("a new circuit with only a changed simulation setting is unsaved", async () => {
