@@ -11,6 +11,10 @@ pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
         [cmd, file, flag] if cmd == "inspect" && flag == "--json" => {
             return inspect_file(Path::new(file));
         }
+        [cmd, file, flag] if cmd == "layout" && flag == "--json" => {
+            let opened = circuit::open(Path::new(file)).map_err(core_error)?;
+            return Ok(success(litzsim_core::layout::layout(&opened.document)));
+        }
         [cmd, file, out] if cmd == "run" => return run(Path::new(file), Path::new(out)),
         [cmd, file] if cmd == "start" => return runs::start_file(file),
         [cmd, path] if cmd == "status" => return runs::status(Path::new(path)),
@@ -205,9 +209,11 @@ fn handle(runs: &mut Runs, request: Request<'_>) -> Result<Value, Value> {
             let document = document(required(request.document, "document")?)?;
             let expected = required(request.expected_revision, "expectedRevision")?;
             let ops = parse_ops(required(request.ops, "ops")?.get().as_bytes())?;
-            Ok(success(
-                circuit::apply(&document, expected, &ops).map_err(core_error)?,
-            ))
+            let edited = circuit::apply(&document, expected, &ops).map_err(core_error)?;
+            let layout = litzsim_core::layout::layout(&edited.document);
+            Ok(
+                json!({ "ok": true, "document": edited.document, "receipt": edited.receipt, "layout": layout }),
+            )
         }
         "undo" => {
             let current = document(required(request.document, "document")?)?;
@@ -303,7 +309,11 @@ fn request_error(message: impl Into<String>) -> Value {
 }
 
 fn usage() -> Value {
-    request_error(
-        "Usage: litzsim --version | serve | inspect FILE --json | apply FILE --expect REV --ops OPS.json | undo FILE --expect AFTER --before BEFORE --previous SNAPSHOT | run FILE OUT | start FILE | status RUN_DIR | stop RUN_DIR | wave RUN_DIR --channel NAME [--channel NAME...] --from TIME --to TIME --pixels WIDTH",
-    )
+    request_error(concat!(
+        "Usage: litzsim --version | serve | inspect FILE --json | layout FILE --json",
+        " | apply FILE --expect REV --ops OPS.json",
+        " | undo FILE --expect AFTER --before BEFORE --previous SNAPSHOT",
+        " | run FILE OUT | start FILE | status RUN_DIR | stop RUN_DIR",
+        " | wave RUN_DIR --channel NAME [--channel NAME...] --from TIME --to TIME --pixels WIDTH"
+    ))
 }

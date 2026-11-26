@@ -141,6 +141,18 @@ fn serves_json_lines_until_stdin_closes() {
         "ops": [{"op": "add", "type": "ammeter", "grid": [8, 4]}]
     }));
     assert_eq!(edited["receipt"]["created"], json!(["ammeter1"]));
+    assert_eq!(
+        edited["layout"]["revision"],
+        edited["receipt"]["afterRevision"]
+    );
+    assert_eq!(
+        edited["layout"]["pins"]["ammeter1.p"]["at"],
+        json!([224, 128])
+    );
+    assert_eq!(
+        edited["layout"]["symbols"][0]["currentArrow"]["to"],
+        json!([266, 137])
+    );
     let inspection = request(json!({ "op": "inspect", "document": edited["document"] }));
     assert_eq!(inspection["pinPositions"]["ammeter1.p"], json!([7, 4]));
     assert_eq!(
@@ -174,6 +186,9 @@ fn serves_json_lines_until_stdin_closes() {
     let opened = request(json!({ "op": "inspect", "file": file }));
     assert_eq!(opened["diskRevision"], saved["diskRevision"]);
     assert_eq!(opened["document"], edited["document"]);
+    let mut from_file = directory.run(&["layout", "circuit.litzsim", "--json"], true);
+    from_file.as_object_mut().unwrap().remove("ok");
+    assert_eq!(from_file, edited["layout"]);
     request(json!({
         "op": "save", "file": file, "document": undone["document"],
         "expectedDiskRevision": opened["diskRevision"]
@@ -197,6 +212,7 @@ fn file_commands_round_trip_and_reject_failed_batches() {
     std::fs::write(directory.join("pfc.litzsim"), PFC).unwrap();
     let run = |args: &[&str], ok| cleanup.run(args, ok);
     let original = run(&["inspect", "buck.litzsim", "--json"], true);
+    let original_layout = run(&["layout", "buck.litzsim", "--json"], true);
     let before = original["revision"].as_str().unwrap();
     assert_ne!(original["diskRevision"], original["revision"]);
     assert_eq!(original["pinNets"]["Q1.g"], "gate");
@@ -269,6 +285,10 @@ fn file_commands_round_trip_and_reject_failed_batches() {
     assert_eq!(final_read["document"], original["document"]);
     assert_eq!(final_read["pinPositions"], original["pinPositions"]);
     assert_eq!(final_read["diskRevision"], before);
+    assert_eq!(
+        run(&["layout", "buck.litzsim", "--json"], true),
+        original_layout
+    );
 
     let rejected = run(
         &[
