@@ -13,7 +13,8 @@ const run = (command, args, options = {}) => execFileSync(command, args, { encod
 const gh = args => run('gh', args);
 const git = (args, options) => run('git', args, options);
 
-export const MODEL_ID = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._/-]*$/;
+// The provider is the model's maker, not the agent tool ("codex/…" is a recurring slip).
+export const MODEL_ID = /^(openai|anthropic|google)\/[a-z0-9][a-z0-9._/-]*$/;
 
 // Git owns trailer parsing; the source scan only catches duplicated or misplaced AI trailers.
 export function trailerProblem(message, cwd = process.cwd()) {
