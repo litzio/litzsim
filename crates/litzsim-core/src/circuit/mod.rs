@@ -105,6 +105,13 @@ pub(crate) struct Part {
     pub(crate) parameters: BTreeMap<String, Value>,
 }
 
+impl Part {
+    fn series_resistance_at_default(&self) -> Option<&'static str> {
+        let (key, default) = part_definition(&self.kind)?.series_resistance()?;
+        (self.parameters.get(key)?.as_f64() == Some(default)).then_some(key)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Placement {
@@ -255,22 +262,44 @@ impl Document {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        Self::read(bytes).map(|(document, _)| document)
+    }
+
+    fn read(bytes: &[u8]) -> Result<(Self, bool), Error> {
         let mut circuit: CircuitV1 = serde_json::from_slice(bytes)
             .map_err(|error| Error::new("invalidCircuit", error.to_string()))?;
         circuit.validate()?;
+        let mut has_explicit_resistance_defaults = false;
         for position in circuit.layout.values_mut() {
             position.normalize_orientation();
         }
         for part in circuit.parts.values_mut() {
+            has_explicit_resistance_defaults |= part.series_resistance_at_default().is_some();
+            if let Some((key, default)) = part_definition(&part.kind)
+                .expect("validated part")
+                .series_resistance()
+            {
+                if !part.parameters.contains_key(key) {
+                    part.parameters.insert(key.into(), default.into());
+                }
+            }
             for value in part.parameters.values_mut() {
                 *value = value.as_f64().expect("validated parameter").into();
             }
         }
-        Ok(Self(circuit))
+        Ok((Self(circuit), has_explicit_resistance_defaults))
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = serde_json::to_vec_pretty(self).expect("serializable circuit");
+        // Inspection and edit responses expose the effective parameters.
+        // Files and their canonical revisions omit the new optional defaults.
+        let mut stored = self.0.clone();
+        for part in stored.parts.values_mut() {
+            if let Some(key) = part.series_resistance_at_default() {
+                part.parameters.remove(key);
+            }
+        }
+        let mut bytes = serde_json::to_vec_pretty(&stored).expect("serializable circuit");
         bytes.push(b'\n');
         bytes
     }
@@ -368,8 +397,9 @@ impl CircuitV1 {
                     ));
                 }
             }
+            let optional = definition.series_resistance().map(|(key, _)| key);
             for (key, _) in definition.defaults {
-                if !part.parameters.contains_key(*key) {
+                if Some(*key) != optional && !part.parameters.contains_key(*key) {
                     return Err(Error::invalid(id, format!("missing parameter: {key}")));
                 }
             }

@@ -44,6 +44,7 @@ fn run_publishes_ordered_original_rows_and_rejects_invalid_circuits() {
     let expected = solver::simulate(&Document::from_bytes(rc).unwrap(), || false).unwrap();
     assert_eq!(summary["rows"], 501);
     assert_eq!(summary["stopTime_s"], 0.005);
+    assert_eq!(summary["warnings"], json!([]));
     assert_eq!(
         summary["channels"],
         json!([{"name":"time","unit":"s"},{"name":"VC_V","unit":"V"}])
@@ -99,6 +100,87 @@ fn run_publishes_ordered_original_rows_and_rejects_invalid_circuits() {
             .contains("control")
     );
     assert!(!directory.0.join("pfc.litzwave").exists());
+}
+
+#[test]
+fn inrush_warning_is_shared_by_run_and_status() {
+    let folder = TestDirectory::new("inrush");
+    let mut rc: Value =
+        serde_json::from_slice(include_bytes!("../../../examples/rc.litzsim")).unwrap();
+    rc["parts"].as_object_mut().unwrap().remove("R1");
+    rc["layout"].as_object_mut().unwrap().remove("R1");
+    rc["nets"].as_object_mut().unwrap().remove("input");
+    rc["nets"]["output"] = json!(["V1.p", "C1.p", "VC.p"]);
+    rc["simulation"] = json!({"timeStep_s": 1e-6, "stopTime_s": 5e-6});
+    std::fs::write(folder.0.join("inrush.litzsim"), rc.to_string()).unwrap();
+
+    let summary = folder.run(&["run", "inrush.litzsim", "inrush.litzwave"], true);
+    let warning = &summary["warnings"][0];
+    assert_eq!(summary["warnings"].as_array().unwrap().len(), 1);
+    assert_eq!(warning["code"], "inrushTimeStep");
+    assert_eq!(warning["partIds"], json!(["C1", "V1"]));
+    assert_eq!(warning["timeConstant_s"], 1e-12);
+    assert_eq!(warning["timeStep_s"], 1e-6);
+    let started = folder.run(&["start", "inrush.litzsim"], true);
+    let run = started["runDirectory"].as_str().unwrap();
+    let status = terminal(&folder, run, "completed");
+    assert_eq!(status["warnings"], summary["warnings"]);
+
+    rc["parts"]["R1"] = json!({"type": "resistor", "parameters": {"resistance_ohm": 0.02}});
+    rc["parts"]["C1"]["parameters"]["esr_ohm"] = json!(0.01);
+    rc["parts"]["V1"]["parameters"]["internalResistance_ohm"] = json!(0.03);
+    rc["nets"]["input"] = json!(["V1.p", "R1.p"]);
+    rc["nets"]["output"] = json!(["R1.n", "C1.p", "VC.p"]);
+    std::fs::write(folder.0.join("inrush.litzsim"), rc.to_string()).unwrap();
+    let series = folder.run(&["run", "inrush.litzsim", "series.litzwave"], true);
+    let warning = &series["warnings"][0];
+    assert_eq!(series["warnings"].as_array().unwrap().len(), 1);
+    assert_eq!(warning["partIds"], json!(["C1", "R1", "V1"]));
+    assert!((warning["timeConstant_s"].as_f64().unwrap() - 6e-8).abs() < 1e-21);
+}
+
+#[test]
+fn replacing_unedited_examples_preserves_raw_bytes() {
+    use litzsim_core::circuit::{SaveMode, open, save};
+    use std::fs;
+
+    let folder = TestDirectory::new("unchanged-save");
+    let path = folder.0.join("circuit.litzsim");
+    for bytes in [
+        include_bytes!("../../../examples/rc.litzsim").as_slice(),
+        include_bytes!("../../../examples/rlc.litzsim").as_slice(),
+        include_bytes!("../../../examples/buck.litzsim").as_slice(),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        let opened = open(&path).unwrap();
+        let revision = save(
+            &path,
+            &opened.document,
+            SaveMode::Replace {
+                expected_disk_revision: &opened.disk_revision,
+            },
+        )
+        .unwrap();
+        assert_eq!(revision, opened.disk_revision);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    let mut explicit: Value =
+        serde_json::from_slice(include_bytes!("../../../examples/rc.litzsim")).unwrap();
+    explicit["parts"]["C1"]["parameters"]["esr_ohm"] = json!(1e-6);
+    explicit["parts"]["V1"]["parameters"]["internalResistance_ohm"] = json!(0);
+    fs::write(&path, explicit.to_string()).unwrap();
+    let opened = open(&path).unwrap();
+    let revision = save(
+        &path,
+        &opened.document,
+        SaveMode::Replace {
+            expected_disk_revision: &opened.disk_revision,
+        },
+    )
+    .unwrap();
+    assert_ne!(revision, opened.disk_revision);
+    assert_eq!(fs::read(&path).unwrap(), opened.document.to_bytes());
 }
 
 #[test]

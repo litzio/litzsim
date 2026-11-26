@@ -52,8 +52,17 @@ pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<Stri
         .map_err(io_error)?;
     lock.lock().map_err(io_error)?;
 
-    check_destination(&path, &mode)?;
     let bytes = document.to_bytes();
+    let existing = check_destination(&path, &mode)?;
+    if let Some(existing) = existing {
+        if existing == bytes
+            || Document::read(&existing).is_ok_and(|(current, has_explicit_defaults)| {
+                !has_explicit_defaults && current.to_bytes() == bytes
+            })
+        {
+            return Ok(revision(&existing));
+        }
+    }
     let staged = StagedFile::write(&path, |file| file.write_all(&bytes)).map_err(io_error)?;
     match mode {
         SaveMode::New => {
@@ -83,23 +92,24 @@ pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<Stri
     Ok(revision(&bytes))
 }
 
-fn check_destination(path: &Path, mode: &SaveMode<'_>) -> Result<(), Error> {
+fn check_destination(path: &Path, mode: &SaveMode<'_>) -> Result<Option<Vec<u8>>, Error> {
     match mode {
         SaveMode::New => match fs::symlink_metadata(path) {
             Ok(_) => Err(Error::new("fileExists", "Circuit file already exists")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(io_error(error)),
         },
         SaveMode::Replace {
             expected_disk_revision,
         } => {
-            let actual = match fs::read(path) {
-                Ok(bytes) => Some(revision(&bytes)),
+            let existing = match fs::read(path) {
+                Ok(bytes) => Some(bytes),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => None,
                 Err(error) => return Err(io_error(error)),
             };
+            let actual = existing.as_deref().map(revision);
             if actual.as_deref() == Some(*expected_disk_revision) {
-                Ok(())
+                Ok(existing)
             } else {
                 Err(Error::conflict(
                     "diskRevisionConflict",
