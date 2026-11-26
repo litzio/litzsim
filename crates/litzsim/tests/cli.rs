@@ -298,8 +298,10 @@ fn serves_json_lines_until_stdin_closes() {
 
     #[cfg(windows)]
     {
+        use litzsim_core::circuit::REPLACE_RETRY_DELAYS;
         use std::fs::{self, OpenOptions};
         use std::os::windows::fs::OpenOptionsExt;
+        use std::time::{Duration, Instant};
 
         const FILE_SHARE_READ: u32 = 0x1;
         const FILE_SHARE_WRITE: u32 = 0x2;
@@ -310,12 +312,20 @@ fn serves_json_lines_until_stdin_closes() {
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .open(&file)
             .unwrap();
+        let retry_budget: Duration = REPLACE_RETRY_DELAYS.into_iter().sum();
+        let started = Instant::now();
         let rejected = request(
             json!({
                 "op": "save", "file": file, "document": edited["document"],
                 "expectedDiskRevision": reopened["diskRevision"]
             }),
             false,
+        );
+        let elapsed = started.elapsed();
+        // Include CLI round-trip, disk I/O and Windows scheduler overhead.
+        assert!(
+            elapsed >= retry_budget,
+            "replacement took {elapsed:?} with a {retry_budget:?} sleep budget"
         );
         assert_eq!(rejected["error"]["code"], "ioError");
         let path = file.canonicalize().unwrap();
@@ -325,6 +335,7 @@ fn serves_json_lines_until_stdin_closes() {
             "{message}"
         );
         assert_eq!(fs::read(&file).unwrap(), original);
+        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
     }
     drop(input);
     assert!(child.wait().unwrap().success());

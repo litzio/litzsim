@@ -469,17 +469,26 @@ fn batch_is_atomic_and_receipt_tracks_net_merges_deletes_and_undo() {
     }
 }
 
+struct SaveTestDirectory(std::path::PathBuf);
+
+impl SaveTestDirectory {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("litzsim-core-{name}-{}", std::process::id()));
+        fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for SaveTestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn save_guards_raw_bytes_and_serializes_competing_writers() {
-    let directory = std::env::temp_dir().join(format!("litzsim-core-save-{}", std::process::id()));
-    fs::create_dir(&directory).unwrap();
-    struct Cleanup(std::path::PathBuf);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-    let _cleanup = Cleanup(directory.clone());
+    let folder = SaveTestDirectory::new("save");
+    let directory = &folder.0;
     let path = directory.join("test.litzsim");
     let document = Document::from_bytes(RC).unwrap();
     let initial = save(&path, &document, SaveMode::New).unwrap();
@@ -550,15 +559,165 @@ fn save_guards_raw_bytes_and_serializes_competing_writers() {
             .iter()
             .filter_map(|result| result.as_ref().ok())
             .collect::<Vec<_>>(),
-        [&actual]
+        [&actual],
+        "{results:?}"
     );
     let error = results
         .iter()
         .find_map(|result| result.as_ref().err())
         .unwrap();
-    assert_eq!(error.code, "diskRevisionConflict");
-    assert_eq!(error.actual, Some(json!(actual)));
+    assert_eq!(error.code, "diskRevisionConflict", "{results:?}");
+    assert_eq!(error.actual, Some(json!(actual)), "{results:?}");
     only_circuit();
+
+    let missing = save(
+        &directory.join("missing.litzsim"),
+        &document,
+        SaveMode::Replace {
+            expected_disk_revision: &actual,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(missing.code, "diskRevisionConflict");
+    assert_eq!(missing.actual, Some(serde_json::Value::Null));
+}
+
+#[cfg(windows)]
+#[test]
+fn replacement_succeeds_after_a_reader_releases_its_handle() {
+    use super::file::replace_file;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let folder = SaveTestDirectory::new("released-reader");
+    let path = folder.0.join("circuit.litzsim");
+    fs::write(&path, RC).unwrap();
+    let current = open(&path).unwrap();
+    let mut reader = Some(
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap(),
+    );
+    let replacement = Document::new().to_bytes();
+    let staged =
+        StagedFile::write(&path, |file| std::io::Write::write_all(file, &replacement)).unwrap();
+    let started = std::time::Instant::now();
+    replace_file(
+        &staged.0,
+        &path,
+        &SaveMode::Replace {
+            expected_disk_revision: &current.disk_revision,
+        },
+        |from, to| {
+            let result = fs::rename(from, to);
+            if let Some(held) = reader.take() {
+                let error = result.as_ref().unwrap_err();
+                assert!(matches!(error.raw_os_error(), Some(5 | 32)), "{error}");
+                drop(held);
+            }
+            result
+        },
+    )
+    .unwrap();
+    assert!(reader.is_none());
+    assert!(started.elapsed() >= REPLACE_RETRY_DELAYS[0]);
+    assert_eq!(fs::read(&path).unwrap(), replacement);
+    assert!(!staged.0.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_replacement_checks_for_changes_before_retrying() {
+    use super::file::replace_file;
+    use std::io;
+
+    let folder = SaveTestDirectory::new("changed-during-retry");
+    let path = folder.0.join("circuit.litzsim");
+    fs::write(&path, RC).unwrap();
+    let current = open(&path).unwrap();
+    let mode = SaveMode::Replace {
+        expected_disk_revision: &current.disk_revision,
+    };
+    let staged = StagedFile::write(&path, |_| Ok(())).unwrap();
+    let mut attempts = 0;
+    let unsupported = replace_file(&staged.0, &path, &mode, |_, _| {
+        attempts += 1;
+        Err(io::Error::from_raw_os_error(2))
+    })
+    .unwrap_err();
+    assert_eq!(unsupported.code, "ioError");
+    assert_eq!(attempts, 1);
+
+    let conflict = replace_file(&staged.0, &path, &mode, |_, _| {
+        attempts += 1;
+        fs::write(&path, RLC).unwrap();
+        Err(io::Error::from_raw_os_error(32))
+    })
+    .unwrap_err();
+    assert_eq!(conflict.code, "diskRevisionConflict");
+    assert_eq!(conflict.actual, Some(json!(revision(RLC))));
+    assert_eq!(attempts, 2);
+    assert_eq!(fs::read(&path).unwrap(), RLC);
+}
+
+#[cfg(windows)]
+#[test]
+fn competing_save_reports_the_winners_revision_after_path_sharing_errors() {
+    use super::file::save_with_canonicalize;
+    use std::io;
+
+    let folder = SaveTestDirectory::new("path-sharing");
+    let path = folder.0.join("circuit.litzsim");
+    let original = Document::from_bytes(RC).unwrap();
+    fs::write(&path, RC).unwrap();
+    let expected = open(&path).unwrap().disk_revision;
+    let mode = || SaveMode::Replace {
+        expected_disk_revision: &expected,
+    };
+    let winner = Document::new();
+    let mut lookups = 0;
+    let mut winner_revision = None;
+    let conflict = save_with_canonicalize(&path, &original, mode(), |requested| {
+        assert_eq!(requested, path);
+        lookups += 1;
+        match lookups {
+            1 => {
+                winner_revision = Some(save(&path, &winner, mode()).unwrap());
+                Err(io::Error::from_raw_os_error(5))
+            }
+            2 => Err(io::Error::from_raw_os_error(32)),
+            _ => requested.canonicalize(),
+        }
+    })
+    .unwrap_err();
+    assert_eq!(conflict.code, "diskRevisionConflict", "{conflict:?}");
+    assert_eq!(conflict.actual, Some(json!(winner_revision.unwrap())));
+    assert_eq!(lookups, 3);
+    assert_eq!(fs::read(&path).unwrap(), winner.to_bytes());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_save_discards_the_ntfs_deleted_path_of_a_replaced_file() {
+    use super::file::save_path;
+    use std::path::{Path, PathBuf};
+
+    let requested = Path::new(r"C:\circuits\example.litzsim");
+    let mut lookups = [
+        PathBuf::from(r"\\?\C:\$Extend\$Deleted\001A-Replaced"),
+        PathBuf::from(r"\\?\C:\circuits\example.litzsim"),
+    ]
+    .into_iter();
+    let destination = save_path(requested, |path| {
+        assert_eq!(path, requested);
+        Ok(lookups.next().expect("expected two lookups"))
+    })
+    .unwrap();
+    assert_eq!(destination, Path::new(r"\\?\C:\circuits\example.litzsim"));
+    assert!(lookups.next().is_none());
 }
 
 #[test]

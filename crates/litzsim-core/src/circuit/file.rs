@@ -5,6 +5,18 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+/// Delays between Windows save path or replacement attempts after a sharing error.
+#[cfg(windows)]
+pub const REPLACE_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(25),
+    Duration::from_millis(50),
+    Duration::from_millis(75),
+    Duration::from_millis(100),
+];
+#[cfg(not(windows))]
+const REPLACE_RETRY_DELAYS: [Duration; 0] = [];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,7 +45,17 @@ pub fn open(path: &Path) -> Result<Opened, Error> {
 /// when a process exits without finishing. Keep the lock file in the system
 /// temporary directory so waiting processes keep the same file identity.
 pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<String, Error> {
-    let path = save_path(path)?;
+    save_with_canonicalize(path, document, mode, |path| path.canonicalize())
+}
+
+pub(super) fn save_with_canonicalize(
+    path: &Path,
+    document: &Document,
+    mode: SaveMode<'_>,
+    canonicalize: impl FnMut(&Path) -> io::Result<PathBuf>,
+) -> Result<String, Error> {
+    let path = save_path(path, canonicalize)
+        .map_err(|error| save_io_error("resolve the save path for", path, error))?;
     if path.file_name().is_none() {
         return Err(Error::new("ioError", "Expected a circuit file path"));
     }
@@ -41,7 +63,7 @@ pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<Stri
         check_destination(&path, &mode)?;
     }
     let lock_directory = std::env::temp_dir().join("litzsim-locks");
-    fs::create_dir_all(&lock_directory).map_err(io_error)?;
+    fs::create_dir_all(&lock_directory).map_err(|error| save_io_error("lock", &path, error))?;
     let lock_key = revision(path.as_os_str().as_encoded_bytes());
     let lock = OpenOptions::new()
         .read(true)
@@ -49,8 +71,9 @@ pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<Stri
         .create(true)
         .truncate(false)
         .open(lock_directory.join(format!("{lock_key}.lock")))
-        .map_err(io_error)?;
-    lock.lock().map_err(io_error)?;
+        .map_err(|error| save_io_error("lock", &path, error))?;
+    lock.lock()
+        .map_err(|error| save_io_error("lock", &path, error))?;
 
     let bytes = document.to_bytes();
     let existing = check_destination(&path, &mode)?;
@@ -63,7 +86,8 @@ pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<Stri
             return Ok(revision(&existing));
         }
     }
-    let staged = StagedFile::write(&path, |file| file.write_all(&bytes)).map_err(io_error)?;
+    let staged = StagedFile::write(&path, |file| file.write_all(&bytes))
+        .map_err(|error| save_io_error("stage", &path, error))?;
     match mode {
         SaveMode::New => {
             // Publish a complete file atomically, with no overwrite even if a
@@ -72,24 +96,46 @@ pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<Stri
                 io::ErrorKind::AlreadyExists => {
                     Error::new("fileExists", "Circuit file already exists")
                 }
-                _ => Error::new(
-                    "ioError",
-                    format!("Could not publish {}: {error}", path.display()),
-                ),
+                _ => save_io_error("publish", &path, error),
             })?;
         }
         SaveMode::Replace { .. } => {
-            // Also catch edits by programs that wrote while the temp file synced.
-            check_destination(&path, &mode)?;
-            fs::rename(&staged.0, &path).map_err(|error| {
-                Error::new(
-                    "ioError",
-                    format!("Could not replace {}: {error}", path.display()),
-                )
-            })?;
+            replace_file(&staged.0, &path, &mode, |from, to| fs::rename(from, to))?;
         }
     }
     Ok(revision(&bytes))
+}
+
+pub(super) fn replace_file(
+    staged: &Path,
+    path: &Path,
+    mode: &SaveMode<'_>,
+    mut rename: impl FnMut(&Path, &Path) -> io::Result<()>,
+) -> Result<(), Error> {
+    let mut delays = REPLACE_RETRY_DELAYS.into_iter();
+    loop {
+        // Another program can edit the destination while the staged file syncs
+        // or while the replacement waits for a sharing conflict to clear.
+        check_destination(path, mode)?;
+        let Err(error) = rename(staged, path) else {
+            return Ok(());
+        };
+        if wait_for_sharing_retry(&error, &mut delays) {
+            continue;
+        }
+        return Err(save_io_error("replace", path, error));
+    }
+}
+
+fn wait_for_sharing_retry(error: &io::Error, delays: &mut impl Iterator<Item = Duration>) -> bool {
+    if cfg!(windows)
+        && matches!(error.raw_os_error(), Some(5 | 32))
+        && let Some(delay) = delays.next()
+    {
+        std::thread::sleep(delay);
+        return true;
+    }
+    false
 }
 
 fn check_destination(path: &Path, mode: &SaveMode<'_>) -> Result<Option<Vec<u8>>, Error> {
@@ -97,7 +143,7 @@ fn check_destination(path: &Path, mode: &SaveMode<'_>) -> Result<Option<Vec<u8>>
         SaveMode::New => match fs::symlink_metadata(path) {
             Ok(_) => Err(Error::new("fileExists", "Circuit file already exists")),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(io_error(error)),
+            Err(error) => Err(save_io_error("check the destination for", path, error)),
         },
         SaveMode::Replace {
             expected_disk_revision,
@@ -105,7 +151,7 @@ fn check_destination(path: &Path, mode: &SaveMode<'_>) -> Result<Option<Vec<u8>>
             let existing = match fs::read(path) {
                 Ok(bytes) => Some(bytes),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                Err(error) => return Err(io_error(error)),
+                Err(error) => return Err(save_io_error("read the disk revision for", path, error)),
             };
             let actual = existing.as_deref().map(revision);
             if actual.as_deref() == Some(*expected_disk_revision) {
@@ -121,19 +167,61 @@ fn check_destination(path: &Path, mode: &SaveMode<'_>) -> Result<Option<Vec<u8>>
     }
 }
 
-fn save_path(path: &Path) -> Result<PathBuf, Error> {
-    match path.canonicalize() {
+pub(super) fn save_path(
+    path: &Path,
+    mut canonicalize: impl FnMut(&Path) -> io::Result<PathBuf>,
+) -> io::Result<PathBuf> {
+    let mut delays = REPLACE_RETRY_DELAYS.into_iter();
+    let mut resolve = |path: &Path| loop {
+        match canonicalize(path) {
+            Err(error) if wait_for_sharing_retry(&error, &mut delays) => continue,
+            outcome => return outcome,
+        }
+    };
+    let resolved = resolve(path);
+    #[cfg(windows)]
+    let resolved = if resolved
+        .as_ref()
+        .is_ok_and(|path| is_ntfs_deleted_path(path))
+    {
+        // Canonicalization can open the old file just before another save replaces
+        // it, then ask Windows for its name after NTFS has moved it out of the way.
+        // Resolve the requested name again so both saves use the destination's lock.
+        let current = resolve(path);
+        if current
+            .as_ref()
+            .is_ok_and(|path| is_ntfs_deleted_path(path))
+        {
+            return Err(io::Error::other("Circuit changed while resolving its path"));
+        }
+        current
+    } else {
+        resolved
+    };
+    match resolved {
         Ok(path) => Ok(path),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let name = path.file_name().ok_or_else(|| io_error(error))?;
+            let name = path.file_name().ok_or(error)?;
             let parent = path
                 .parent()
                 .filter(|path| !path.as_os_str().is_empty())
                 .unwrap_or(Path::new("."));
-            Ok(parent.canonicalize().map_err(io_error)?.join(name))
+            Ok(resolve(parent)?.join(name))
         }
-        Err(error) => Err(io_error(error)),
+        Err(error) => Err(error),
     }
+}
+
+#[cfg(windows)]
+fn is_ntfs_deleted_path(path: &Path) -> bool {
+    use std::path::Component;
+
+    let mut components = path.components();
+    matches!(
+        (components.next(), components.next(), components.next(), components.next()),
+        (Some(Component::Prefix(_)), Some(Component::RootDir), Some(Component::Normal(extend)), Some(Component::Normal(deleted)))
+            if extend.eq_ignore_ascii_case("$Extend") && deleted.eq_ignore_ascii_case("$Deleted")
+    )
 }
 
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
@@ -184,4 +272,11 @@ impl Drop for StagedFile {
 
 fn io_error(error: io::Error) -> Error {
     Error::new("ioError", error.to_string())
+}
+
+fn save_io_error(stage: &str, path: &Path, error: io::Error) -> Error {
+    Error::new(
+        "ioError",
+        format!("Could not {stage} {}: {error}", path.display()),
+    )
 }

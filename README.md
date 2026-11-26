@@ -67,6 +67,8 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 
 RC·RLC·벅 예제는 [examples](examples/)에 있습니다. PFC 예제는 지원 범위 밖 제어 설정이 있어 읽기를 거절합니다. 회로 파일에는 revision이나 Undo 기록을 저장하지 않습니다. 저장 중에는 시스템 임시 폴더의 경로별 OS 잠금을 사용합니다. 신규 저장은 하드 링크를 지원하는 파일시스템에서 완성된 파일을 원자적으로 게시합니다. 동일한 회로로 덮어쓰면 기존 바이트와 `diskRevision`을 유지합니다. 저항 기본값이 파일에 명시돼 있으면 저장할 때 그 키를 생략합니다.
 
+Windows에서 저장 경로 해석이나 교체가 접근 거부 또는 공유 위반으로 막히면 각 단계에서 최대 250 ms의 누적 대기 동안 다시 시도합니다. 교체 시도마다 디스크 revision을 확인합니다. 다른 저장이 파일을 바꿨다면 현재 revision을 담은 `diskRevisionConflict`로 중단하며, 공유 경합이 계속되면 실패한 단계와 경로를 담은 `ioError`를 반환합니다.
+
 `litzsim serve`는 요청 한 줄마다 JSON 한 줄을 반환합니다. `ping`은 버전을, `new`는 빈 v1 문서와 revision을 반환합니다. 성공한 `apply`와 `undo` 응답에는 `document`, `receipt`, 같은 revision의 `layout`이 함께 들어갑니다. 실패 응답의 `error` 객체에는 `code`와 `message`가 들어갑니다. 편집과 파일 요청의 필드는 다음과 같습니다.
 
 | `op` | 필드 |
