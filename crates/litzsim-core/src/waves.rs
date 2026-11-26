@@ -96,6 +96,19 @@ mod tests {
         );
         let exact = wave.view(&channels, 256.0, 256.0, 1).unwrap();
         assert_eq!(exact.channels[0].points[0].row, 256);
+        let clipped = wave.view(&channels, 256.0, 260.0, 1).unwrap();
+        assert!(
+            clipped.channels[0]
+                .points
+                .iter()
+                .any(|point| point.row == 257)
+        );
+        assert!(
+            clipped.channels[0]
+                .points
+                .iter()
+                .all(|point| point.row >= 256)
+        );
     }
 }
 
@@ -337,12 +350,14 @@ impl Waveform {
             for row in [low.min(high), low.max(high)] {
                 // Include the immediate neighbors of a sharp peak, even when
                 // one of the neighbors belongs to a different pixel bucket.
-                if row > visible.start && row + 1 < visible.end {
+                if row > 0 && row + 1 < self.rows().len() {
                     let before = self.row(row - 1)[column];
                     let value = self.row(row)[column];
                     let after = self.row(row + 1)[column];
                     if (value > before && value > after) || (value < before && value < after) {
-                        for sample in row - 1..=row + 1 {
+                        let first = (row - 1).max(visible.start);
+                        let last = (row + 1).min(visible.end - 1);
+                        for sample in first..=last {
                             self.push_point(series, sample, column);
                         }
                         continue;
