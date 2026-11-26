@@ -7,7 +7,8 @@ import { createInterface } from "node:readline";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { startRequest } from "./host.mjs";
-import { isDirty, nearestPair } from "./rules.js";
+import { PARTS, ROTATE_SHORTCUT, shortcutOf } from "./parts.js";
+import { deleteSelection, isDirty, nearestPair, selectInBox, selectedSegmentIndex, selectionBox } from "./rules.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const executable = ["litzsim.exe", "litzsim"].map(name => `${root}target/release/${name}`).find(existsSync);
@@ -37,6 +38,42 @@ const rc = async () => {
   const opened = await call("inspect", { file: `${root}examples/rc.litzsim` });
   return { document: opened.document, revision: opened.revision };
 };
+
+test("selecting one wire sends the core terminals and endpoints, even if segment indices change", async () => {
+  const sheet = await apply(await rc(), []);
+  const index = sheet.layout.segments.findIndex(wire => wire.netId === "input");
+  const wire = sheet.layout.segments[index];
+  const reversed = { segments: [...sheet.layout.segments].reverse() };
+  assert.equal(selectedSegmentIndex(reversed, wire), reversed.segments.length - 1 - index);
+  const ops = deleteSelection({ parts: [], wires: [wire] });
+  assert.deepEqual(ops, [{ op: "removeBranch", terminals: wire.terminals, from: wire.from, to: wire.to }]);
+  const next = await apply(sheet, ops);
+  assert.equal(selectedSegmentIndex(next.layout, wire), -1);
+  assert.deepEqual([next.layout.pins["V1.p"].netId, next.layout.pins["R1.p"].netId], [null, null]);
+});
+
+test("area selection collects intersecting parts and wires and deletes them in one batch", async () => {
+  const sheet = await apply(await rc(), []);
+  const selected = selectInBox(sheet.layout, selectionBox([162, 58], [85, 6]));
+  assert.deepEqual(selected.parts, ["R1"]);
+  assert.deepEqual(selected.wires.map(wire => wire.netId), ["input", "output"]);
+  const ops = deleteSelection(selected);
+  assert.deepEqual(ops.map(op => op.op), ["removeBranch", "removeBranch", "delete"]);
+  const next = await apply(sheet, ops);
+  assert.equal(next.document.parts.R1, undefined);
+  const undone = await call("undo", {
+    document: next.document, expectedAfter: next.revision, expectedBefore: sheet.revision, previous: sheet.document,
+  });
+  assert.equal(undone.layout.revision, sheet.revision);
+  assert.deepEqual(undone.document, sheet.document);
+});
+
+test("R places a resistor and Shift+R rotates the selection", () => {
+  assert.equal(shortcutOf({ key: "r" }), PARTS.resistor.key);
+  assert.equal(PARTS.resistor.key, "R");
+  assert.equal(shortcutOf({ key: "R", shiftKey: true }), ROTATE_SHORTCUT);
+  assert.equal(ROTATE_SHORTCUT, "Shift+R");
+});
 
 test("a new circuit with only a changed simulation setting is unsaved", async () => {
   const created = await call("new");
