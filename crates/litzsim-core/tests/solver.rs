@@ -133,6 +133,60 @@ fn sampled_sensors_match_meters_and_use_the_left_limit_at_pwm_edges() {
 }
 
 #[test]
+fn final_control_change_at_pwm_edge_matches_the_rows_of_a_longer_run() {
+    let mut value: Value = serde_json::from_str(BUCK).unwrap();
+    let edge = 50e-6;
+    value["simulation"]["timeStep_s"] = json!(3e-7);
+    value["parts"]["VG"] = json!({"type": "voltmeter", "parameters": {}});
+    value["nets"]["gate"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VG.p"));
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VG.n"));
+
+    let at_edge = |value: &mut Value, short| {
+        value["simulation"]["stopTime_s"] = json!(if short { edge } else { 51e-6 });
+        let wave = simulate(&document(value), || false).unwrap();
+        wave.rows()
+            .filter(|row| row[0] == edge)
+            .map(<[f64]>::to_vec)
+            .collect::<Vec<_>>()
+    };
+    let electrical_stop = at_edge(&mut value, true);
+    assert_eq!(
+        electrical_stop.len(),
+        1,
+        "legacy stop has only its left limit"
+    );
+
+    value["simulation"]["controlSamplePeriod_s"] = json!(edge);
+    value["parts"]["VS"] = json!({
+        "type": "voltageSensor", "parameters": {"gain": 2}, "record": {"output": true}
+    });
+    value["parts"]["S"] = json!({
+        "type": "step", "parameters": {"stepTime_s": edge, "before": 0, "after": 1},
+        "record": {"output": true}
+    });
+    value["nets"]["gate"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VS.p"));
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VS.n"));
+    let continued = at_edge(&mut value, false);
+    assert_eq!(continued.len(), 2);
+    // VG_V drops as the step changes. VS_out holds twice the left-limit VG_V.
+    assert_eq!(continued[0][2..], [10.0, 0.0, 20.0]);
+    assert_eq!(continued[1][2..], [0.0, 1.0, 20.0]);
+    assert_eq!(at_edge(&mut value, true), continued);
+}
+
+#[test]
 fn control_execution_reports_the_cycle_and_driverless_inputs() {
     let mut value: Value = serde_json::from_str(CONTROL).unwrap();
     value["nets"]["constant"] = json!(["GAIN1.out", "SUM1.in1", "LIM1.in"]);

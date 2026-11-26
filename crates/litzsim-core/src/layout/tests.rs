@@ -702,6 +702,9 @@ fn insert_in_branch_cuts_the_chosen_segment_and_faces_the_first_pin_toward_from(
             (error.code, error.operation, error.target_id.as_deref()),
             ("operationFailed", Some(2), Some(target))
         );
+        if target == "nmos" {
+            assert_eq!(error.message, "expected a two-terminal part");
+        }
     }
 }
 

@@ -537,10 +537,7 @@ fn insert_in_branch(
     let (Some(first), Some(second), None) =
         (electrical.next(), electrical.next(), electrical.next())
     else {
-        return Err(Error::invalid(
-            kind,
-            "expected a part with two electrical terminals",
-        ));
+        return Err(Error::invalid(kind, "expected a two-terminal part"));
     };
     if document.0.require_pin(&terminals[0])?.is_signal() {
         return Err(Error::invalid(

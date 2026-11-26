@@ -128,16 +128,20 @@ pub fn simulate_with_warnings(
                 devices[index].signal(quantity, x)
             })?;
         }
-        if record && (time == 0.0 || (time == stop && control_changed)) {
+        if record && time == 0.0 {
             push_row(&mut wave, &devices, &probes, control.as_ref(), time, x)?;
         }
-        if time == stop {
+        let at_stop = time == stop;
+        if at_stop && !control_changed {
             return Ok((wave, warnings));
         }
         if on_grid {
             tick += 1;
         }
-        let boundary = stop.min(tick as f64 * step);
+        // A control change at stop needs a right-limit row. Use the interval
+        // that would follow this sample to find the new PWM state.
+        let grid = tick as f64 * step;
+        let boundary = if at_stop { grid } else { stop.min(grid) };
         let edge = clocks
             .iter()
             .fold(boundary, |next, pulse| next.min(pulse.next_edge(time)));
@@ -150,7 +154,7 @@ pub fn simulate_with_warnings(
         } else {
             edge
         };
-        let next = if stop - next <= CLOCK_EPSILON * stop {
+        let next = if !at_stop && stop - next <= CLOCK_EPSILON * stop {
             stop
         } else {
             next
@@ -202,6 +206,9 @@ pub fn simulate_with_warnings(
             }
         } else if record && time != 0.0 && control_changed {
             push_row(&mut wave, &devices, &probes, control.as_ref(), time, x)?;
+        }
+        if at_stop {
+            return Ok((wave, warnings));
         }
         previous = time;
         time = next;
