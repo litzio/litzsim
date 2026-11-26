@@ -2,6 +2,7 @@ import React from "react";
 import { CATEGORIES, PARTS, PARAMETERS, ROTATE_SHORTCUT, formatSI, parseSI, shortcutOf } from "./parts.js";
 import { Schematic, sheetView, contentBounds } from "./schematic.jsx";
 import { EMPTY_SELECTION, deleteSelection, isDirty, nearestPair, selectInBox, selectedSegmentIndex, selectionBox } from "./rules.js";
+import { Waveform } from "./waveform.jsx";
 
 // The editor owns only screen state: selection, drag previews, hover, the
 // collapsed library and the undo snapshots it hands back to the core. Every
@@ -190,6 +191,8 @@ export function Editor({ ui, adapter }) {
   const [canvasSize, setCanvasSize] = useState([0, 0]);
   const [, setAnchorTick] = useState(0);
   const [panning, setPanning] = useState(false);
+  // The waveform window replaces the drawing; the circuit and its undo history stay here.
+  const [screen, setScreen] = useState("editor");
   const svgRef = useRef(null);
   const anchor = useRef(null);
   const geometry = useRef(null);
@@ -274,7 +277,7 @@ export function Editor({ ui, adapter }) {
     };
     pane.addEventListener("wheel", onWheel, { passive: false });
     return () => { observer.disconnect(); pane.removeEventListener("wheel", onWheel); };
-  }, [ready]);
+  }, [ready, screen]);
 
   // After a zoom change keep the anchored scene point under the same pane pixel.
   useLayoutEffect(() => {
@@ -746,6 +749,12 @@ export function Editor({ ui, adapter }) {
     </ui.ScreenLayout>;
   }
 
+  if (screen === "wave") {
+    return <Waveform ui={ui} adapter={adapter} file={file} revision={sheet.revision}
+      preferredRun={run?.state === "completed" ? run.runId : null}
+      onBack={() => { fitPending.current = true; setScreen("editor"); }} />;
+  }
+
   const view = sheetView(sheet.layout, canvasSize.map(value => value / zoom));
   geometry.current = { view, zoom };
   const scaled = value => value * zoom;
@@ -807,7 +816,8 @@ export function Editor({ ui, adapter }) {
       <ui.Button variant="default" disabled={busy || Boolean(runReason)} title={runReason || undefined}
         aria-describedby={runReason ? "litzsim-run-reason" : undefined} onClick={startRun}>실행</ui.Button>
       <ui.Button disabled={!running || run.state === "stopping"} onClick={stopRun}>중지</ui.Button>
-      <ui.Button disabled title="파형 창은 다음 단계에서 제공합니다.">파형 보기</ui.Button>
+      <ui.Button disabled={!file} title={file ? "이 회로 폴더의 완료된 실행 파형을 봅니다." : "저장한 회로의 실행 결과를 볼 수 있습니다."}
+        onClick={() => setScreen("wave")}>파형 보기</ui.Button>
     </>}>
     <section aria-label="LitzSim 회로 편집기" style={styles.body} onKeyDown={onKeyDown} onKeyUp={onKeyUp}>
       {error && <ui.Notice tone="error">{error}</ui.Notice>}

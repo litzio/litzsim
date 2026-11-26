@@ -119,6 +119,24 @@ impl Runs {
         to: f64,
         pixels: u32,
     ) -> Result<waves::View<'_>, Value> {
+        self.waveform(path)?
+            .view(channels, from, to, pixels)
+            .map_err(|err| error("invalidWaveRequest", err.to_string()))
+    }
+
+    pub fn measure(
+        &mut self,
+        path: PathBuf,
+        channels: &[String],
+        from: f64,
+        to: f64,
+    ) -> Result<waves::Measurement<'_>, Value> {
+        self.waveform(path)?
+            .measure(channels, from, to)
+            .map_err(|err| error("invalidWaveRequest", err.to_string()))
+    }
+
+    fn waveform(&mut self, path: PathBuf) -> Result<&waves::Waveform, Value> {
         if read_status(&path)?.state != State::Completed {
             return Err(error(
                 "runNotCompleted",
@@ -129,10 +147,7 @@ impl Runs {
             let waveform = waves::read(&path.join(RESULT)).map_err(io_error)?;
             self.wave = Some((path, waveform));
         }
-        let (_, waveform) = self.wave.as_ref().expect("waveform loaded");
-        waveform
-            .view(channels, from, to, pixels)
-            .map_err(|err| error("invalidWaveRequest", err.to_string()))
+        Ok(&self.wave.as_ref().expect("waveform loaded").1)
     }
 }
 
@@ -611,6 +626,49 @@ fn watch_eof(mut input: impl Read + Send + 'static) -> Arc<AtomicBool> {
         notify.store(true, Ordering::Release);
     });
     closed
+}
+
+/// Runs of a circuit folder, newest first. Completed runs add the rows, time
+/// range and signals of their result, read from its header.
+pub fn list(directory: &Path) -> Response {
+    let root = directory.join("runs");
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok(ok(json!({ "runs": [] })));
+        }
+        Err(err) => return Err(io_error(err)),
+    };
+    let mut runs = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(io_error)?;
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        // A run folder is listed once admission has written its status.
+        let path = entry.path();
+        if !valid_run_id(&id) || !path.join(STATUS).is_file() {
+            continue;
+        }
+        let status = recover_run(&path)?;
+        let started = id
+            .split('-')
+            .next()
+            .and_then(|nanos| nanos.parse::<u128>().ok())
+            .unwrap_or_default();
+        let mut run = json!(status);
+        run["startedAt"] = json!((started / 1_000_000) as f64);
+        if status.state == State::Completed {
+            let summary = waves::summary(&path.join(RESULT)).map_err(io_error)?;
+            run["rows"] = summary.rows.into();
+            run["timeRange"] = json!(summary.time_range);
+            run["channels"] = json!(summary.channels);
+        }
+        runs.push((started, id, run));
+    }
+    runs.sort_by(|a, b| (b.0, &b.1).cmp(&(a.0, &a.1)));
+    let runs: Vec<_> = runs.into_iter().map(|(_, _, run)| run).collect();
+    Ok(ok(json!({ "runs": runs })))
 }
 
 pub fn status(path: &Path) -> Response {

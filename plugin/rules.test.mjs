@@ -1,12 +1,14 @@
 // Run after `cargo build --release`: node --test plugin
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { startRequest } from "./host.mjs";
+import { applyToAll, autoRange, axisFor, defaultRun, formatValue, niceStep, panRange, ticks, zoomAxis, zoomRange } from "./plot.js";
 import { PARTS, ROTATE_SHORTCUT, shortcutOf } from "./parts.js";
 import { deleteSelection, isDirty, nearestPair, selectInBox, selectedSegmentIndex, selectionBox } from "./rules.js";
 
@@ -120,4 +122,107 @@ test("a run of a circuit at a drive root starts in that root, not a drive-relati
   const folder = path.join(drive, "work", "circuits");
   assert.equal(startRequest({ ...payload, file: path.join(folder, "rc.litzsim") }).directory, folder);
   assert.deepEqual(startRequest({ ...payload, directory: "." }), { ...payload, directory: "." });
+});
+
+test("waveform grids use 1-2-5 steps, and a custom step that would flood the plot is refused", () => {
+  assert.equal(niceStep(1e-3, 10), 1e-4);
+  assert.equal(niceStep(7, 4), 2);
+  assert.equal(niceStep(0.9, 2), 0.5);
+  assert.deepEqual(ticks(0, 1e-3, 2.5e-4), [0, 2.5e-4, 5e-4, 7.5e-4, 1e-3]);
+  assert.deepEqual(ticks(-0.3, 0.3, 0.2), [-0.2, 0, 0.2]);
+  assert.equal(ticks(0, 1, 1e-6), null);
+  assert.equal(formatValue(2e-4, "s"), "200 µs");
+  assert.equal(formatValue(0, "V"), "0 V");
+  assert.equal(formatValue(-1.25e-3), "-1.25m");
+});
+
+test("auto ranges pad the visible extremes; Shift+wheel scales about the pointer value", () => {
+  assert.deepEqual(autoRange([[0, 10], [null, null], [-10, 5]]), [-11, 11]);
+  assert.deepEqual(autoRange([[5, 5]]), [4.5, 5.5]);
+  assert.deepEqual(autoRange([]), [-1, 1]);
+  assert.deepEqual(zoomAxis([0, 10], 0.5, 0.2), [1, 6]);
+});
+
+test("a second unit goes to the right axis; the same unit stays left", () => {
+  const signals = [];
+  signals.push({ name: "VC_V", unit: "V", axis: axisFor(signals, "V") });
+  signals.push({ name: "VM1_V", unit: "V", axis: axisFor(signals, "V") });
+  signals.push({ name: "AM1_A", unit: "A", axis: axisFor(signals, "A") });
+  assert.deepEqual(signals.map(signal => signal.axis), ["left", "left", "right"]);
+  assert.equal(axisFor([{ unit: "A", axis: "right" }], "V"), "left");
+});
+
+test("applying settings to all graphs copies grids and automatic choices, and typed ranges only to the same signals", () => {
+  const axis = (auto, min = null, max = null, step = null) => ({ auto, min, max, step });
+  const manual = { major: true, minor: false, timeStep: null, left: axis(false, 0, 12, 2), right: axis(false, -1, 1, 0.5) };
+  const graphs = [
+    { id: 1, signals: [{ name: "VC_V", unit: "V", axis: "left" }], settings: manual },
+    { id: 2, signals: [{ name: "VC_V", unit: "V", axis: "left" }, { name: "AM1_A", unit: "A", axis: "right" }], settings: manual },
+    { id: 3, signals: [{ name: "VM1_V", unit: "V", axis: "left" }], settings: manual },
+  ];
+  const chosen = { major: false, minor: true, timeStep: 5e-5, left: axis(false, 3.5, 5.5), right: axis(true) };
+  const applied = applyToAll(graphs, 2, chosen);
+  assert.deepEqual(applied[1].settings, chosen);
+  for (const graph of applied) assert.deepEqual([graph.settings.major, graph.settings.minor, graph.settings.timeStep], [false, true, 5e-5]);
+  // VC_V gets the typed range; the gate voltage keeps its own range but takes the automatic step.
+  assert.deepEqual(applied[0].settings.left, chosen.left);
+  assert.deepEqual(applied[2].settings.left, axis(false, 0, 12, null));
+  // An automatic right axis turns every right axis automatic.
+  assert.deepEqual(applied.map(graph => graph.settings.right.auto), [true, true, true]);
+});
+
+test("time zoom keeps the pointer time and stays inside the run; panning stops at its ends", () => {
+  const full = [0, 1e-3];
+  const zoomed = zoomRange(full, 0.5, 2.5e-4, full, 1e-6);
+  assert.ok(Math.abs(zoomed[0] - 1.25e-4) < 1e-15 && Math.abs(zoomed[1] - 6.25e-4) < 1e-15);
+  assert.deepEqual(zoomRange(zoomed, 10, 5e-4, full, 1e-6), full);
+  const narrowest = zoomRange(full, 1e-9, 5e-4, full, 4e-7);
+  assert.ok(Math.abs(narrowest[1] - narrowest[0] - 4e-7) < 1e-15);
+  assert.deepEqual(panRange([2e-4, 4e-4], -1, full), [0, 2e-4]);
+  assert.deepEqual(panRange([2e-4, 4e-4], 1, full), [8e-4, 1e-3]);
+});
+
+test("the waveform window opens the newest completed run of the circuit folder and reads it by file", async () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "litzsim-wave-screen-"));
+  try {
+    const file = path.join(folder, "buck.litzsim");
+    copyFileSync(`${root}examples/buck.litzsim`, file);
+    const opened = await call("inspect", { file });
+    assert.deepEqual((await call("runs", startRequest({ file }))).runs, []);
+    const started = await call("start", startRequest({ file, document: opened.document, expectedRevision: opened.revision }));
+    let status = started;
+    while (["running", "stopping"].includes(status.state)) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      status = await call("status", startRequest({ file, runId: started.runId }));
+    }
+    assert.equal(status.state, "completed");
+
+    const { runs } = await call("runs", startRequest({ file }));
+    assert.equal(defaultRun(runs, null), started.runId);
+    assert.equal(defaultRun([{ runId: "new", state: "failed" }, ...runs], "missing"), started.runId);
+    const [run] = runs;
+    assert.equal(run.revision, opened.revision);
+    assert.deepEqual(run.channels.map(channel => channel.name), ["D1_A", "L1_A", "VC_V"]);
+    assert.equal(run.timeRange[0], 0);
+
+    // Requests name the circuit file, so a core that did not start the run (after reopening Litzio) finds it.
+    const request = { file, runId: run.runId, channels: ["L1_A", "VC_V"] };
+    const wave = await call("wave", startRequest({ ...request, from_s: run.timeRange[0], to_s: run.timeRange[1], pixels: 400 }));
+    const [current, voltage] = wave.channels;
+    const peak = current.points.find(point => point.value === current.maximum);
+    assert.ok(peak, "the maximum is one of the drawn points");
+    const measured = await call("measure", startRequest({ ...request, from_s: run.timeRange[0], to_s: run.timeRange[1] }));
+    assert.equal(measured.channels[0].maximum, current.maximum);
+    assert.equal(measured.channels[1].minimum, voltage.minimum);
+    assert.equal(measured.channels[1].to.row, run.rows - 1);
+    assert.ok(measured.channels[1].average > voltage.minimum && measured.channels[1].average < voltage.maximum);
+    // The table shows A (from) and B (to) as sent and the core's differences.
+    const swapped = await call("measure", startRequest({ ...request, from_s: run.timeRange[1], to_s: run.timeRange[0] }));
+    assert.equal(swapped.deltaTime_s, -measured.deltaTime_s);
+    assert.equal(swapped.frequency_Hz, 1 / (run.timeRange[1] - run.timeRange[0]));
+    assert.equal(swapped.channels[1].delta, swapped.channels[1].to.value - swapped.channels[1].from.value);
+    assert.equal(swapped.channels[1].average, measured.channels[1].average);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
 });

@@ -20,6 +20,10 @@ pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
         [cmd, path] if cmd == "status" => return runs::status(Path::new(path)),
         [cmd, path] if cmd == "stop" => return runs::stop(Path::new(path)),
         [cmd, path, options @ ..] if cmd == "wave" => return wave_file(path.into(), options),
+        [cmd, path, options @ ..] if cmd == "measure" => {
+            return measure_file(path.into(), options);
+        }
+        [cmd, directory] if cmd == "runs" => return runs::list(Path::new(directory)),
         [cmd, file, expect, revision, option, input]
             if cmd == "apply" && expect == "--expect" && option == "--ops" =>
         {
@@ -82,7 +86,24 @@ pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
     }))
 }
 
-fn wave_file(path: PathBuf, options: &[OsString]) -> Result<Value, Value> {
+fn measure_file(path: PathBuf, options: &[OsString]) -> Result<Value, Value> {
+    let (channels, from, to, pixels) = wave_options(options)?;
+    if pixels.is_some() {
+        return Err(usage());
+    }
+    let mut runs = Runs::default();
+    let measured = runs.measure(
+        path,
+        &channels,
+        required(from, "--from")?,
+        required(to, "--to")?,
+    )?;
+    Ok(success(measured))
+}
+
+type WaveOptions = (Vec<String>, Option<f64>, Option<f64>, Option<u32>);
+
+fn wave_options(options: &[OsString]) -> Result<WaveOptions, Value> {
     let (mut channels, mut from, mut to, mut pixels) = (Vec::new(), None, None, None);
     for option in options.chunks(2) {
         let [flag, value] = option else {
@@ -99,6 +120,11 @@ fn wave_file(path: PathBuf, options: &[OsString]) -> Result<Value, Value> {
             _ => return Err(usage()),
         }
     }
+    Ok((channels, from, to, pixels))
+}
+
+fn wave_file(path: PathBuf, options: &[OsString]) -> Result<Value, Value> {
+    let (channels, from, to, pixels) = wave_options(options)?;
     let mut runs = Runs::default();
     let view = runs.wave(
         path,
@@ -165,6 +191,11 @@ pub enum Reply<'a> {
         #[serde(flatten)]
         view: litzsim_core::waves::View<'a>,
     },
+    Measure {
+        ok: bool,
+        #[serde(flatten)]
+        measured: litzsim_core::waves::Measurement<'a>,
+    },
 }
 
 pub fn serve_request<'a>(runs: &'a mut Runs, line: &str) -> Reply<'a> {
@@ -172,6 +203,12 @@ pub fn serve_request<'a>(runs: &'a mut Runs, line: &str) -> Reply<'a> {
         Ok(request) if request.op == "wave" => {
             return match wave_view(runs, request) {
                 Ok(view) => Reply::Wave { ok: true, view },
+                Err(error) => Reply::Json(json!({ "ok": false, "error": error })),
+            };
+        }
+        Ok(request) if request.op == "measure" => {
+            return match measure_view(runs, request) {
+                Ok(measured) => Reply::Measure { ok: true, measured },
                 Err(error) => Reply::Json(json!({ "ok": false, "error": error })),
             };
         }
@@ -196,6 +233,20 @@ fn wave_view<'a>(
         required(request.from_s, "from_s")?,
         required(request.to_s, "to_s")?,
         required(request.pixels, "pixels")?,
+    )
+}
+
+fn measure_view<'a>(
+    runs: &'a mut Runs,
+    request: Request<'_>,
+) -> Result<litzsim_core::waves::Measurement<'a>, Value> {
+    let id = required(request.run_id, "runId")?;
+    let path = runs.directory(id, request.directory.as_deref())?;
+    runs.measure(
+        path,
+        &required(request.channels, "channels")?,
+        required(request.from_s, "from_s")?,
+        required(request.to_s, "to_s")?,
     )
 }
 
@@ -254,6 +305,7 @@ fn handle(runs: &mut Runs, request: Request<'_>) -> Result<Value, Value> {
             document(required(request.document, "document")?)?,
             required(request.expected_revision, "expectedRevision")?,
         ),
+        "runs" => runs::list(&required(request.directory, "directory")?),
         "status" | "stop" => {
             let id = required(request.run_id, "runId")?;
             let path = runs.directory(id, request.directory.as_deref())?;
@@ -327,6 +379,7 @@ fn usage() -> Value {
         " | apply FILE --expect REV --ops OPS.json",
         " | undo FILE --expect AFTER --before BEFORE --previous SNAPSHOT",
         " | run FILE OUT | start FILE | status RUN_DIR | stop RUN_DIR",
-        " | wave RUN_DIR --channel NAME [--channel NAME...] --from TIME --to TIME --pixels WIDTH"
+        " | wave RUN_DIR --channel NAME [--channel NAME...] --from TIME --to TIME --pixels WIDTH",
+        " | measure RUN_DIR --channel NAME [--channel NAME...] --from TIME --to TIME | runs DIR"
     ))
 }

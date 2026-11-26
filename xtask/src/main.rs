@@ -53,6 +53,8 @@ fn package_plugin() -> Result<(), Box<dyn Error>> {
         "schematic.jsx",
         "rules.js",
         "parts.js",
+        "waveform.jsx",
+        "plot.js",
     ] {
         fs::copy(source.join(file), output.join(file))?;
     }

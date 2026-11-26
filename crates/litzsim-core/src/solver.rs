@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 type Node = Option<usize>; // Ground has no row or column.
 const CLOCK_EPSILON: f64 = 8.0 * f64::EPSILON;
 const SWITCH_EPSILON: f64 = 1e-12;
+/// Fraction of the next interval used to settle switch states at an edge.
+const EDGE_SETTLE: f64 = 1e-6;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,7 +83,7 @@ pub fn simulate_with_warnings(
         let h = time - previous;
         // Use the interval's interior state. At an edge the sample is the
         // left limit, and the next interval uses the newly switched state.
-        solve_sample(&mut devices, &mut system, time, h)?;
+        solve_sample(&mut devices, &mut system, Sample::step(time, h))?;
         let x = &system.rhs;
         for device in &mut devices {
             let branch = device.branch;
@@ -95,12 +97,9 @@ pub fn simulate_with_warnings(
             }
         }
         let on_grid = time == tick as f64 * step;
-        if stride.is_none_or(|stride| on_grid && tick % stride == 0) || time == stop {
-            let signals = probes.iter().map(|&(index, _)| devices[index].signal(x));
-            if signals.clone().any(|value| !value.is_finite()) {
-                return Err(Error::new("simulationFailed", "Non-finite waveform value"));
-            }
-            wave.push(time, signals);
+        let record = stride.is_none_or(|stride| on_grid && tick % stride == 0) || time == stop;
+        if record {
+            push_row(&mut wave, &devices, &probes, time, x)?;
         }
         if time == stop {
             return Ok((wave, warnings));
@@ -129,8 +128,78 @@ pub fn simulate_with_warnings(
                 "Time step below clock resolution",
             ));
         }
+        // A PWM edge at this sample switches the next interval. Record the
+        // right limit as a second row at the same time: capacitor voltages and
+        // inductor currents stay, and the circuit is solved with the switch
+        // states of the next interval. Switch states are restored afterwards so
+        // the following steps are computed exactly as without this row.
+        let right = (time + next) / 2.0;
+        if record
+            && clocks
+                .iter()
+                .any(|pulse| pulse.is_high(time - h / 2.0) != pulse.is_high(right))
+        {
+            let switches: Vec<_> = devices.iter().map(|d| (d.driven, d.conducting)).collect();
+            let limit = Sample {
+                time,
+                h: 0.0,
+                interior: right,
+                initial: false,
+            };
+            // With inductors as exact current sources an off diode can leave
+            // no path for them. A vanishing step first settles which diodes
+            // conduct; its values are not used.
+            let settle = Sample {
+                h: (next - time) * EDGE_SETTLE,
+                ..limit
+            };
+            solve_sample(&mut devices, &mut system, settle)?;
+            solve_sample(&mut devices, &mut system, limit)?;
+            push_row(&mut wave, &devices, &probes, time, &system.rhs)?;
+            for (device, (driven, conducting)) in devices.iter_mut().zip(switches) {
+                (device.driven, device.conducting) = (driven, conducting);
+            }
+        }
         previous = time;
         time = next;
+    }
+}
+
+fn push_row(
+    wave: &mut Waveform,
+    devices: &[Device<'_>],
+    probes: &[(usize, &str)],
+    time: f64,
+    x: &[f64],
+) -> Result<(), Error> {
+    let signals = probes.iter().map(|&(index, _)| devices[index].signal(x));
+    if signals.clone().any(|value| !value.is_finite()) {
+        return Err(Error::new("simulationFailed", "Non-finite waveform value"));
+    }
+    wave.push(time, signals);
+    Ok(())
+}
+
+/// One circuit solve. `h` is the step from the previous sample: zero at the
+/// start and for the right limit at a PWM edge, where inductors hold their
+/// current and capacitors their voltage. PWM states are those at `interior`.
+/// `initial` applies the start-only capacitor rules.
+#[derive(Clone, Copy)]
+struct Sample {
+    time: f64,
+    h: f64,
+    interior: f64,
+    initial: bool,
+}
+
+impl Sample {
+    fn step(time: f64, h: f64) -> Self {
+        Self {
+            time,
+            h,
+            interior: time - h / 2.0,
+            initial: h == 0.0,
+        }
     }
 }
 
@@ -435,10 +504,14 @@ fn device_kind(id: &str, part: &Part) -> Result<Kind, Error> {
 fn solve_sample(
     devices: &mut [Device<'_>],
     system: &mut System,
-    time: f64,
-    h: f64,
+    sample: Sample,
 ) -> Result<(), Error> {
-    let interior = time - h / 2.0;
+    let Sample {
+        time,
+        h,
+        interior,
+        initial,
+    } = sample;
     let mut turned_on = false;
     for device in devices.iter_mut() {
         if let Kind::Nmos(Some(pulse)) = device.kind {
@@ -453,7 +526,7 @@ fn solve_sample(
     for iteration in 0..=32 {
         system.clear();
         for device in devices.iter() {
-            stamp(system, device, time, interior, h);
+            stamp(system, device, sample);
         }
         if let Err(column) = system.solve() {
             // A newly driven channel can short a voltage source through a
@@ -464,7 +537,7 @@ fn solve_sample(
                 }
                 continue;
             }
-            return Err(diagnose_zero_pivot(devices, column, time, h));
+            return Err(diagnose_zero_pivot(devices, column, time, h, initial));
         }
         if system.rhs.iter().any(|v| !v.is_finite()) {
             return Err(Error::new(
@@ -485,12 +558,18 @@ fn solve_sample(
     ))
 }
 
-fn diagnose_zero_pivot(devices: &[Device<'_>], column: usize, time: f64, h: f64) -> Error {
+fn diagnose_zero_pivot(
+    devices: &[Device<'_>],
+    column: usize,
+    time: f64,
+    h: f64,
+    initial: bool,
+) -> Error {
     let failed_branch = devices.iter().find(|device| device.branch == Some(column));
     let initial_inductor_current =
         |device: &Device<'_>| h == 0.0 && matches!(device.kind, Kind::Inductor(..));
     let free_initial_capacitor =
-        |device: &Device<'_>| h == 0.0 && device.initial_capacitor == InitialCapacitor::ZeroCurrent;
+        |device: &Device<'_>| initial && device.initial_capacitor == InitialCapacitor::ZeroCurrent;
     let ideal_voltage = |device: &Device<'_>| {
         !device.is_open_switch()
             && match device.kind {
@@ -557,7 +636,7 @@ fn diagnose_zero_pivot(devices: &[Device<'_>], column: usize, time: f64, h: f64)
             }
             let loop_devices = || devices.iter().filter(|device| ids.contains(&device.id));
             let reason = if loop_devices().any(|device| {
-                h == 0.0 && device.initial_capacitor == InitialCapacitor::SourceConflict
+                initial && device.initial_capacitor == InitialCapacitor::SourceConflict
             }) || (loop_devices()
                 .any(|device| matches!(device.kind, Kind::Capacitor(..)))
                 && loop_devices().any(|device| matches!(device.kind, Kind::Dc(_) | Kind::Sine(..))))
@@ -628,7 +707,13 @@ fn update_switch(device: &mut Device<'_>, x: &[f64]) -> bool {
     changed
 }
 
-fn stamp(system: &mut System, device: &Device<'_>, time: f64, interior: f64, h: f64) {
+fn stamp(system: &mut System, device: &Device<'_>, sample: Sample) {
+    let Sample {
+        time,
+        h,
+        interior,
+        initial,
+    } = sample;
     let (p, n) = (device.p, device.n);
     match device.kind {
         Kind::Voltmeter => return,
@@ -654,7 +739,7 @@ fn stamp(system: &mut System, device: &Device<'_>, time: f64, interior: f64, h: 
             (true, -z, -z * current)
         }
         Kind::Capacitor(..)
-            if h == 0.0 && device.initial_capacitor == InitialCapacitor::ZeroCurrent =>
+            if initial && device.initial_capacitor == InitialCapacitor::ZeroCurrent =>
         {
             (false, 1.0, 0.0)
         }

@@ -900,13 +900,98 @@ fn managed_buck_wave_matches_the_original_rows_and_failed_runs_have_no_wave() {
                 }
             }
             if column == 2 {
-                assert!(rows[from..=to].iter().enumerate().all(|(index, row)| {
-                    index + from == peak || row[column] < rows[peak][column]
-                }));
-                assert!((peak - 1..=peak + 1).all(|row| points.contains(&row)));
+                // The current peak sits on a switching edge, recorded as left and
+                // right limit rows at one time with the same (continuous) value.
+                let tops: Vec<_> = (from..=to)
+                    .filter(|&row| rows[row][column] == rows[peak][column])
+                    .collect();
+                assert!(tops.iter().all(|&row| rows[row][0] == rows[peak][0]));
+                assert!(tops.len() <= 2);
+                let (first, last) = (tops[0], *tops.last().unwrap());
+                assert!((first - 1..=last + 1).all(|row| points.contains(&row)));
             }
         }
     }
+
+    // Cursor rows and interval statistics, against the rows joined by lines.
+    let cursors = [rows[peak][0] - 3.3e-7, rows[rows.len() / 2][0] + 1.0e-8];
+    let (a, b) = (cursors[0].min(cursors[1]), cursors[0].max(cursors[1]));
+    let measured = folder.run(
+        &[
+            "measure",
+            run,
+            "--channel",
+            "L1_A",
+            "--channel",
+            "VC_V",
+            "--from",
+            &a.to_string(),
+            "--to",
+            &b.to_string(),
+        ],
+        true,
+    );
+    assert_eq!(measured["timeRange"], json!([a, b]));
+    assert_eq!(measured["deltaTime_s"], b - a);
+    assert_eq!(measured["frequency_Hz"], 1.0 / (b - a));
+    // Nearest row; of two rows at one (edge) time, the one on the cursor's side,
+    // and the left limit when the cursor is exactly on the edge.
+    let nearest = |t: f64| {
+        (0..rows.len())
+            .min_by(|&x, &y| {
+                (rows[x][0] - t)
+                    .abs()
+                    .total_cmp(&(rows[y][0] - t).abs())
+                    .then(if rows[x][0] < t { y.cmp(&x) } else { x.cmp(&y) })
+            })
+            .unwrap()
+    };
+    for (channel, column) in [(0, 2), (1, 3)] {
+        let stats = &measured["channels"][channel];
+        assert_eq!(
+            stats["delta"].as_f64().unwrap(),
+            stats["to"]["value"].as_f64().unwrap() - stats["from"]["value"].as_f64().unwrap()
+        );
+        for (cursor, time) in [("from", a), ("to", b)] {
+            let row = nearest(time);
+            assert_eq!(stats[cursor]["row"], row);
+            assert_eq!(stats[cursor]["t_s"], rows[row][0]);
+            assert_eq!(stats[cursor]["value"], rows[row][column]);
+        }
+        let lerp = |t: f64| {
+            let i = rows.iter().position(|row| row[0] > t).unwrap();
+            let (p, q) = (rows[i - 1], rows[i]);
+            p[column] + (q[column] - p[column]) * (t - p[0]) / (q[0] - p[0])
+        };
+        // Fine trapezoids of the joined lines converge on the exact integrals.
+        let steps = 400_000;
+        let (mut area, mut square) = (0.0, 0.0);
+        for k in 0..steps {
+            let (t0, t1) = (
+                a + (b - a) * k as f64 / steps as f64,
+                a + (b - a) * (k + 1) as f64 / steps as f64,
+            );
+            let (v0, v1) = (lerp(t0), lerp(t1));
+            area += (t1 - t0) * (v0 + v1) / 2.0;
+            square += (t1 - t0) * (v0 * v0 + v1 * v1) / 2.0;
+        }
+        let average = area / (b - a);
+        let rms = (square / (b - a)).sqrt();
+        let scale = rows.iter().map(|row| row[column].abs()).fold(0.0, f64::max);
+        assert!((stats["average"].as_f64().unwrap() - average).abs() < 1e-6 * scale);
+        assert!((stats["rms"].as_f64().unwrap() - rms).abs() < 1e-4 * scale);
+        let inside = rows.iter().filter(|row| row[0] > a && row[0] < b);
+        let maximum = inside
+            .clone()
+            .map(|row| row[column])
+            .fold(lerp(a).max(lerp(b)), f64::max);
+        let minimum = inside
+            .map(|row| row[column])
+            .fold(lerp(a).min(lerp(b)), f64::min);
+        assert_eq!(stats["maximum"], maximum);
+        assert_eq!(stats["minimum"], minimum);
+    }
+    assert_eq!(measured["channels"][0]["maximum"], rows[peak][2]);
 
     let mut broken: Value = serde_json::from_slice(buck).unwrap();
     broken["nets"]["output"]
@@ -922,6 +1007,25 @@ fn managed_buck_wave_matches_the_original_rows_and_failed_runs_have_no_wave() {
         wave_request(&folder, failed_dir, false, "0", "1", "10")["error"]["code"],
         "runNotCompleted"
     );
+    // The folder's runs, newest first; only the completed one describes a result.
+    let listed = folder.run(&["runs", "."], true);
+    let listed = listed["runs"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0]["runId"], started["runId"]);
+    assert_eq!(listed[0]["state"], "failed");
+    assert!(listed[0].get("channels").is_none());
+    assert_eq!(listed[1]["state"], "completed");
+    assert_eq!(listed[1]["revision"], completed["revision"]);
+    assert_eq!(listed[1]["rows"], rows.len());
+    assert_eq!(
+        listed[1]["timeRange"],
+        json!([rows[0][0], rows[rows.len() - 1][0]])
+    );
+    assert_eq!(listed[1]["channels"], json!(wave.channels()[1..]));
+    assert!(listed[0]["startedAt"].as_f64() >= listed[1]["startedAt"].as_f64());
+    let empty = TestDirectory::new("no-runs");
+    assert_eq!(empty.run(&["runs", "."], true)["runs"], json!([]));
+
     let files = std::fs::read_dir(failed_dir).unwrap();
     assert!(files.map(|entry| entry.unwrap().file_name()).all(|name| {
         name == "status.json" || name == "status.lock" || name == "circuit.litzsim"
