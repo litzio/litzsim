@@ -1,4 +1,7 @@
-use litzsim_core::{circuit::Document, solver::simulate};
+use litzsim_core::{
+    circuit::Document,
+    solver::{simulate, simulate_with_warnings},
+};
 use serde_json::{Value, json};
 use std::time::Instant;
 
@@ -43,10 +46,10 @@ fn identifies_parallel_initial_voltage_constraints_and_voltage_source_loops() {
     singular_circuit(
         json!({
             "Vin": {"type": "dc", "parameters": {"voltage_V": 5}},
-            "Cin": {"type": "capacitor", "parameters": {"capacitance_F": 1e-6, "initialVoltage_V": 5}}
+            "Cin": {"type": "capacitor", "parameters": {"capacitance_F": 1e-6, "initialVoltage_V": 0, "esr_ohm": 0}}
         }),
         json!({"input": ["Vin.p", "Cin.p"], "gnd": ["G.ref", "Vin.n", "Cin.n"]}),
-        "Ideal voltage constraint loop",
+        "Ideal voltage constraint loop (add capacitor ESR or source internal resistance)",
         &["Vin", "Cin"],
     );
     singular_circuit(
@@ -104,17 +107,28 @@ fn identifies_floating_node_between_open_diodes() {
 
 #[test]
 fn rc_and_rlc_converge_to_the_step_response() {
-    for (name, example) in [("RC", RC), ("RLC", RLC)] {
+    for (name, example, archive_mv) in [
+        ("RC", RC, [9.159, 4.589, 2.297]),
+        ("RLC", RLC, [19.435, 9.751, 4.884]),
+    ] {
         let mut value: Value = serde_json::from_str(example).unwrap();
         let mut previous = f64::INFINITY;
-        for h in [10e-6, 5e-6, 2.5e-6] {
+        for (h, reference_mv) in [10e-6, 5e-6, 2.5e-6].into_iter().zip(archive_mv) {
             value["simulation"]["timeStep_s"] = json!(h);
             let circuit = document(&value);
             let start = Instant::now();
             let wave = simulate(&circuit, || false).unwrap();
             let elapsed = start.elapsed();
             let vc = channel(&wave, "VC_V");
-            assert_eq!(wave.rows().next().unwrap()[vc], 0.0);
+            // At t=0 the ideal capacitor voltage is zero. The terminal
+            // voltage includes the ESR drop from the RC divider; the RLC
+            // inductor instead holds the initial series current at zero.
+            let initial_terminal = if name == "RC" {
+                5.0 * 1e-6 / (1000.0 + 1e-6)
+            } else {
+                0.0
+            };
+            assert!((wave.rows().next().unwrap()[vc] - initial_terminal).abs() <= 1e-14);
             assert_eq!(wave.rows().last().unwrap()[0], 5e-3);
             let wd = 750_000.0_f64.sqrt();
             let error = wave
@@ -134,7 +148,9 @@ fn rc_and_rlc_converge_to_the_step_response() {
                 "{name} h={h:e}s max_error={:.6}mV solve={elapsed:?}",
                 error * 1000.0
             );
-            // The archived linear test fixed these limits before measurement.
+            // Issue #53 adopts the archived error with a relative 1e-3 tolerance.
+            let reference_error = reference_mv * 1e-3;
+            assert!((error - reference_error).abs() <= reference_error * 1e-3);
             assert!(
                 error <= 0.04 && error <= 0.55 * previous,
                 "{error} after {previous}"
@@ -142,6 +158,98 @@ fn rc_and_rlc_converge_to_the_step_response() {
             previous = error;
         }
     }
+}
+
+fn inrush(step: f64, initial: f64) -> Value {
+    json!({
+        "version": 1,
+        "layout": {},
+        "simulation": {"timeStep_s": step, "stopTime_s": 5e-6},
+        "parts": {
+            "G": {"type": "ground", "parameters": {}},
+            "V": {"type": "dc", "parameters": {"voltage_V": 5}},
+            "C": {"type": "capacitor", "parameters": {"capacitance_F": 1e-6, "initialVoltage_V": initial}},
+            "I": {"type": "ammeter", "parameters": {}}
+        },
+        "nets": {
+            "ground": ["G.ref", "V.n", "C.n"],
+            "supply": ["V.p", "I.p"],
+            "input": ["I.n", "C.p"]
+        }
+    })
+}
+
+#[test]
+fn inrush_current_converges_and_charges_the_capacitor() {
+    let mut previous = None;
+    for step in [10e-9, 5e-9, 2.5e-9] {
+        let mut value = inrush(step, 0.0);
+        value["parts"]["C"]["parameters"]["esr_ohm"] = json!(1.0);
+        let start = Instant::now();
+        let (wave, warnings) = simulate_with_warnings(&document(&value), |_| false).unwrap();
+        let elapsed = start.elapsed();
+        assert!(warnings.is_empty());
+        let i = channel(&wave, "I_A");
+        assert_eq!(wave.rows().next().unwrap()[i], 5.0);
+        let (mut error, mut charge, mut time) = (0.0_f64, 0.0, 0.0);
+        for row in wave.rows() {
+            let reference = 5.0 * (-row[0] / 1e-6).exp();
+            error = error.max((row[i] - reference).abs());
+            charge += row[i] * (row[0] - time);
+            time = row[0];
+        }
+        if let Some(coarser) = previous {
+            assert!(
+                (0.48..=0.52).contains(&(error / coarser)),
+                "{error} after {coarser}"
+            );
+        }
+        let full_charge = 5e-6;
+        let reference_charge = full_charge * (1.0 - (-5.0_f64).exp());
+        assert!((charge - reference_charge).abs() <= 2e-4 * full_charge);
+        assert!((charge - full_charge).abs() <= 0.01 * full_charge);
+        println!("inrush h={step:e}s max_error={error:e}A charge={charge:e}C elapsed={elapsed:?}");
+        previous = Some(error);
+    }
+}
+
+#[test]
+fn aligned_ideal_dc_initializes_parallel_capacitors_at_zero_current() {
+    let mut value = inrush(1e-6, 5.0);
+    value["parts"]["C"]["parameters"]["esr_ohm"] = json!(0.0);
+    // A second capacitor, directly connected with reversed terminal polarity.
+    value["parts"]["C2"] = value["parts"]["C"].clone();
+    value["parts"]["C2"]["parameters"]["initialVoltage_V"] = json!(-5.0);
+    value["nets"]["supply"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("C2.n"));
+    value["nets"]["ground"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("C2.p"));
+    let (wave, warnings) = simulate_with_warnings(&document(&value), |_| false).unwrap();
+    assert!(warnings.is_empty());
+    let i = channel(&wave, "I_A");
+    assert!(wave.rows().all(|row| row[i] == 0.0));
+}
+
+#[test]
+fn source_internal_resistance_applies_to_dc_and_sine() {
+    let mut value = inrush(1e-6, 0.0);
+    value["parts"]["C"]["parameters"]["esr_ohm"] = json!(0.0);
+    value["parts"]["V"]["parameters"]["internalResistance_ohm"] = json!(2.0);
+    let wave = simulate(&document(&value), || false).unwrap();
+    let i = channel(&wave, "I_A");
+    assert_eq!(wave.rows().next().unwrap()[i], 2.5);
+    assert!((wave.rows().nth(1).unwrap()[i] - 5.0 / 3.0).abs() < 1e-12);
+
+    value["parts"]["V"] = json!({"type": "sine", "parameters": {
+        "amplitude_V": 5, "frequency_Hz": 250_000, "internalResistance_ohm": 2
+    }});
+    let wave = simulate(&document(&value), || false).unwrap();
+    assert_eq!(wave.rows().next().unwrap()[i], 0.0);
+    assert!((wave.rows().nth(1).unwrap()[i] - 5.0 / 3.0).abs() < 1e-12);
 }
 
 fn stiff_buck(initial: f64) -> Value {
@@ -157,7 +265,7 @@ fn buck_matches_ccm_and_dcm_through_two_pwm_periods() {
     const STEP: f64 = 0.37e-6;
     const PERIOD: f64 = 100e-6;
     const FALLING: f64 = PERIOD / 2.0;
-    for initial in [0.2, 0.0] {
+    for (initial, reference_peak) in [(0.2, 0.30), (0.0, 0.10)] {
         let mut value = stiff_buck(initial);
         for cycles in [1, 2] {
             value["simulation"]["stopTime_s"] = json!(cycles as f64 * PERIOD);
@@ -203,7 +311,7 @@ fn buck_matches_ccm_and_dcm_through_two_pwm_periods() {
             }
             assert!(saw_falling_edge && saw_rising_edge, "PWM edges absent");
             assert!(maximum_error <= 1e-9, "buck error {maximum_error}");
-            assert!((peak - initial - 0.1).abs() <= 1e-9, "peak {peak}");
+            assert!((peak - reference_peak).abs() <= 1e-9, "peak {peak}");
             if initial == 0.0 {
                 assert!((zero.unwrap() - (FALLING + 0.1 / 3000.0)).abs() <= STEP);
             }

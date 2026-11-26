@@ -348,18 +348,20 @@ pub(super) fn route<'a>(
         if ids.len() < 2 {
             continue;
         }
-        // Prefer an unbent root so a branch with a waypoint starts at its terminal.
-        let root_id = ids
-            .iter()
-            .find(|id| document.layout_bend(id).is_none())
-            .unwrap_or(&ids[0]);
+        // Grow the tree in sheet order, attaching unbent terminals first.
+        let mut ids: Vec<_> = ids.iter().collect();
+        ids.sort_unstable_by_key(|&id| {
+            let [x, y] = pins[id].at;
+            (document.layout_bend(id).is_some(), y, x, id)
+        });
+        let root_id = ids[0];
         let root = pins[root_id].at;
         let root_bend = document.layout_bend(root_id).map(scene);
         let mut tree = Tree::from([(root, Vec::new())]);
         let mut attached = BTreeMap::from([(root, vec![root_id.as_str()])]);
         let mut waypoints = BTreeSet::new();
         let mut connected = false;
-        for id in ids.iter().filter(|&id| id != root_id) {
+        for id in ids.into_iter().skip(1) {
             let start = pins[id].at;
             let goals: BTreeSet<_> = tree
                 .keys()

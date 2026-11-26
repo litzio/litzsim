@@ -1,6 +1,6 @@
 use super::{
-    Arrow, GRID_PITCH, Label, LabelKind, LabelMetrics, MeterMark, Obstacle, Pin, Point, Rect,
-    Stroke, Symbol, Target, add, scene,
+    Arrow, GRID_PITCH, Issue, Label, LabelKind, LabelMetrics, MeterMark, Obstacle, Pin, Point,
+    Rect, Stroke, Symbol, Target, add, scene,
 };
 use crate::circuit::{LayoutPart, Measurement, Mirror, Placement, part_definition};
 use std::collections::BTreeMap;
@@ -162,6 +162,20 @@ fn local_bounds(stroke: &Stroke) -> Rect {
     }
 }
 
+fn transform_bounds(local: Rect, placement: Placement, center: Point) -> Rect {
+    Rect::between(
+        transform(placement, center, local.min.map(|n| n as i32)),
+        transform(placement, center, local.max.map(|n| n as i32)),
+    )
+}
+
+pub(super) fn ink_bounds(kind: &str, placement: Placement) -> impl Iterator<Item = Rect> {
+    let center = scene([placement.x.into(), placement.y.into()]);
+    strokes(kind)
+        .into_iter()
+        .map(move |stroke| transform_bounds(local_bounds(&stroke), placement, center))
+}
+
 fn value_text(part: &LayoutPart<'_>) -> Option<String> {
     let (key, unit, scale) = match part.kind {
         "resistor" => ("resistance_ohm", "Ω", 1.0),
@@ -257,10 +271,7 @@ pub(super) fn geometry<'a>(
         .map(local_bounds)
         .reduce(Rect::union)
         .unwrap();
-    let bounds = Rect::between(
-        at(local.min.map(|n| n as i32)),
-        at(local.max.map(|n| n as i32)),
-    );
+    let bounds = transform_bounds(local, placement, center);
 
     let mut labels = Vec::new();
     if kind == "nmos" {
@@ -368,81 +379,74 @@ pub(super) fn place_labels<'a>(
     symbols: &[Symbol<'_>],
     pins: &BTreeMap<String, Pin<'_>>,
     obstacles: &mut Vec<Obstacle<'a>>,
+    issues: &mut Vec<Issue>,
 ) -> Vec<Label<'a>> {
-    let centers: BTreeMap<_, _> = symbols
-        .iter()
-        .map(|symbol| (symbol.id, symbol.center))
-        .collect();
+    let owners: BTreeMap<_, _> = symbols.iter().map(|symbol| (symbol.id, symbol)).collect();
     let pin_clearance: Vec<_> = pins
-        .values()
-        .map(|pin| {
-            let center = centers[pin.part_id];
+        .iter()
+        .map(|(id, pin)| {
+            let center = owners[pin.part_id].center;
             let direction = [pin.at[0] - center[0], pin.at[1] - center[1]];
             // Leave room for a wire to leave a terminal along its lead.
             let end = add(pin.at, direction.map(|n| n / 2));
             let bounds = Rect::between(pin.at, end);
-            Rect::between(add(bounds.min, [-2, -2]), add(bounds.max, [2, 2]))
+            (
+                id,
+                Rect::between(add(bounds.min, [-2; 2]), add(bounds.max, [2; 2])),
+            )
         })
         .collect();
-    let offsets = [
-        [0, 0],
-        [0, -1],
-        [0, 1],
-        [1, 0],
-        [-1, 0],
-        [1, -1],
-        [-1, -1],
-        [1, 1],
-        [-1, 1],
-    ];
     captions
         .into_iter()
         .map(|mut label| {
+            let owner = owners[label.part_id];
             let terminal = label.terminal_id.as_ref().map(|id| &pins[id]);
-            let chosen = [0, 12, 24, 36, 48]
-                .into_iter()
-                .flat_map(|step| {
-                    let offsets = if step == 0 {
-                        &offsets[..1]
-                    } else {
-                        &offsets[1..]
-                    };
-                    offsets.iter().map(move |offset| offset.map(|n| n * step))
-                })
-                .map(|offset| {
-                    Rect::between(add(label.bounds.min, offset), add(label.bounds.max, offset))
-                })
-                .find(|&bounds| {
-                    let near_terminal = terminal.is_none_or(|pin| {
-                        if matches!(label.kind, LabelKind::Polarity) {
-                            let origin = centers[pin.part_id];
-                            let axis = usize::from(pin.at[1] != origin[1]);
-                            let clear_rail = if pin.at[axis] < origin[axis] {
-                                bounds.min[axis] > pin.at[axis]
-                            } else {
-                                bounds.max[axis] < pin.at[axis]
-                            };
-                            if !clear_rail {
-                                return false;
-                            }
+            let clear_of_obstacles = |bounds: Rect| {
+                obstacles
+                    .iter()
+                    .all(|obstacle| bounds.intersection(obstacle.bounds).is_none())
+            };
+            let chosen = label_candidates(label.bounds, owner.bounds).find(|&bounds| {
+                let near_terminal = terminal.is_none_or(|pin| {
+                    if matches!(label.kind, LabelKind::Polarity) {
+                        let origin = owner.center;
+                        let axis = usize::from(pin.at[1] != origin[1]);
+                        let clear_rail = if pin.at[axis] < origin[axis] {
+                            bounds.min[axis] > pin.at[axis]
+                        } else {
+                            bounds.max[axis] < pin.at[axis]
+                        };
+                        if !clear_rail {
+                            return false;
                         }
-                        let center = [0, 1].map(|axis| (bounds.min[axis] + bounds.max[axis]) / 2);
-                        let distance =
-                            |at: Point| (at[0] - center[0]).abs() + (at[1] - center[1]).abs();
-                        pins.values()
-                            .filter(|other| other.part_id == pin.part_id)
-                            .all(|other| distance(pin.at) <= distance(other.at))
-                    });
-                    near_terminal
-                        && obstacles
-                            .iter()
-                            .all(|obstacle| bounds.intersection(obstacle.bounds).is_none())
-                        && pin_clearance
-                            .iter()
-                            .all(|&pin| bounds.intersection(pin).is_none())
+                    }
+                    let center = [0, 1].map(|axis| (bounds.min[axis] + bounds.max[axis]) / 2);
+                    let distance =
+                        |at: Point| (at[0] - center[0]).abs() + (at[1] - center[1]).abs();
+                    pins.values()
+                        .filter(|other| other.part_id == pin.part_id)
+                        .all(|other| distance(pin.at) <= distance(other.at))
                 });
+                near_terminal
+                    && clear_of_obstacles(bounds)
+                    && pin_clearance
+                        .iter()
+                        .all(|&(_, pin)| bounds.intersection(pin).is_none())
+            });
             if let Some(bounds) = chosen {
                 label.bounds = bounds;
+            } else if clear_of_obstacles(label.bounds) {
+                // Box overlaps are reported by layout(); a blocked lead can
+                // also be the only reason no candidate fits.
+                for &(id, clearance) in &pin_clearance {
+                    if let Some(area) = label.bounds.intersection(clearance) {
+                        issues.push(Issue {
+                            code: "overlap",
+                            targets: [Target::new("label", &label.id), Target::new("pin", id)],
+                            area,
+                        });
+                    }
+                }
             }
             obstacles.push(Obstacle {
                 target: Target::new("label", &label.id),
@@ -452,4 +456,35 @@ pub(super) fn place_labels<'a>(
             label
         })
         .collect()
+}
+
+fn label_candidates(preferred: Rect, owner: Rect) -> impl Iterator<Item = Rect> {
+    let size = [0, 1].map(|axis| preferred.max[axis] - preferred.min[axis]);
+    let edge = move |axis: usize, positive| {
+        if positive {
+            owner.max[axis]
+        } else {
+            owner.min[axis] - size[axis]
+        }
+    };
+    let mut sides = [(1, false), (1, true), (0, false), (0, true)];
+    sides.sort_by_key(|&(axis, positive)| edge(axis, positive).abs_diff(preferred.min[axis]));
+    std::iter::once(preferred).chain([4, 16].into_iter().flat_map(move |gap| {
+        sides.into_iter().flat_map(move |(axis, positive)| {
+            let tangent = 1 - axis;
+            let center = preferred.min[tangent] + size[tangent] / 2;
+            [
+                center.clamp(owner.min[tangent], owner.max[tangent]),
+                owner.min[tangent],
+                owner.max[tangent],
+            ]
+            .into_iter()
+            .map(move |along| {
+                let mut min = [0; 2];
+                min[tangent] = along - size[tangent] / 2;
+                min[axis] = edge(axis, positive) + if positive { gap } else { -gap };
+                Rect::between(min, add(min, size))
+            })
+        })
+    }))
 }

@@ -50,6 +50,8 @@ struct Status {
     simulated_time: f64,
     stop_time: f64,
     solver_pid: Option<u32>,
+    #[serde(default)]
+    warnings: Vec<solver::Warning>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<Value>,
 }
@@ -255,6 +257,7 @@ fn admit(
         simulated_time: 0.0,
         stop_time: document.stop_time_s(),
         solver_pid: None,
+        warnings: solver::warnings(document),
         error: None,
     };
     write_status(&path, &status).map_err(io_error)?;

@@ -204,6 +204,63 @@ fn examples_are_connected_clear_and_deterministic() {
 }
 
 #[test]
+fn terminal_permutations_preserve_buck_geometry() {
+    let mut fixture: Value = serde_json::from_slice(BUCK).unwrap();
+    let expected = document(&fixture);
+    let geometry = |doc: &Document| {
+        let mut drawing = json!(layout(doc));
+        drawing.as_object_mut().unwrap().remove("revision");
+        drawing
+    };
+    let baseline = geometry(&expected);
+    for step in 1..=6 {
+        for terminals in fixture["nets"].as_object_mut().unwrap().values_mut() {
+            let terminals = terminals.as_array_mut().unwrap();
+            let len = terminals.len();
+            terminals.rotate_left(step % len);
+            if step % 2 == 0 {
+                terminals.reverse();
+            }
+        }
+        let actual = geometry(&document(&fixture));
+        for (field, expected) in baseline.as_object().unwrap() {
+            assert_eq!(&actual[field], expected, "{field}, step {step}");
+        }
+    }
+}
+
+#[test]
+fn compact_buck_value_stays_beside_its_inductor() {
+    let mut fixture: Value = serde_json::from_slice(BUCK).unwrap();
+    fixture["layout"]["L1"] = json!({"x":10,"y":5});
+    fixture["layout"]["D1"] = json!({"x":9,"y":6});
+    let doc = document(&fixture);
+    let drawing = layout(&doc);
+    let owner = drawing.symbols.iter().find(|s| s.id == "L1").unwrap();
+    let value = drawing.labels.iter().find(|l| l.id == "L1:value").unwrap();
+    let nearby = Rect::between(
+        add(owner.bounds.min, [-16; 2]),
+        add(owner.bounds.max, [16; 2]),
+    );
+    assert!(
+        nearby.intersection(value.bounds).is_some(),
+        "{:?}",
+        value.bounds
+    );
+    assert!(drawing.issues.is_empty(), "{:?}", drawing.issues);
+    let gate = drawing
+        .labels
+        .iter()
+        .find(|label| label.id == "Q1.g:terminal")
+        .unwrap();
+    let at = drawing.pins["Q1.g"].at;
+    let distance = (0..2)
+        .map(|axis| ((gate.bounds.min[axis] + gate.bounds.max[axis]) / 2 - at[axis]).abs())
+        .sum::<i64>();
+    assert!(distance < GRID_PITCH, "{:?}", gate.bounds);
+}
+
+#[test]
 fn example_voltmeters_take_manhattan_paths_to_their_rails() {
     for (name, bytes) in [("rc", RC), ("rlc", RLC), ("buck", BUCK)] {
         let doc = Document::from_bytes(bytes).unwrap();
@@ -498,23 +555,23 @@ fn insert_in_branch_cuts_the_chosen_segment_and_faces_the_first_pin_toward_from(
         from,
         to,
     };
-    // Both ground segments report [GND.ref, C1.n]; only the endpoints separate
-    // cutting V1.n off with the capacitor side from leaving it on the root side.
+    // Both ground segments report [V1.n, C1.n]; only the endpoints distinguish
+    // cutting GND.ref off with the capacitor side from leaving it on the root side.
     let ground = |result: &Layout<'_>| {
         result
             .segments
             .iter()
-            .filter(|segment| segment.terminals == ["GND.ref", "C1.n"])
+            .filter(|segment| segment.terminals == ["V1.n", "C1.n"])
             .map(|segment| (segment.from, segment.to))
             .collect::<Vec<_>>()
     };
     let cuts = ground(&layout(&rc));
-    assert_eq!(cuts, [([128, 160], [128, 96]), ([128, 96], [256, 96])]);
+    assert_eq!(cuts, [([0, 96], [128, 96]), ([128, 96], [256, 96])]);
     for ((from, to), near, far) in [
-        (cuts[0], vec!["GND.ref"], vec!["C1.n", "VC.n", "V1.n"]),
+        (cuts[0], vec!["V1.n"], vec!["C1.n", "GND.ref", "VC.n"]),
         (cuts[1], vec!["GND.ref", "V1.n"], vec!["C1.n", "VC.n"]),
     ] {
-        let edited = apply(&rc, &revision, &[insert(["GND.ref", "C1.n"], from, to)]).unwrap();
+        let edited = apply(&rc, &revision, &[insert(["V1.n", "C1.n"], from, to)]).unwrap();
         assert_eq!(edited.receipt.created, ["AM1"]);
         let nets = edited.document.layout_nets();
         let sorted = |pins: &[String]| pins.iter().cloned().collect::<BTreeSet<_>>();
@@ -575,8 +632,8 @@ fn insert_in_branch_cuts_the_chosen_segment_and_faces_the_first_pin_toward_from(
 
     // A stale segment, a reversed pair or a non two-terminal part changes nothing.
     for (op, target) in [
-        (insert(["GND.ref", "C1.n"], [128, 96], [384, 96]), "C1.n"),
-        (insert(["C1.n", "GND.ref"], [128, 96], [256, 96]), "GND.ref"),
+        (insert(["V1.n", "C1.n"], [128, 96], [384, 96]), "C1.n"),
+        (insert(["C1.n", "V1.n"], [128, 96], [256, 96]), "V1.n"),
         (
             Operation::InsertInBranch {
                 kind: "nmos".into(),
@@ -626,4 +683,36 @@ fn insert_in_branch_leaves_unrouted_terminals_on_the_original_net() {
     let nets = edited.document.layout_nets();
     assert_eq!(nets["ground"], ["V1.n", "G2.ref", "AM1.p"]);
     assert_eq!(nets["net1"], ["AM1.n", "GND.ref"]);
+}
+
+#[test]
+fn insert_in_branch_rejects_an_ammeter_that_would_overlap_a_symbol() {
+    let doc = document(&json!({
+        "version": 1,
+        "simulation": { "timeStep_s": 1e-6, "stopTime_s": 0.001 },
+        "parts": {
+            "R1": {"type":"resistor","parameters":{"resistance_ohm":1}},
+            "R2": {"type":"resistor","parameters":{"resistance_ohm":1}}
+        },
+        "layout": {"R1":{"x":0,"y":0}, "R2":{"x":3,"y":0}},
+        "nets": {"link":["R1.n","R2.p"]}
+    }));
+    let drawing = layout(&doc);
+    let [segment] = drawing.segments.as_slice() else {
+        panic!("expected one routed segment");
+    };
+    assert_eq!(segment.from[0].abs_diff(segment.to[0]), GRID_PITCH as u64);
+    let error = apply(
+        &doc,
+        &drawing.revision,
+        &[Operation::InsertInBranch {
+            kind: "ammeter".into(),
+            terminals: segment.terminals.map(str::to_owned),
+            from: segment.from,
+            to: segment.to,
+        }],
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "operationFailed");
+    assert!(error.message.contains("ammeter would overlap"));
 }

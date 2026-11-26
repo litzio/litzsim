@@ -138,7 +138,9 @@ fn wave_file(path: PathBuf, options: &[OsString]) -> Result<Value, Value> {
 
 fn run(path: &Path, out: &Path) -> Result<Value, Value> {
     let opened = circuit::open(path).map_err(core_error)?;
-    let wave = litzsim_core::solver::simulate(&opened.document, || false).map_err(core_error)?;
+    let (wave, warnings) =
+        litzsim_core::solver::simulate_with_warnings(&opened.document, |_| false)
+            .map_err(core_error)?;
     litzsim_core::waves::write(out, &wave)
         .map_err(|error| json!({ "code": "ioError", "message": error.to_string() }))?;
     Ok(json!({
@@ -146,6 +148,7 @@ fn run(path: &Path, out: &Path) -> Result<Value, Value> {
         "rows": wave.rows().len(),
         "channels": wave.channels(),
         "stopTime_s": wave.rows().last().expect("initial sample")[0],
+        "warnings": warnings,
     }))
 }
 
