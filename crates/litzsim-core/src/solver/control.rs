@@ -244,7 +244,9 @@ impl<'a> Control<'a> {
 
     /// Seed duties that can be determined without the initial electrical solve.
     pub(super) fn prepare_initial(&mut self) -> Result<(), Error> {
-        self.evaluate(Some(false), |_, _| unreachable!("sensor-independent block"))?;
+        self.evaluate(Some(false), false, |_, _| {
+            unreachable!("sensor-independent block")
+        })?;
         Ok(())
     }
 
@@ -252,9 +254,14 @@ impl<'a> Control<'a> {
     pub(super) fn sample(
         &mut self,
         initial_prepared: bool,
+        include_unrecorded_changes: bool,
         sense: impl FnMut(&str, RecordQuantity) -> f64,
     ) -> Result<bool, Error> {
-        let changed = self.evaluate(initial_prepared.then_some(true), sense)?;
+        let changed = self.evaluate(
+            initial_prepared.then_some(true),
+            include_unrecorded_changes,
+            sense,
+        )?;
         self.tick += 1;
         Ok(changed)
     }
@@ -262,6 +269,7 @@ impl<'a> Control<'a> {
     fn evaluate(
         &mut self,
         needs_sense: Option<bool>,
+        include_unrecorded_changes: bool,
         mut sense: impl FnMut(&str, RecordQuantity) -> f64,
     ) -> Result<bool, Error> {
         let time = self.next_sample();
@@ -319,7 +327,9 @@ impl<'a> Control<'a> {
                     format!("Non-finite control output at {time} s"),
                 ));
             }
-            if value != self.values[index] && self.recorded.binary_search(&index).is_ok() {
+            if value != self.values[index]
+                && (include_unrecorded_changes || self.recorded.binary_search(&index).is_ok())
+            {
                 changed = true;
             }
             self.values[index] = value;

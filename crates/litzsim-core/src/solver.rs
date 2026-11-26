@@ -127,7 +127,7 @@ pub fn simulate_with_warnings(
         solve_sample(&mut devices, &mut system, &clocks, sample)?;
         if time == 0.0 && !sampled_clocks.is_empty() {
             let control = control.as_mut().expect("sampled PWM has control inputs");
-            control.sample(true, |id, quantity| {
+            control.sample(true, false, |id, quantity| {
                 sense(&devices, &system.rhs, id, quantity)
             })?;
             let mut changed = false;
@@ -162,12 +162,14 @@ pub fn simulate_with_warnings(
         if record && time != 0.0 {
             push_row(&mut wave, &devices, &probes, control.as_ref(), time, x)?;
         }
+        let at_stop = time == stop;
         let mut control_changed = false;
         if let Some(control) = &mut control
             && control.due(time)
         {
-            control_changed =
-                control.sample(false, |id, quantity| sense(&devices, x, id, quantity))?;
+            control_changed = control.sample(false, at_stop, |id, quantity| {
+                sense(&devices, x, id, quantity)
+            })?;
         }
         // The just-computed control outputs are visible to any carrier that
         // starts at this endpoint. This updates only the right-side state.
@@ -180,15 +182,14 @@ pub fn simulate_with_warnings(
         if record && time == 0.0 {
             push_row(&mut wave, &devices, &probes, control.as_ref(), time, x)?;
         }
-        let at_stop = time == stop;
-        if at_stop && !control_changed {
+        if at_stop && control.is_none() {
             return Ok((wave, warnings));
         }
         if on_grid {
             tick += 1;
         }
-        // A control change at stop needs a right-limit row. Use the interval
-        // that would follow this sample to find the new PWM state.
+        // With control, also check for a gate transition at stop, even when
+        // none of the control outputs are recorded.
         let grid = tick as f64 * step;
         let boundary = if at_stop { grid } else { stop.min(grid) };
         let edge = clocks
@@ -753,12 +754,7 @@ fn solve_sample(
     clocks: &[Clock],
     sample: Sample,
 ) -> Result<(), Error> {
-    let Sample {
-        time,
-        h,
-        interior,
-        initial,
-    } = sample;
+    let Sample { time, interior, .. } = sample;
     let mut turned_on = false;
     for device in devices.iter_mut() {
         if let Kind::Nmos(Some(clock)) = device.kind {
@@ -770,11 +766,12 @@ fn solve_sample(
             }
         }
     }
-    let mut tried_returns = BTreeSet::new();
+    let mut tried_diodes = BTreeSet::new();
+    let mut open_inductors = BTreeSet::new();
     for iteration in 0..=32 {
         system.clear();
         for device in devices.iter() {
-            stamp(system, device, clocks, sample);
+            stamp(system, device, clocks, sample, &open_inductors);
         }
         if let Err(column) = system.solve() {
             // A newly driven channel can short a voltage source through a
@@ -785,16 +782,22 @@ fn solve_sample(
                 }
                 continue;
             }
-            let candidate = resolve_zero_pivot(
+            match resolve_zero_pivot(
                 devices,
                 column,
-                time,
-                h,
-                initial,
-                initial.then_some((clocks, &tried_returns)),
-            )?;
-            tried_returns.insert(candidate);
-            devices[candidate].conducting = true;
+                sample,
+                clocks,
+                &tried_diodes,
+                &open_inductors,
+            )? {
+                InitialReturn::Diode(index) => {
+                    tried_diodes.insert(index);
+                    devices[index].conducting = true;
+                }
+                InitialReturn::OpenInductor(branch) => {
+                    open_inductors.insert(branch);
+                }
+            }
             continue;
         }
         if system.rhs.iter().any(|v| !v.is_finite()) {
@@ -807,6 +810,18 @@ fn solve_sample(
             .iter_mut()
             .any(|device| update_switch(device, &system.rhs));
         if !changed {
+            if !open_inductors.is_empty()
+                && let Some(device) = devices.iter().find(|device| {
+                    device.branch.is_some_and(|branch| {
+                        open_inductors.contains(&branch) && system.rhs[branch] != 0.0
+                    })
+                })
+            {
+                return Err(Error::invalid(
+                    device.id,
+                    "Initial open-inductor state cannot satisfy the specified zero current",
+                ));
+            }
             return Ok(());
         }
     }
@@ -816,23 +831,35 @@ fn solve_sample(
     ))
 }
 
+enum InitialReturn {
+    Diode(usize),
+    OpenInductor(usize),
+}
+
 fn resolve_zero_pivot(
     devices: &[Device<'_>],
     column: usize,
-    time: f64,
-    h: f64,
-    initial: bool,
-    initial_returns: Option<(&[Clock], &BTreeSet<usize>)>,
-) -> Result<usize, Error> {
+    sample: Sample,
+    clocks: &[Clock],
+    tried_diodes: &BTreeSet<usize>,
+    open_inductors: &BTreeSet<usize>,
+) -> Result<InitialReturn, Error> {
+    let Sample {
+        time, h, initial, ..
+    } = sample;
     let failed_branch = devices.iter().find(|device| device.branch == Some(column));
-    let initial_inductor_current =
-        |device: &Device<'_>| h == 0.0 && matches!(device.kind, Kind::Inductor(..));
+    let initial_inductor_current = |device: &Device<'_>| {
+        h == 0.0
+            && matches!(device.kind, Kind::Inductor(..))
+            && !open_inductors.contains(&device.branch())
+    };
     let free_initial_capacitor =
         |device: &Device<'_>| initial && device.initial_capacitor == InitialCapacitor::ZeroCurrent;
     let ideal_voltage = |device: &Device<'_>| {
         !device.is_open_switch()
             && match device.kind {
-                Kind::Resistance(_) | Kind::Voltmeter | Kind::Inductor(..) => false,
+                Kind::Resistance(_) | Kind::Voltmeter => false,
+                Kind::Inductor(..) => open_inductors.contains(&device.branch()),
                 Kind::Capacitor(..) => {
                     h == 0.0 && device.series_resistance == 0.0 && !free_initial_capacitor(device)
                 }
@@ -916,23 +943,36 @@ fn resolve_zero_pivot(
             })
             .collect();
         let ids: Vec<_> = boundary.iter().map(|(_, device)| device.id).collect();
-        if let Some(inductor) = boundary
+        let mut inductors = boundary
             .iter()
             .map(|(_, device)| *device)
-            .find(|device| initial_inductor_current(device))
-        {
-            // A disabled sampled gate can leave an initial inductor island.
-            // Seed a possible diode return and let the usual polarity check
-            // decide if it conducts (zero current is valid at the boundary).
-            if let Some((clocks, tried)) = initial_returns
-                && boundary.iter().any(|(_, device)| {
+            .filter(|device| initial_inductor_current(device));
+        if let Some(inductor) = inductors.next() {
+            if initial && boundary.iter().any(|(_, device)| {
                     matches!(device.kind, Kind::Nmos(Some(clock)) if clocks[clock].sampled.is_some())
                 })
-                && let Some(&(index, _)) = boundary
-                    .iter()
-                    .find(|(index, device)| device.is_open_switch() && !tried.contains(index))
             {
-                return Ok(index);
+                // With one zero-current inductor and all switches open, KCL
+                // keeps its current zero while the gates are held. Thus L di/dt
+                // is zero and determines the floating island's voltage.
+                if inductors.next().is_none() && let Kind::Inductor(_, current) = inductor.kind {
+                    if current == 0.0 {
+                        return Ok(InitialReturn::OpenInductor(inductor.branch()));
+                    }
+                    let leaving = |device: &Device<'_>| if paths.contains_key(&device.p) { 1.0 } else { -1.0 };
+                    let outgoing = leaving(inductor) * current;
+                    let mut candidates = boundary.iter().filter(|(_, device)| {
+                        device.is_open_switch() && switch_sign(device).is_some_and(|sign| {
+                            (leaving(device) * sign).is_sign_positive() != outgoing.is_sign_positive()
+                        })
+                    });
+                    if let Some(&(index, _)) = candidates.next()
+                        && candidates.next().is_none() && !tried_diodes.contains(&index)
+                    {
+                        return Ok(InitialReturn::Diode(index));
+                    }
+                }
+                return Err(report("Initial inductor return cannot be uniquely determined", inductor.id, &ids));
             }
             return Err(report(
                 "Initial inductor current cutset with no voltage-defined return path",
@@ -969,11 +1009,17 @@ fn resolve_zero_pivot(
     Err(error)
 }
 
+fn switch_sign(device: &Device<'_>) -> Option<f64> {
+    match device.kind {
+        Kind::Diode => Some(1.0),
+        Kind::Nmos(_) if !device.driven => Some(-1.0), // Body diode: source to drain.
+        _ => None,
+    }
+}
+
 fn update_switch(device: &mut Device<'_>, x: &[f64]) -> bool {
-    let sign = match device.kind {
-        Kind::Diode => 1.0,
-        Kind::Nmos(_) if !device.driven => -1.0, // Body diode: source to drain.
-        _ => return false,
+    let Some(sign) = switch_sign(device) else {
+        return false;
     };
     let conducts = if device.conducting {
         sign * x[device.branch()] >= -SWITCH_EPSILON
@@ -985,7 +1031,13 @@ fn update_switch(device: &mut Device<'_>, x: &[f64]) -> bool {
     changed
 }
 
-fn stamp(system: &mut System, device: &Device<'_>, clocks: &[Clock], sample: Sample) {
+fn stamp(
+    system: &mut System,
+    device: &Device<'_>,
+    clocks: &[Clock],
+    sample: Sample,
+    open_inductors: &BTreeSet<usize>,
+) {
     let Sample {
         time,
         h,
@@ -1011,6 +1063,7 @@ fn stamp(system: &mut System, device: &Device<'_>, clocks: &[Clock], sample: Sam
     system.add(n, k, -1.0);
     let (voltage, coefficient, rhs) = match device.kind {
         Kind::Diode | Kind::Nmos(_) if device.is_open_switch() => (false, 1.0, 0.0),
+        Kind::Inductor(_, _) if h == 0.0 && open_inductors.contains(&branch) => (true, 0.0, 0.0),
         Kind::Inductor(_, current) if h == 0.0 => (false, 1.0, current),
         Kind::Inductor(inductance, current) => {
             let z = inductance / h;

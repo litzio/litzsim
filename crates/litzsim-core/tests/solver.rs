@@ -561,10 +561,89 @@ fn duty_pwm_uses_coincident_samples_at_carrier_start_and_handles_final_edges() {
                             expected
                         );
                     }
+                    value["parts"]["COMMAND"]["record"]["output"] = json!(false);
+                    value["simulation"]["stopTime_s"] = json!(stop);
+                    let unrecorded = simulate(&document(&value), || false).unwrap();
+                    let final_gate: Vec<_> = unrecorded
+                        .rows()
+                        .filter(|row| row[0] == stop)
+                        .map(|row| row[gate])
+                        .collect();
+                    assert_eq!(
+                        final_gate, gate_levels,
+                        "unrecorded command, edge {edge}, stop {stop}"
+                    );
                 }
             }
         }
     }
+}
+
+#[test]
+fn switching_node_feedback_starts_identically_after_diode_rename() {
+    use litzsim_core::circuit::{Operation, apply};
+
+    let mut value: Value = serde_json::from_str(VOLTAGE_LOOP).unwrap();
+    value["parts"]["VS"]["record"]["output"] = json!(true);
+    value["nets"]["output"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|pin| pin != "VS.p");
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VS.p"));
+    let original = document(&value);
+    let rename: Operation =
+        serde_json::from_value(json!({"op": "rename", "id": "D1", "newId": "Z1"})).unwrap();
+    let renamed = apply(&original, &original.revision(), &[rename])
+        .unwrap()
+        .document;
+    let observed = |doc| {
+        let wave = simulate(doc, || false).unwrap();
+        let first = wave.rows().next().unwrap();
+        let at_first_carrier = wave
+            .rows()
+            .find(|row| (row[0] - 100e-6).abs() < 1e-18)
+            .unwrap();
+        [
+            first[channel(&wave, "VS_out")],
+            first[channel(&wave, "PI_out")],
+            at_first_carrier[channel(&wave, "VC_V")],
+        ]
+    };
+    let before = observed(&original);
+    let after = observed(&renamed);
+    assert_eq!(before, after);
+    assert_eq!(before[..2], [0.0, 0.09375]);
+    assert!(before[2] > 0.0);
+
+    value["parts"]["L1"]["parameters"]["initialCurrent_A"] = json!(0.2);
+    let original = document(&value);
+    let rename: Operation =
+        serde_json::from_value(json!({"op": "rename", "id": "D1", "newId": "Z1"})).unwrap();
+    let renamed = apply(&original, &original.revision(), &[rename])
+        .unwrap()
+        .document;
+    assert_eq!(observed(&original), observed(&renamed));
+
+    // Two ideal incoming paths in parallel leave the branch currents undetermined.
+    value["parts"]["D2"] = json!({"type": "diode", "parameters": {}});
+    value["nets"]["ground"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("D2.a"));
+    value["nets"]["sw"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("D2.k"));
+    let error = simulate(&document(&value), || false).unwrap_err();
+    assert_eq!(error.code, "singularCircuit");
+    assert_eq!(error.target_id.as_deref(), Some("L1"));
+    assert_eq!(
+        error.message,
+        "Initial inductor return cannot be uniquely determined at 0 s: D1, D2, L1, Q1"
+    );
 }
 
 #[test]
