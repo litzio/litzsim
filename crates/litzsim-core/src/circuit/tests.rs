@@ -210,13 +210,58 @@ fn rejects_pfc_and_structural_errors_without_silent_data_loss() {
 }
 
 #[test]
+fn new_parts_take_short_designators_and_skip_used_numbers() {
+    let rc = Document::from_bytes(RC).unwrap();
+    let add = |kind: &str| Operation::Add {
+        kind: kind.into(),
+        grid: None,
+    };
+    let kinds = [
+        "resistor",
+        "dc",
+        "sine",
+        "inductor",
+        "capacitor",
+        "diode",
+        "nmos",
+        "pwm",
+        "voltmeter",
+        "ammeter",
+        "ground",
+    ];
+    let result = apply(&rc, &rc.revision(), &kinds.map(add)).unwrap();
+    // RC already has V1, R1, C1, GND and VC; those IDs stay and numbers are skipped.
+    assert_eq!(
+        result.receipt.created,
+        [
+            "AM1", "C2", "D1", "GND1", "L1", "PWM1", "Q1", "R2", "V2", "V3", "VM1"
+        ]
+    );
+    for id in ["V1", "R1", "C1", "GND", "VC"] {
+        assert_eq!(result.document.0.parts[id], rc.0.parts[id]);
+    }
+    let inserted = apply(
+        &rc,
+        &rc.revision(),
+        &[Operation::InsertInBranch {
+            kind: "ammeter".into(),
+            terminals: ["R1.n".into(), "C1.p".into()],
+            from: [160, 32],
+            to: [256, 32],
+        }],
+    )
+    .unwrap();
+    assert_eq!(inserted.receipt.created, ["AM1"]);
+}
+
+#[test]
 fn builds_archived_buck_topology_using_only_apply() {
     let buck = Document::from_bytes(BUCK).unwrap();
     let mut names = BTreeMap::new();
     let mut ops = Vec::new();
     for (old_id, part) in &buck.0.parts {
         let pos = buck.0.layout[old_id];
-        let new_id = format!("{}1", part.kind);
+        let new_id = format!("{}1", part_definition(&part.kind).unwrap().id_prefix);
         names.insert(old_id.as_str(), new_id.clone());
         ops.push(Operation::Add {
             kind: part.kind.clone(),

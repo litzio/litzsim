@@ -145,15 +145,12 @@ fn serves_json_lines_until_stdin_closes() {
         }),
         true,
     );
-    assert_eq!(edited["receipt"]["created"], json!(["ammeter1"]));
+    assert_eq!(edited["receipt"]["created"], json!(["AM1"]));
     assert_eq!(
         edited["layout"]["revision"],
         edited["receipt"]["afterRevision"]
     );
-    assert_eq!(
-        edited["layout"]["pins"]["ammeter1.p"]["at"],
-        json!([224, 128])
-    );
+    assert_eq!(edited["layout"]["pins"]["AM1.p"]["at"], json!([224, 128]));
     assert_eq!(
         edited["layout"]["symbols"][0]["currentArrow"]["to"],
         json!([266, 137])
@@ -162,17 +159,14 @@ fn serves_json_lines_until_stdin_closes() {
         json!({ "op": "inspect", "document": edited["document"] }),
         true,
     );
-    assert_eq!(inspection["pinPositions"]["ammeter1.p"], json!([7, 4]));
+    assert_eq!(inspection["pinPositions"]["AM1.p"], json!([7, 4]));
     assert_eq!(
-        inspection["measurements"]["ammeter1"],
+        inspection["measurements"]["AM1"],
         json!({
             "quantity": "current", "unit": "A", "fromPin": "p", "toPin": "n"
         })
     );
-    assert_eq!(
-        inspection["missingPins"],
-        json!(["ammeter1.n", "ammeter1.p"])
-    );
+    assert_eq!(inspection["missingPins"], json!(["AM1.n", "AM1.p"]));
     let mut undo = json!({
         "op": "undo", "document": edited["document"], "expectedAfter": inspection["revision"],
         "expectedBefore": edited["receipt"]["beforeRevision"],

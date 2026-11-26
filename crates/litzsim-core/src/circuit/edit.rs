@@ -155,7 +155,7 @@ impl CircuitV1 {
             Operation::Add { kind, grid } => {
                 let definition = part_definition(kind)
                     .ok_or_else(|| Error::invalid(kind, "unknown part type"))?;
-                let id = next_id(kind, &self.parts);
+                let id = next_id(definition.id_prefix, &self.parts);
                 let parameters = definition
                     .defaults
                     .iter()
@@ -352,7 +352,7 @@ fn insert_in_branch(
             turned.orient(definition.pin_offsets[0]) == toward
         })
         .filter(|&rotation| rotation != 0);
-    let id = next_id(kind, &circuit.parts);
+    let id = next_id(definition.id_prefix, &circuit.parts);
     circuit.layout.insert(id.clone(), placement);
     circuit.parts.insert(
         id.clone(),

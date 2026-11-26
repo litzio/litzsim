@@ -7,6 +7,8 @@ const PAPER = "#fff";
 const ACCENT = "var(--id-color-accent)";
 const WARNING = "var(--id-color-warning)";
 const LINE = 2;
+// Labels use the Litzio body face; the core sizes each label box (docs/layout.md).
+const SANS = { fontFamily: "var(--font-family-sans)" };
 
 const join = points => points.map(([x, y]) => `${x},${y}`).join(" ");
 
@@ -49,7 +51,7 @@ function Symbol({ symbol }) {
       <polyline points={join([arrow.head[0], arrow.to, arrow.head[1]])} />
     </g>}
     {symbol.meterMark && <text x={symbol.meterMark.at[0]} y={symbol.meterMark.at[1]} fontSize={14}
-      textAnchor="middle" dominantBaseline="central" fill={INK} stroke="none">{symbol.meterMark.text}</text>}
+      textAnchor="middle" dominantBaseline="central" fill={INK} stroke="none" style={SANS}>{symbol.meterMark.text}</text>}
   </g>;
 }
 
@@ -70,9 +72,23 @@ function wirePath(segment, jumps) {
 
 function Label({ label }) {
   const { min, max } = label.bounds;
-  return <text x={(min[0] + max[0]) / 2} y={(min[1] + max[1]) / 2} fontSize={label.metrics.fontSize}
-    fontWeight={label.metrics.bold ? 700 : 400} textAnchor="middle" dominantBaseline="central"
-    fill={INK} stroke="none">{label.text}</text>;
+  const { fontSize, bold, padding } = label.metrics;
+  return <text x={(min[0] + max[0]) / 2} y={(min[1] + max[1]) / 2} fontSize={fontSize}
+    fontWeight={bold ? 700 : 400} textAnchor="middle" dominantBaseline="central"
+    fill={INK} stroke="none" data-label={label.id} data-room={max[0] - min[0] - 2 * padding}>{label.text}</text>;
+}
+
+/** Keep each label's ink inside the padding of its core box; squeeze only if a glyph run is wider. */
+function fitLabels(group) {
+  for (const text of group.querySelectorAll("text[data-room]")) {
+    text.removeAttribute("textLength");
+    text.removeAttribute("lengthAdjust");
+    const room = Number(text.dataset.room);
+    if (text.getComputedTextLength() > room) {
+      text.setAttribute("textLength", room);
+      text.setAttribute("lengthAdjust", "spacingAndGlyphs");
+    }
+  }
 }
 
 const boxProps = ({ min, max }, pad = 0) => ({
@@ -80,14 +96,23 @@ const boxProps = ({ min, max }, pad = 0) => ({
 });
 
 export function Schematic({
-  layout, view, svgRef, selectedId, pendingPin, hoverSegment, preview, ghost, suggestion,
-  onSymbolDown, onPinDown, onSegmentEnter, onBackgroundDown, onPointerMove, onPointerUp, metrics,
+  layout, view, zoom, svgRef, selectedId, pendingPin, hoverSegment, preview, ghost, suggestion,
+  onSymbolDown, onPinDown, onSegmentEnter, onBackgroundDown, onPointerMove, onPointerUp,
 }) {
+  const labels = React.useRef(null);
+  React.useLayoutEffect(() => {
+    const group = labels.current;
+    if (!group) return undefined;
+    fitLabels(group);
+    let live = true;
+    document.fonts?.ready.then(() => { if (live) fitLabels(group); });
+    return () => { live = false; };
+  });
   const jumps = layout.jumps;
   const moving = preview && layout.symbols.find(symbol => symbol.id === preview.id);
   const sorted = [...layout.jumps].sort((a, b) => a.at[0] - b.at[0]);
-  return <svg ref={svgRef} role="group" aria-label="회로도" data-revision={layout.revision} data-edit={metrics}
-    viewBox={`${view.x} ${view.y} ${view.width} ${view.height}`} width={view.width} height={view.height}
+  return <svg ref={svgRef} role="group" aria-label="회로도" data-revision={layout.revision}
+    viewBox={`${view.x} ${view.y} ${view.width} ${view.height}`} width={view.width * zoom} height={view.height * zoom}
     style={{ display: "block", background: PAPER, touchAction: "none", userSelect: "none" }}
     onPointerDown={onBackgroundDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
     <defs>
@@ -111,7 +136,7 @@ export function Schematic({
     <g fill={INK} stroke="none" pointerEvents="none">
       {layout.junctions.map((junction, index) => <circle key={index} cx={junction.at[0]} cy={junction.at[1]} r={3.5} />)}
     </g>
-    <g fontFamily="var(--font-family-mono)" pointerEvents="none">
+    <g ref={labels} style={SANS} pointerEvents="none">
       {layout.labels.map(label => <Label key={label.id} label={label} />)}
     </g>
     <g fill={PAPER} stroke={INK} strokeWidth={1.5} pointerEvents="none">
@@ -149,7 +174,7 @@ export function Schematic({
     {ghost && <g pointerEvents="none" stroke={ACCENT} fill="none" strokeDasharray="4 3">
       <rect x={ghost.at[0] - 32} y={ghost.at[1] - 32} width={64} height={64} />
       <text x={ghost.at[0]} y={ghost.at[1]} textAnchor="middle" dominantBaseline="central" stroke="none"
-        fill={ACCENT} fontSize={13}>{ghost.label}</text>
+        fill={ACCENT} fontSize={13} style={SANS}>{ghost.label}</text>
     </g>}
     {suggestion && <g pointerEvents="none" stroke={ACCENT} fill="none">
       <line x1={suggestion.from[0]} y1={suggestion.from[1]} x2={suggestion.to[0]} y2={suggestion.to[1]}
@@ -160,8 +185,26 @@ export function Schematic({
   </svg>;
 }
 
-/** Scene rectangle covering the drawing plus a margin, never smaller than the default sheet. */
-export function sheetView(layout) {
+/** Union of symbols, labels and wires in scene units, or null for an empty sheet. */
+export function contentBounds(layout) {
+  let box = null;
+  const extend = ({ min, max }) => {
+    box = box ? {
+      min: [Math.min(box.min[0], min[0]), Math.min(box.min[1], min[1])],
+      max: [Math.max(box.max[0], max[0]), Math.max(box.max[1], max[1])],
+    } : { min, max };
+  };
+  layout.symbols.forEach(symbol => extend(symbol.bounds));
+  layout.labels.forEach(label => extend(label.bounds));
+  layout.segments.forEach(segment => [segment.from, segment.to].forEach(at => extend({ min: at, max: at })));
+  return box;
+}
+
+/**
+ * Scene rectangle covering the drawing plus a margin, never smaller than the
+ * default sheet or than the pane at the current zoom (so any point can be centered).
+ */
+export function sheetView(layout, [paneWidth, paneHeight] = [0, 0]) {
   const grid = 32;
   let [x0, y0, x1, y1] = [-3 * grid, -3 * grid, 30 * grid, 18 * grid];
   const extend = ({ min, max }) => {
@@ -171,6 +214,8 @@ export function sheetView(layout) {
   layout.symbols.forEach(symbol => extend(symbol.bounds));
   layout.labels.forEach(label => extend(label.bounds));
   layout.segments.forEach(segment => [segment.from, segment.to].forEach(at => extend({ min: at, max: at })));
+  // Pad by a full pane on each side so fitting and wheel zoom can center any point.
+  x0 -= paneWidth; x1 += paneWidth; y0 -= paneHeight; y1 += paneHeight;
   const snap = value => Math.floor(value / grid) * grid;
   return { x: snap(x0), y: snap(y0), width: snap(x1) - snap(x0) + grid, height: snap(y1) - snap(y0) + grid };
 }

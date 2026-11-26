@@ -515,21 +515,21 @@ fn insert_in_branch_cuts_the_chosen_segment_and_faces_the_first_pin_toward_from(
         (cuts[1], vec!["GND.ref", "V1.n"], vec!["C1.n", "VC.n"]),
     ] {
         let edited = apply(&rc, &revision, &[insert(["GND.ref", "C1.n"], from, to)]).unwrap();
-        assert_eq!(edited.receipt.created, ["ammeter1"]);
+        assert_eq!(edited.receipt.created, ["AM1"]);
         let nets = edited.document.layout_nets();
         let sorted = |pins: &[String]| pins.iter().cloned().collect::<BTreeSet<_>>();
         let expected = |mut pins: Vec<&str>, pin| {
             pins.push(pin);
             pins.into_iter().map(str::to_owned).collect::<BTreeSet<_>>()
         };
-        assert_eq!(sorted(&nets["ground"]), expected(near, "ammeter1.p"));
-        assert_eq!(sorted(&nets["net1"]), expected(far, "ammeter1.n"));
+        assert_eq!(sorted(&nets["ground"]), expected(near, "AM1.p"));
+        assert_eq!(sorted(&nets["net1"]), expected(far, "AM1.n"));
         let pins = edited.document.inspect().pin_positions;
         let distance = |pin: &str, [x, y]: Point| {
             let [px, py] = scene(pins[pin]);
             (px - x).abs() + (py - y).abs()
         };
-        assert!(distance("ammeter1.p", from) < distance("ammeter1.n", from));
+        assert!(distance("AM1.p", from) < distance("AM1.n", from));
         let redrawn = layout(&edited.document);
         assert!(
             !redrawn
@@ -565,7 +565,7 @@ fn insert_in_branch_cuts_the_chosen_segment_and_faces_the_first_pin_toward_from(
             .position(|channel| channel.name == name)
             .unwrap()
     };
-    let (current, voltage) = (column("ammeter1_A"), column("VC_V"));
+    let (current, voltage) = (column("AM1_A"), column("VC_V"));
     let mut checked = 0;
     for row in wave.rows() {
         assert!((row[current] - (5.0 - row[voltage]) / 1000.0).abs() < 1e-12);

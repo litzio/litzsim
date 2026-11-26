@@ -17,6 +17,8 @@ pub struct PartDefinition {
     pub pin_offsets: &'static [[i32; 2]],
     pub defaults: &'static [(&'static str, f64)],
     pub measurement: Option<Measurement>,
+    /// Schematic designator for new parts, numbered from 1 (R1, Q1, GND1).
+    pub id_prefix: &'static str,
 }
 
 pub fn part_definition(kind: &str) -> Option<PartDefinition> {
@@ -65,10 +67,23 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "diode" => &[[0, 1], [0, -1]],
         _ => &[[0, -1], [0, 1]],
     };
+    let id_prefix = match kind {
+        "dc" | "sine" => "V",
+        "resistor" => "R",
+        "inductor" => "L",
+        "capacitor" => "C",
+        "ground" => "GND",
+        "diode" => "D",
+        "nmos" => "Q",
+        "pwm" => "PWM",
+        "voltmeter" => "VM",
+        _ => "AM",
+    };
     Some(PartDefinition {
         pins,
         pin_offsets,
         defaults,
         measurement,
+        id_prefix,
     })
 }

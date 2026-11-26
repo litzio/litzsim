@@ -1,6 +1,6 @@
 import React from "react";
 import { CATEGORIES, PARTS, PARAMETERS, formatSI, parseSI, shortcutOf } from "./parts.js";
-import { Schematic, sheetView } from "./schematic.jsx";
+import { Schematic, sheetView, contentBounds } from "./schematic.jsx";
 
 // The editor owns only screen state: selection, drag previews, hover, the
 // collapsed library and the undo snapshots it hands back to the core. Every
@@ -8,6 +8,7 @@ import { Schematic, sheetView } from "./schematic.jsx";
 const GRID = 32;
 const SUGGEST_DISTANCE = 1.5 * GRID;
 const POLL_MS = 250;
+const ZOOM = { min: 0.25, max: 4, fitMax: 1.25, step: 1.25, margin: 48 };
 const ACTIVE = ["running", "stopping"];
 const BY_KEY = Object.fromEntries(Object.values(PARTS).map(part => [part.key, part]));
 
@@ -28,6 +29,9 @@ const styles = {
   field: { display: "flex", flexDirection: "column", gap: "var(--space-1)", fontSize: "var(--font-size-sm)" },
   fact: { display: "flex", justifyContent: "space-between", gap: "var(--space-2)", fontSize: "var(--font-size-sm)" },
   hint: { position: "absolute", transform: "translate(-50%, -100%)", zIndex: 1 },
+  stage: { position: "relative", flex: 1, minWidth: 0, display: "flex" },
+  zoom: { position: "absolute", right: "var(--space-3)", bottom: "var(--space-3)", display: "flex", alignItems: "center", gap: "var(--space-1)", padding: "var(--space-1)", border, borderRadius: "var(--id-radius-md)", background: "var(--id-color-surface)", boxShadow: "var(--shadow-overlay)", fontSize: "var(--font-size-sm)", zIndex: 2 },
+  zoomValue: { minWidth: "3.5em", textAlign: "center", fontVariantNumeric: "tabular-nums", color: "var(--id-color-text-muted)" },
 };
 
 const ICONS = {
@@ -188,7 +192,18 @@ export function Editor({ ui, adapter }) {
   const [run, setRun] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // Zoom and scroll are screen state only; they are never written to the circuit.
+  const [zoom, setZoom] = useState(1);
+  const [canvasSize, setCanvasSize] = useState([0, 0]);
+  const [, setAnchorTick] = useState(0);
+  const [panning, setPanning] = useState(false);
   const svgRef = useRef(null);
+  const anchor = useRef(null);
+  const geometry = useRef(null);
+  const shown = useRef(null);
+  const fitPending = useRef(false);
+  const pan = useRef(null);
+  const space = useRef(false);
   const scrollRef = useRef(null);
   const queue = useRef(Promise.resolve());
   const waiting = useRef(0);
@@ -238,6 +253,7 @@ export function Editor({ ui, adapter }) {
     setSuggestion(null);
     setHoverSegment(null);
     setSaving(null);
+    fitPending.current = true;
     // A finished run belongs to the previous circuit; an active one stays stoppable.
     setRun(current => (current && ACTIVE.includes(current.state) ? current : null));
   }
@@ -249,6 +265,88 @@ export function Editor({ ui, adapter }) {
   }
 
   useEffect(() => { perform(loadNew); }, []);
+
+  const ready = Boolean(sheet);
+  useEffect(() => {
+    const pane = scrollRef.current;
+    if (!pane) return undefined;
+    const observer = new ResizeObserver(() => setCanvasSize([pane.clientWidth, pane.clientHeight]));
+    observer.observe(pane);
+    // Wheel zoom must cancel scrolling, which a passive React wheel handler cannot do.
+    const onWheel = event => {
+      event.preventDefault();
+      zoomAt(Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY);
+    };
+    pane.addEventListener("wheel", onWheel, { passive: false });
+    return () => { observer.disconnect(); pane.removeEventListener("wheel", onWheel); };
+  }, [ready]);
+
+  // After a zoom change keep the anchored scene point under the same pane pixel.
+  useLayoutEffect(() => {
+    const pane = scrollRef.current;
+    const current = geometry.current;
+    if (!pane || !current || !canvasSize[0]) return;
+    if (fitPending.current) {
+      fitPending.current = false;
+      fitAll();
+      return;
+    }
+    const target = anchor.current;
+    const last = shown.current;
+    shown.current = { x: current.view.x, y: current.view.y, zoom: current.zoom };
+    if (target) {
+      anchor.current = null;
+      pane.scrollLeft = (target.scene[0] - current.view.x) * current.zoom - target.at[0];
+      pane.scrollTop = (target.scene[1] - current.view.y) * current.zoom - target.at[1];
+    } else if (last && last.zoom === current.zoom) {
+      // The padded sheet grew or the pane resized: keep the drawing where it was.
+      pane.scrollLeft += (last.x - current.view.x) * current.zoom;
+      pane.scrollTop += (last.y - current.view.y) * current.zoom;
+    }
+  });
+
+  function zoomTo(next, scene, at) {
+    anchor.current = { scene, at };
+    setZoom(Math.min(ZOOM.max, Math.max(ZOOM.min, next)));
+    setAnchorTick(tick => tick + 1);
+  }
+
+  /** Zoom by a factor, keeping the scene point under the client position fixed. */
+  function zoomAt(factor, clientX, clientY) {
+    const pane = scrollRef.current;
+    const { view, zoom: current } = geometry.current;
+    const box = pane.getBoundingClientRect();
+    const at = [clientX - box.left, clientY - box.top];
+    const scene = [view.x + (pane.scrollLeft + at[0]) / current, view.y + (pane.scrollTop + at[1]) / current];
+    zoomTo(current * factor, scene, at);
+  }
+
+  function zoomCenter(factor) {
+    const box = scrollRef.current.getBoundingClientRect();
+    zoomAt(factor, box.left + box.width / 2, box.top + box.height / 2);
+  }
+
+  /** Show the whole drawing centered, no larger than a comfortable reading size. */
+  function fitAll() {
+    const pane = scrollRef.current;
+    const bounds = contentBounds(latest.current.sheet.layout);
+    const size = [pane.clientWidth, pane.clientHeight];
+    if (!bounds) {
+      zoomTo(1, [-2 * GRID, -2 * GRID], [0, 0]);
+      return;
+    }
+    const extent = [0, 1].map(axis => Math.max(GRID, bounds.max[axis] - bounds.min[axis]));
+    const fit = Math.min(...[0, 1].map(axis => (size[axis] - 2 * ZOOM.margin) / extent[axis]), ZOOM.fitMax);
+    const center = [0, 1].map(axis => (bounds.min[axis] + bounds.max[axis]) / 2);
+    zoomTo(fit, center, size.map(value => value / 2));
+  }
+
+  function startPan(event) {
+    const pane = scrollRef.current;
+    pan.current = { x: event.clientX, y: event.clientY, left: pane.scrollLeft, top: pane.scrollTop };
+    svgRef.current.setPointerCapture(event.pointerId);
+    setPanning(true);
+  }
 
   // Record the first frame that shows a confirmed edit, from the input handler.
   useLayoutEffect(() => {
@@ -273,6 +371,7 @@ export function Editor({ ui, adapter }) {
       const next = sheetOf(response);
       frame.current = { kind, started, received: performance.now(), revision: next.revision };
       commit(next, [...undoable, { previous: before.document, receipt: response.receipt }]);
+      if (!Object.keys(before.document.parts).length && Object.keys(next.document.parts).length) fitPending.current = true;
       setHoverSegment(null);
       if (response.receipt.created.length) setSelectedId(response.receipt.created[0]);
       else setSelectedId(id => (id && next.document.parts[id] ? id : null));
@@ -419,7 +518,7 @@ export function Editor({ ui, adapter }) {
   }
 
   function onPinDown(id, event) {
-    if (event.button !== 0) return;
+    if (space.current || event.button !== 0) return;
     event.stopPropagation();
     const started = performance.now();
     setSuggestion(null);
@@ -432,6 +531,7 @@ export function Editor({ ui, adapter }) {
   }
 
   function onSymbolDown(id, event) {
+    if (space.current) return;
     event.stopPropagation();
     setSelectedId(id);
     setPendingPin(null);
@@ -443,14 +543,26 @@ export function Editor({ ui, adapter }) {
   }
 
   function onBackgroundDown(event) {
+    scrollRef.current.focus({ preventScroll: true });
+    if (event.button === 0 || event.button === 1) {
+      // Dragging empty space, or anything while Space is held, pans the drawing.
+      event.preventDefault();
+      startPan(event);
+      setHoverSegment(null);
+    }
+    if (space.current) return;
     setSelectedId(null);
     setPendingPin(null);
     setSuggestion(null);
-    scrollRef.current.focus({ preventScroll: true });
-    if (event.button === 0) setHoverSegment(null);
   }
 
   function onPointerMove(event) {
+    const moving = pan.current;
+    if (moving) {
+      scrollRef.current.scrollLeft = moving.left - (event.clientX - moving.x);
+      scrollRef.current.scrollTop = moving.top - (event.clientY - moving.y);
+      return;
+    }
     const at = sceneFromClient(event.clientX, event.clientY);
     pointer.current = at;
     if (event.target.dataset?.background !== undefined && !drag.current) setHoverSegment(null);
@@ -466,6 +578,12 @@ export function Editor({ ui, adapter }) {
   }
 
   async function onPointerUp(event) {
+    if (pan.current) {
+      pan.current = null;
+      if (!space.current) setPanning(false);
+      if (svgRef.current.hasPointerCapture(event.pointerId)) svgRef.current.releasePointerCapture(event.pointerId);
+      return;
+    }
     const active = drag.current;
     if (!active) return;
     const started = performance.now();
@@ -516,8 +634,14 @@ export function Editor({ ui, adapter }) {
     const modifier = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();
     let handled = true;
-    if (modifier && !event.shiftKey && key === "z") undo();
+    if (event.key === " ") {
+      space.current = true;
+      setPanning(true);
+    } else if (modifier && !event.shiftKey && key === "z") undo();
     else if (modifier && key === "s") save();
+    else if (event.key === "Home" || (modifier && key === "0")) fitAll();
+    else if (!modifier && (event.key === "+" || event.key === "=")) zoomCenter(ZOOM.step);
+    else if (!modifier && event.key === "-") zoomCenter(1 / ZOOM.step);
     else if (event.key === "Escape") {
       setSuggestion(null);
       setPendingPin(null);
@@ -537,13 +661,21 @@ export function Editor({ ui, adapter }) {
     if (handled) event.preventDefault();
   }
 
+  function onKeyUp(event) {
+    if (event.key !== " ") return;
+    space.current = false;
+    if (!pan.current) setPanning(false);
+  }
+
   if (!sheet) {
     return <ui.ScreenLayout fillHeight description="회로를 준비하는 중입니다.">
       {error ? <ui.Notice tone="error">{error}</ui.Notice> : <ui.Progress label="회로 준비" />}
     </ui.ScreenLayout>;
   }
 
-  const view = sheetView(sheet.layout);
+  const view = sheetView(sheet.layout, canvasSize.map(value => value / zoom));
+  geometry.current = { view, zoom };
+  const scaled = value => value * zoom;
   const count = code => sheet.layout.issues.filter(issue => issue.code === code).length;
   const issues = [count("overlap") && `겹침 ${count("overlap")}`, count("routeFailed") && `배선 실패 ${count("routeFailed")}`]
     .filter(Boolean).join(" · ");
@@ -575,7 +707,7 @@ export function Editor({ ui, adapter }) {
       : pendingPin ? `${pendingPin}에서 연결할 단자를 누르세요 · Esc 취소`
         : segment ? `가지 ${segment.terminals.join(" – ")} · A 이 가지에 전류계 끼우기`
           : selection ? `${selectedId} 선택 · R 회전 · F 좌우 반전 · Shift+F 상하 반전 · Delete 삭제 · 끌어서 이동`
-            : "부품을 누르거나 끌어 놓으세요 · 단자를 차례로 눌러 연결 · Ctrl+Z 되돌리기 · Ctrl+S 저장";
+            : "부품을 누르거나 끌어 놓으세요 · 단자를 차례로 눌러 연결 · 휠 확대·축소 · 빈 곳 끌기 이동 · Home 전체 보기 · Ctrl+Z 되돌리기";
 
   const menu = [
     { id: "rotate", label: "회전 (R)", icon: null, disabled: !selection, disabledReason: selection ? undefined : "소자를 먼저 선택하세요", run: () => edit([{ op: "rotate", id: selectedId }]) },
@@ -598,7 +730,7 @@ export function Editor({ ui, adapter }) {
       <ui.Button disabled={!running || run.state === "stopping"} onClick={stopRun}>중지</ui.Button>
       <ui.Button disabled title="파형 창은 다음 단계에서 제공합니다.">파형 보기</ui.Button>
     </>}>
-    <section aria-label="LitzSim 회로 편집기" style={styles.body} onKeyDown={onKeyDown}>
+    <section aria-label="LitzSim 회로 편집기" style={styles.body} onKeyDown={onKeyDown} onKeyUp={onKeyUp}>
       {error && <ui.Notice tone="error">{error}</ui.Notice>}
       {run?.state === "failed" && run.error && <ui.Notice tone="error">{`실행 실패 — ${run.error.message ?? run.error.code}`}</ui.Notice>}
       {saving && <ui.Toolbar label="새 회로 저장">
@@ -636,26 +768,35 @@ export function Editor({ ui, adapter }) {
           </div>)}
           {!categories.length && <span style={{ fontSize: "var(--font-size-sm)", color: "var(--id-color-text-muted)" }}>맞는 부품이 없습니다.</span>}
         </aside>}
+        <div style={styles.stage}>
         <ui.ContextMenu actions={menu} trigger={
-          <div ref={scrollRef} tabIndex={0} role="application" aria-label="회로도 편집 영역" style={styles.canvas}
+          <div ref={scrollRef} tabIndex={0} role="application" aria-label="회로도 편집 영역"
+            style={{ ...styles.canvas, cursor: panning ? "grab" : undefined }}
             onPointerLeave={() => { pointer.current = null; }}>
-            <div style={{ position: "relative", width: view.width, height: view.height }}>
-              <Schematic layout={sheet.layout} view={view} svgRef={svgRef} selectedId={selectedId} pendingPin={pendingPin}
+            <div style={{ position: "relative", width: scaled(view.width), height: scaled(view.height) }}>
+              <Schematic layout={sheet.layout} view={view} zoom={zoom} svgRef={svgRef} selectedId={selectedId} pendingPin={pendingPin}
                 hoverSegment={hoverSegment} preview={preview} ghost={ghost} suggestion={suggestion}
                 onSymbolDown={onSymbolDown} onPinDown={onPinDown} onSegmentEnter={index => { if (!drag.current) setHoverSegment(index); }}
                 onBackgroundDown={onBackgroundDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} />
               {segment && !preview && <div style={{
                 ...styles.hint,
-                left: (segment.from[0] + segment.to[0]) / 2 - view.x,
-                top: (segment.from[1] + segment.to[1]) / 2 - view.y - 10,
+                left: scaled((segment.from[0] + segment.to[0]) / 2 - view.x),
+                top: scaled((segment.from[1] + segment.to[1]) / 2 - view.y) - 10,
               }}>
                 <ui.Button size="sm" disabled={busy} onClick={() => insertAmmeter(hoverSegment)}>이 가지에 전류계 끼우기 (A)</ui.Button>
               </div>}
-              {suggestion && !preview && <div style={{ ...styles.hint, transform: "none", left: suggestion.to[0] - view.x + 12, top: suggestion.to[1] - view.y + 12 }}>
+              {suggestion && !preview && <div style={{ ...styles.hint, transform: "none", left: scaled(suggestion.to[0] - view.x) + 12, top: scaled(suggestion.to[1] - view.y) + 12 }}>
                 <ui.Button size="sm" disabled={busy} onClick={() => acceptSuggestion()}>{`${suggestion.a} ↔ ${suggestion.b} 연결 (Enter)`}</ui.Button>
               </div>}
             </div>
           </div>} />
+          <div role="toolbar" aria-label="확대" style={styles.zoom}>
+            <ui.Button size="sm" variant="ghost" aria-label="축소" title="축소 (-)" onClick={() => zoomCenter(1 / ZOOM.step)}>−</ui.Button>
+            <span style={styles.zoomValue} data-zoom={zoom}>{`${Math.round(zoom * 100)}%`}</span>
+            <ui.Button size="sm" variant="ghost" aria-label="확대" title="확대 (+)" onClick={() => zoomCenter(ZOOM.step)}>+</ui.Button>
+            <ui.Button size="sm" variant="ghost" title="전체 보기 (Home, Ctrl+0)" onClick={fitAll}>전체 보기</ui.Button>
+          </div>
+        </div>
         <aside aria-label="속성" style={styles.panel}>
           <Properties ui={ui} sheet={sheet} selectedId={selectedId} busy={busy} edit={edit} />
         </aside>
