@@ -1,5 +1,6 @@
+use crate::runs::{self, Runs};
 use litzsim_core::circuit::{self, Document, Operation, SaveMode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
 use std::ffi::{OsStr, OsString};
@@ -11,6 +12,10 @@ pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
             return inspect_file(Path::new(file));
         }
         [cmd, file, out] if cmd == "run" => return run(Path::new(file), Path::new(out)),
+        [cmd, file] if cmd == "start" => return runs::start_file(file),
+        [cmd, path] if cmd == "status" => return runs::status(Path::new(path)),
+        [cmd, path] if cmd == "stop" => return runs::stop(Path::new(path)),
+        [cmd, path, options @ ..] if cmd == "wave" => return wave_file(path.into(), options),
         [cmd, file, expect, revision, option, input]
             if cmd == "apply" && expect == "--expect" && option == "--ops" =>
         {
@@ -73,6 +78,34 @@ pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
     }))
 }
 
+fn wave_file(path: PathBuf, options: &[OsString]) -> Result<Value, Value> {
+    let (mut channels, mut from, mut to, mut pixels) = (Vec::new(), None, None, None);
+    for option in options.chunks(2) {
+        let [flag, value] = option else {
+            return Err(usage());
+        };
+        let value = value.to_str().ok_or_else(usage)?;
+        match flag.to_str() {
+            Some("--channel") => channels.push(value.into()),
+            Some("--from") if from.is_none() => from = Some(value.parse().map_err(|_| usage())?),
+            Some("--to") if to.is_none() => to = Some(value.parse().map_err(|_| usage())?),
+            Some("--pixels") if pixels.is_none() => {
+                pixels = Some(value.parse().map_err(|_| usage())?)
+            }
+            _ => return Err(usage()),
+        }
+    }
+    let mut runs = Runs::default();
+    let view = runs.wave(
+        path,
+        &channels,
+        required(from, "--from")?,
+        required(to, "--to")?,
+        required(pixels, "--pixels")?,
+    )?;
+    Ok(success(view))
+}
+
 fn run(path: &Path, out: &Path) -> Result<Value, Value> {
     let opened = circuit::open(path).map_err(core_error)?;
     let wave = litzsim_core::solver::simulate(&opened.document, || false).map_err(core_error)?;
@@ -106,20 +139,60 @@ struct Request<'a> {
     expected_before: Option<&'a str>,
     previous: Option<&'a RawValue>,
     expected_disk_revision: Option<&'a str>,
+    directory: Option<PathBuf>,
+    run_id: Option<&'a str>,
+    channels: Option<Vec<String>>,
+    #[serde(rename = "from_s")]
+    from_s: Option<f64>,
+    #[serde(rename = "to_s")]
+    to_s: Option<f64>,
+    pixels: Option<u32>,
 }
 
-pub fn serve_request(line: &str) -> Value {
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum Reply<'a> {
+    Json(Value),
+    Wave {
+        ok: bool,
+        #[serde(flatten)]
+        view: litzsim_core::waves::View<'a>,
+    },
+}
+
+pub fn serve_request<'a>(runs: &'a mut Runs, line: &str) -> Reply<'a> {
     let response = match serde_json::from_str::<Request<'_>>(line) {
-        Ok(request) => handle(request),
+        Ok(request) if request.op == "wave" => {
+            return match wave_view(runs, request) {
+                Ok(view) => Reply::Wave { ok: true, view },
+                Err(error) => Reply::Json(json!({ "ok": false, "error": error })),
+            };
+        }
+        Ok(request) => handle(runs, request),
         Err(error) if error.is_syntax() || error.is_eof() => {
             Err(json!({ "code": "invalidJson", "message": "Invalid JSON" }))
         }
         Err(error) => Err(request_error(error.to_string())),
     };
-    response.unwrap_or_else(|error| json!({ "ok": false, "error": error }))
+    Reply::Json(response.unwrap_or_else(|error| json!({ "ok": false, "error": error })))
 }
 
-fn handle(request: Request<'_>) -> Result<Value, Value> {
+fn wave_view<'a>(
+    runs: &'a mut Runs,
+    request: Request<'_>,
+) -> Result<litzsim_core::waves::View<'a>, Value> {
+    let id = required(request.run_id, "runId")?;
+    let path = runs.directory(id, request.directory.as_deref())?;
+    runs.wave(
+        path,
+        &required(request.channels, "channels")?,
+        required(request.from_s, "from_s")?,
+        required(request.to_s, "to_s")?,
+        required(request.pixels, "pixels")?,
+    )
+}
+
+fn handle(runs: &mut Runs, request: Request<'_>) -> Result<Value, Value> {
     match request.op {
         "ping" => Ok(litzsim_core::ping()),
         "new" => Ok(success(Document::new().inspect())),
@@ -156,6 +229,20 @@ fn handle(request: Request<'_>) -> Result<Value, Value> {
             };
             let disk_revision = circuit::save(&file, &document, mode).map_err(core_error)?;
             Ok(json!({ "ok": true, "diskRevision": disk_revision }))
+        }
+        "start" => runs.start(
+            required(request.directory, "directory")?,
+            document(required(request.document, "document")?)?,
+            required(request.expected_revision, "expectedRevision")?,
+        ),
+        "status" | "stop" => {
+            let id = required(request.run_id, "runId")?;
+            let path = runs.directory(id, request.directory.as_deref())?;
+            if request.op == "status" {
+                runs::status(&path)
+            } else {
+                runs::stop(&path)
+            }
         }
         _ => Err(json!({ "code": "unknownOperation", "message": "Unknown operation" })),
     }
@@ -217,6 +304,6 @@ fn request_error(message: impl Into<String>) -> Value {
 
 fn usage() -> Value {
     request_error(
-        "Usage: litzsim --version | serve | inspect FILE --json | apply FILE --expect REV --ops OPS.json | undo FILE --expect AFTER --before BEFORE --previous SNAPSHOT | run FILE OUT",
+        "Usage: litzsim --version | serve | inspect FILE --json | apply FILE --expect REV --ops OPS.json | undo FILE --expect AFTER --before BEFORE --previous SNAPSHOT | run FILE OUT | start FILE | status RUN_DIR | stop RUN_DIR | wave RUN_DIR --channel NAME [--channel NAME...] --from TIME --to TIME --pixels WIDTH",
     )
 }

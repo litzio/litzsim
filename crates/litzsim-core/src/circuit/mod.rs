@@ -249,6 +249,10 @@ impl Document {
         revision(&self.to_bytes())
     }
 
+    pub fn stop_time_s(&self) -> f64 {
+        self.0.simulation.stop_time_s
+    }
+
     pub(crate) fn circuit(&self) -> &CircuitV1 {
         &self.0
     }

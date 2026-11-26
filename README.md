@@ -63,6 +63,31 @@ RC·RLC·벅 예제는 [examples](examples/)에 있습니다. PFC 예제는 지�
 
 `.litzwave` 파일은 8바이트 서명 `LITZWV02`, 행 수(u64), 채널 메타데이터의 바이트 길이(u32), UTF-8 JSON 채널 배열, 원본 데이터 순서로 저장합니다. 채널 배열의 첫 항목은 `{"name":"time","unit":"s"}`입니다. 이어지는 항목은 `VC_V` 같은 채널 이름과 `V` 또는 `A` 단위를 담습니다. 원본 데이터는 시간순 고정 폭 행으로 구성되며, 각 행에 채널 배열 순서대로 IEEE 754 binary64 값이 들어갑니다. 모든 바이너리 숫자는 리틀엔디언입니다.
 
+### 백그라운드 실행과 파형 조회
+
+`start`는 회로 옆 `runs/<runId>/`에 `circuit.litzsim` 스냅샷을 저장하고 별도 해석 프로세스를 기동한 뒤 바로 반환합니다. 응답의 `runDirectory`를 후속 CLI 호출에 넘깁니다. 같은 회로 폴더에 진행 중인 실행이 있으면 `runInProgress`를 반환합니다.
+
+```powershell
+$run = & $cli start buck.litzsim | ConvertFrom-Json
+& $cli status $run.runDirectory
+# 상태가 completed에 도달하면 파형을 조회합니다.
+& $cli wave $run.runDirectory --channel L1_A --channel VC_V --from 0 --to 0.001 --pixels 800
+# 긴 실행을 중지하려면 다음 명령을 사용합니다.
+& $cli stop $run.runDirectory
+```
+
+`status.json`은 `running`, `stopping`, `completed`, `canceled`, `failed`를 기록합니다. `status`와 `stop`은 현재 상태, `simulatedTime`과 `stopTime`(초), 실패 시 `error`를 반환합니다. `stop`은 `stopping`을 접수하고 해석 프로세스 종료를 확인한 뒤 `canceled`로 전이합니다. 완료된 실행에서만 `result.litzwave`를 조회할 수 있습니다.
+
+파형 응답은 요청 범위 `timeRange`와 채널별 `name`, `unit`, `minimum`, `maximum`, `points`를 반환합니다. 각 점의 `row`는 파일의 0부터 시작하는 행 번호이며 `t_s`와 `value`는 원본값입니다. 조회는 양 끝 시각을 포함합니다. 첫 행과 마지막 행, 픽셀 구간별 최솟값·최댓값의 행, 양옆과 값이 다른 피크의 인접 행을 조회 범위 안에서 시간순으로 반환합니다. 범위에 행이 없으면 극값은 `null`, 점은 빈 배열입니다.
+
+상주 모드와 플러그인 Host는 아래 요청으로 같은 실행 연산을 호출합니다. 상주 CLI의 입력 파이프가 닫히면 해당 세션이 접수한 해석도 중지하고 종료를 확인합니다. 단독 `start`는 명령이 끝난 뒤에도 백그라운드에서 계속 실행됩니다.
+
+| `op` | 필드 |
+| --- | --- |
+| `start` | 회로의 `directory`, 작업본 `document`, `expectedRevision` |
+| `status`, `stop` | `runId`. 다른 세션에서 시작했다면 회로의 `directory`도 전달합니다. |
+| `wave` | `runId`, 이름 배열 `channels`, `from_s`, `to_s`, `pixels`. 다른 세션에서 시작했다면 `directory`도 전달합니다. |
+
 ## 외부 PC에서 설치하기
 
 Windows x64에 Rust가 없다면 [rustup](https://rustup.rs/)을 설치합니다. PowerShell에서 저장소를 복제하고 기본 Rust 툴체인으로 플러그인을 빌드합니다.

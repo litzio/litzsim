@@ -14,6 +14,14 @@ pub fn simulate(
     document: &Document,
     mut should_stop: impl FnMut() -> bool,
 ) -> Result<Waveform, Error> {
+    simulate_observed(document, |_| should_stop())
+}
+
+/// Report the simulated time reached before each step and check for cancellation.
+pub fn simulate_observed(
+    document: &Document,
+    mut should_stop: impl FnMut(f64) -> bool,
+) -> Result<Waveform, Error> {
     let (mut devices, mut system) = assemble(document)?;
     let settings = &document.circuit().simulation;
     let step = settings.time_step_s;
@@ -34,7 +42,7 @@ pub fn simulate(
 
     let (mut tick, mut time, mut previous) = (0_u64, 0.0, 0.0);
     loop {
-        if should_stop() {
+        if should_stop(previous) {
             return Err(Error::new("simulationCanceled", "Simulation canceled"));
         }
         let h = time - previous;

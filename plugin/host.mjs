@@ -36,7 +36,7 @@ export async function activate() {
     return stopping;
   }
 
-  async function requestPing() {
+  async function request(op, payload) {
     if (stopping || child.exitCode !== null || child.signalCode !== null ||
         !child.stdin.writable) {
       throw new Error("LitzSim core is unavailable.");
@@ -46,15 +46,16 @@ export async function activate() {
       const line = await new Promise((resolve, reject) => {
         pending = { resolve, reject };
         timer = setTimeout(() => reject(new Error("LitzSim core did not respond.")), 3000);
-        child.stdin.write('{"op":"ping"}\n');
+        child.stdin.write(JSON.stringify({ ...payload, op }) + "\n");
       });
       const response = JSON.parse(line);
-      if (response?.ok !== true || typeof response.version !== "string" || !response.version) {
+      if (typeof response?.ok !== "boolean" ||
+          (op === "ping" && (response.ok !== true || typeof response.version !== "string" || !response.version))) {
         throw new Error("Invalid LitzSim core response.");
       }
       return response;
     } catch (error) {
-      // Without request IDs, a late response must never be used for a later ping.
+      // Without request IDs, dispose before a late response can reach another call.
       await dispose();
       throw error;
     } finally {
@@ -63,8 +64,14 @@ export async function activate() {
     }
   }
 
+  function invoke(op, payload) {
+    const task = queue.then(() => request(op, payload));
+    queue = task.catch(() => {});
+    return task;
+  }
+
   try {
-    version = (await requestPing()).version;
+    version = (await request("ping")).version;
   } catch {
     await dispose();
   }
@@ -75,11 +82,11 @@ export async function activate() {
       message: version ? `LitzSim core ${version} ready` : "LitzSim core unavailable",
     }),
     operations: {
-      ping() {
-        const task = queue.then(requestPing);
-        queue = task.catch(() => {});
-        return task;
-      },
+      ping: () => invoke("ping"),
+      start: payload => invoke("start", payload),
+      status: payload => invoke("status", payload),
+      stop: payload => invoke("stop", payload),
+      wave: payload => invoke("wave", payload),
     },
     dispose,
   };
