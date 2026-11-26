@@ -65,6 +65,10 @@ fn strokes(kind: &str) -> Vec<Stroke> {
             strokes.extend(diode(0));
             strokes
         }
+        "timedSwitch" => vec![
+            line(&[[0, -32], [0, -12]]),
+            line(&[[0, 32], [0, 12], [12, -7]]),
+        ],
         "nmos" => {
             let mut strokes = vec![
                 line(&[[-32, 0], [-22, 0]]),
@@ -221,6 +225,7 @@ fn value_text(part: &LayoutPart<'_>) -> Option<String> {
         "dc" => ("voltage_V", "V", 1.0),
         "sine" => ("amplitude_V", "V RMS", std::f64::consts::FRAC_1_SQRT_2),
         "pwm" => ("frequency_Hz", "Hz", 1.0),
+        "timedSwitch" => ("switchTime_s", "s", 1.0),
         _ => return None,
     };
     let value = part.parameters[key].as_f64().expect("validated parameter") * scale;
@@ -324,6 +329,17 @@ pub(super) fn geometry<'a>(
                 mark.into(),
                 Some(pin),
                 at([x + delta[0], y + delta[1]]),
+            ));
+        }
+    }
+    if kind == "timedSwitch" {
+        for (pin, y) in [("p", -22), ("n", 22)] {
+            labels.push(caption(
+                id,
+                LabelKind::Terminal,
+                pin.into(),
+                Some(pin),
+                at([-11, y]),
             ));
         }
     }

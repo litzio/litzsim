@@ -122,6 +122,10 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "ground" => (&["ref"], &[]),
         "diode" => (&["a", "k"], &[]),
         "nmos" => (&["d", "g", "s"], &[]),
+        "timedSwitch" => (
+            &["p", "n"],
+            &[("initiallyClosed", 0.0), ("switchTime_s", 1e-3)],
+        ),
         "pwm" => (
             &["out", "ref"],
             &[("frequency_Hz", 10000.0), ("duty", 0.5), ("high_V", 10.0)],
@@ -184,6 +188,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "ground" => "GND",
         "diode" => "D",
         "nmos" => "Q",
+        "timedSwitch" => "SW",
         "pwm" => "PWM",
         "voltmeter" => "VM",
         "voltageProbe" => "VP",
@@ -204,7 +209,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         measurement,
         recording_pins: match kind {
             "nmos" => Some(["d", "s"]),
-            "dc" | "sine" | "resistor" | "inductor" | "capacitor" | "diode" => {
+            "dc" | "sine" | "resistor" | "inductor" | "capacitor" | "diode" | "timedSwitch" => {
                 Some([pins[0], pins[1]])
             }
             _ => None,

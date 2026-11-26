@@ -85,6 +85,13 @@ pub fn simulate_with_warnings(
         })
         .collect();
     let clocks: Vec<_> = devices.iter().filter_map(Device::pulse).collect();
+    let timed_switches: Vec<_> = devices
+        .iter()
+        .filter_map(|device| match device.kind {
+            Kind::TimedSwitch(switch) => Some(switch),
+            _ => None,
+        })
+        .collect();
     let electrical_channels = probes.iter().map(|&(index, quantity)| {
         let unit = quantity.unit();
         Channel {
@@ -103,7 +110,7 @@ pub fn simulate_with_warnings(
         let h = time - previous;
         // Use the interval's interior state. At an edge the sample is the
         // left limit, and the next interval uses the newly switched state.
-        solve_sample(&mut devices, &mut system, Sample::step(time, h))?;
+        solve_sample(&mut devices, &mut system, Sample::step(time, previous))?;
         let x = &system.rhs;
         for device in &mut devices {
             let branch = device.branch;
@@ -139,19 +146,27 @@ pub fn simulate_with_warnings(
             push_row(&mut wave, &devices, &probes, control.as_ref(), time, x)?;
         }
         let at_stop = time == stop;
-        if at_stop && !control_changed {
+        let timed_edge = time != 0.0
+            && timed_switches
+                .iter()
+                .any(|switch| same_clock_time(switch.at, time));
+        if at_stop && !control_changed && !timed_edge {
             return Ok((wave, warnings));
         }
         if on_grid {
             tick += 1;
         }
-        // A control change at stop needs a right-limit row. Use the interval
-        // that would follow this sample to find the new PWM state.
+        // At stop, use the interval that would follow this sample to solve
+        // the right limit for a time switch or a changed control output.
         let grid = tick as f64 * step;
         let boundary = if at_stop { grid } else { stop.min(grid) };
         let edge = clocks
             .iter()
             .fold(boundary, |next, pulse| next.min(pulse.next_edge(time)));
+        let edge = timed_switches
+            .iter()
+            .filter(|switch| switch.pending(time))
+            .fold(edge, |next, switch| next.min(switch.at));
         let edge = control
             .as_ref()
             .map_or(edge, |control| edge.min(control.next_sample()));
@@ -172,7 +187,7 @@ pub fn simulate_with_warnings(
                 "Time step below clock resolution",
             ));
         }
-        // A PWM edge at this sample switches the next interval. Record the
+        // A switch edge at this sample switches the next interval. Record the
         // right limit as a second row at the same time: capacitor voltages and
         // inductor currents stay, and the circuit is solved with the switch
         // states of the next interval. Switch states are restored afterwards so
@@ -180,15 +195,17 @@ pub fn simulate_with_warnings(
         // Include any updated control outputs in this same right-limit row.
         let right = (time + next) / 2.0;
         let switching = record
-            && clocks
-                .iter()
-                .any(|pulse| pulse.is_high(time - h / 2.0) != pulse.is_high(right));
+            && (timed_edge
+                || clocks
+                    .iter()
+                    .any(|pulse| pulse.is_high(time - h / 2.0) != pulse.is_high(right)));
         if switching {
             let switches: Vec<_> = devices.iter().map(|d| (d.driven, d.conducting)).collect();
             let limit = Sample {
                 time,
                 h: 0.0,
                 interior: right,
+                interval_start: time,
                 initial: false,
             };
             // With inductors as exact current sources an off diode can leave
@@ -242,23 +259,27 @@ fn push_row(
 }
 
 /// One circuit solve. `h` is the step from the previous sample: zero at the
-/// start and for the right limit at a PWM edge, where inductors hold their
+/// start and for the right limit at a switch edge, where inductors hold their
 /// current and capacitors their voltage. PWM states are those at `interior`.
+/// Time-controlled switches take the state after events at `interval_start`.
 /// `initial` applies the start-only capacitor rules.
 #[derive(Clone, Copy)]
 struct Sample {
     time: f64,
     h: f64,
     interior: f64,
+    interval_start: f64,
     initial: bool,
 }
 
 impl Sample {
-    fn step(time: f64, h: f64) -> Self {
+    fn step(time: f64, previous: f64) -> Self {
+        let h = time - previous;
         Self {
             time,
             h,
             interior: time - h / 2.0,
+            interval_start: previous,
             initial: h == 0.0,
         }
     }
@@ -291,6 +312,18 @@ impl Pulse {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TimedSwitch {
+    at: f64,
+    initially_closed: bool,
+}
+
+impl TimedSwitch {
+    fn pending(self, time: f64) -> bool {
+        self.at > time && !same_clock_time(self.at, time)
+    }
+}
+
 enum Kind {
     Resistance(f64),
     Capacitor(f64, f64),
@@ -300,6 +333,7 @@ enum Kind {
     Pulse(Pulse),
     Diode,
     Nmos(Option<Pulse>),
+    TimedSwitch(TimedSwitch),
     Voltmeter,
     Ammeter,
 }
@@ -337,7 +371,11 @@ impl Device<'_> {
     }
 
     fn is_open_switch(&self) -> bool {
-        matches!(self.kind, Kind::Diode | Kind::Nmos(_)) && !self.driven && !self.conducting
+        matches!(
+            self.kind,
+            Kind::Diode | Kind::Nmos(_) | Kind::TimedSwitch(_)
+        ) && !self.driven
+            && !self.conducting
     }
 
     fn voltage(&self, x: &[f64]) -> f64 {
@@ -602,6 +640,20 @@ fn device_kind(id: &str, part: &Part) -> Result<Kind, Error> {
         }
         "diode" => Kind::Diode,
         "nmos" => Kind::Nmos(None),
+        "timedSwitch" => {
+            let closed = param("initiallyClosed");
+            if closed != 0.0 && closed != 1.0 {
+                return Err(Error::invalid(id, "initiallyClosed must be 0 or 1"));
+            }
+            let at = param("switchTime_s");
+            if at < 0.0 {
+                return Err(Error::invalid(id, "switchTime_s must be nonnegative"));
+            }
+            Kind::TimedSwitch(TimedSwitch {
+                at,
+                initially_closed: closed == 1.0,
+            })
+        }
         "voltmeter" | "voltageProbe" | "voltageSensor" => Kind::Voltmeter,
         "ammeter" | "currentSensor" => Kind::Ammeter,
         kind => {
@@ -623,16 +675,21 @@ fn solve_sample(
         h,
         interior,
         initial,
+        ..
     } = sample;
     let mut turned_on = false;
     for device in devices.iter_mut() {
-        if let Kind::Nmos(Some(pulse)) = device.kind {
-            let high = pulse.is_high(interior);
-            turned_on |= high && !device.driven;
-            device.driven = high;
-            if high {
-                device.conducting = false;
+        let driven = match device.kind {
+            Kind::Nmos(Some(pulse)) => pulse.is_high(interior),
+            Kind::TimedSwitch(switch) => {
+                switch.initially_closed ^ !switch.pending(sample.interval_start)
             }
+            _ => continue,
+        };
+        turned_on |= driven && !device.driven;
+        device.driven = driven;
+        if driven {
+            device.conducting = false;
         }
     }
     for iteration in 0..=32 {
@@ -825,6 +882,7 @@ fn stamp(system: &mut System, device: &Device<'_>, sample: Sample) {
         h,
         interior,
         initial,
+        ..
     } = sample;
     let (p, n) = (device.p, device.n);
     match device.kind {
@@ -844,7 +902,9 @@ fn stamp(system: &mut System, device: &Device<'_>, sample: Sample) {
     system.add(p, k, 1.0);
     system.add(n, k, -1.0);
     let (voltage, coefficient, rhs) = match device.kind {
-        Kind::Diode | Kind::Nmos(_) if device.is_open_switch() => (false, 1.0, 0.0),
+        Kind::Diode | Kind::Nmos(_) | Kind::TimedSwitch(_) if device.is_open_switch() => {
+            (false, 1.0, 0.0)
+        }
         Kind::Inductor(_, current) if h == 0.0 => (false, 1.0, current),
         Kind::Inductor(inductance, current) => {
             let z = inductance / h;
@@ -873,7 +933,7 @@ fn stamp(system: &mut System, device: &Device<'_>, sample: Sample) {
                 0.0
             },
         ),
-        Kind::Ammeter | Kind::Diode | Kind::Nmos(_) => (true, 0.0, 0.0),
+        Kind::Ammeter | Kind::Diode | Kind::Nmos(_) | Kind::TimedSwitch(_) => (true, 0.0, 0.0),
         Kind::Voltmeter | Kind::Resistance(_) => unreachable!(),
     };
     if voltage {
