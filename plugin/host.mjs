@@ -99,7 +99,7 @@ export async function activate() {
         const response = await invoke("save", { ...payload, file });
         return response.ok ? { ...response, file } : response;
       },
-      start: ({ file, ...payload }) => invoke("start", { ...payload, directory: path.dirname(file) }),
+      start: payload => invoke("start", payload),
       status: payload => invoke("status", payload),
       stop: payload => invoke("stop", payload),
       wave: payload => invoke("wave", payload),

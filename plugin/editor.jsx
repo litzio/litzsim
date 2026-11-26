@@ -1,12 +1,12 @@
 import React from "react";
 import { CATEGORIES, PARTS, PARAMETERS, formatSI, parseSI, shortcutOf } from "./parts.js";
 import { Schematic, sheetView, contentBounds } from "./schematic.jsx";
+import { isDirty, nearestPair, shortedSources } from "./rules.js";
 
 // The editor owns only screen state: selection, drag previews, hover, the
 // collapsed library and the undo snapshots it hands back to the core. Every
 // circuit change is one core `apply`; every drawing is the core `layout`.
 const GRID = 32;
-const SUGGEST_DISTANCE = 1.5 * GRID;
 const POLL_MS = 250;
 const ZOOM = { min: 0.25, max: 4, fitMax: 1.25, step: 1.25, margin: 48 };
 const ACTIVE = ["running", "stopping"];
@@ -50,21 +50,6 @@ const label = type => PARTS[type]?.label ?? type;
 const formatTime = seconds => `${formatSI(seconds)} s`;
 const gridOf = ([x, y]) => [Math.round(x / GRID), Math.round(y / GRID)];
 const sheetOf = response => ({ document: response.document, revision: response.layout.revision, layout: response.layout });
-
-/** Closest terminal of another part, not already on the same net, for a part moved by offset. */
-function nearestPair(layout, partId, [dx, dy] = [0, 0]) {
-  const pins = Object.entries(layout.pins);
-  let best = null;
-  for (const [a, pin] of pins.filter(([, pin]) => pin.partId === partId)) {
-    const from = [pin.at[0] + dx, pin.at[1] + dy];
-    for (const [b, other] of pins) {
-      if (other.partId === partId || (pin.netId && pin.netId === other.netId)) continue;
-      const distance = Math.hypot(from[0] - other.at[0], from[1] - other.at[1]);
-      if (distance <= SUGGEST_DISTANCE && (!best || distance < best.distance)) best = { a, b, from, to: other.at, distance };
-    }
-  }
-  return best;
-}
 
 function intersects(a, b) {
   return a.min[0] < b.max[0] && b.min[0] < a.max[0] && a.min[1] < b.max[1] && b.min[1] < a.max[1];
@@ -261,7 +246,8 @@ export function Editor({ ui, adapter }) {
   async function loadNew() {
     const created = await adapter.call("new");
     const drawn = await adapter.call("layout", { document: created.document });
-    reset({ document: created.document, revision: created.revision, layout: drawn }, null, null);
+    reset({ document: created.document, revision: created.revision, layout: drawn }, null,
+      { revision: null, saved: created.revision });
   }
 
   useEffect(() => { perform(loadNew); }, []);
@@ -398,7 +384,7 @@ export function Editor({ ui, adapter }) {
   }
 
   const hasParts = Boolean(sheet && Object.keys(sheet.document.parts).length);
-  const dirty = Boolean(sheet && (file ? disk?.saved !== sheet.revision : hasParts));
+  const dirty = Boolean(sheet && disk && isDirty(sheet.revision, disk.saved));
   const running = Boolean(run && ACTIVE.includes(run.state));
 
   async function discardChanges(title) {
@@ -452,7 +438,8 @@ export function Editor({ ui, adapter }) {
   function startRun() {
     perform(async () => {
       const { sheet: current } = latest.current;
-      setRun(await adapter.call("start", { file, document: current.document, expectedRevision: current.revision }));
+      const directory = file.slice(0, Math.max(file.lastIndexOf("/"), file.lastIndexOf("\\")));
+      setRun(await adapter.call("start", { directory, document: current.document, expectedRevision: current.revision }));
     });
   }
 
@@ -509,11 +496,22 @@ export function Editor({ ui, adapter }) {
     edit([{ op: "insertInBranch", type: "ammeter", terminals: segment.terminals, from: segment.from, to: segment.to }]);
   }
 
+  /** Connect two terminals; confirm first if a voltage source would end up shorted. */
+  async function connect(a, b, started) {
+    const shorted = shortedSources(latest.current.sheet.document, a, b);
+    if (shorted.length && !(await adapter.confirm({
+      title: "전압원을 단락할까요?",
+      message: `${shorted.join(", ")}의 두 단자가 같은 네트가 됩니다.`,
+      confirmLabel: "그래도 연결",
+    }))) return undefined;
+    return edit([{ op: "connect", a, b }], { kind: "connect", started });
+  }
+
   async function acceptSuggestion(started = performance.now()) {
     const { a, b } = suggestion;
     const partId = sheet.layout.pins[a].partId;
     setSuggestion(null);
-    const next = await edit([{ op: "connect", a, b }], { kind: "connect", started });
+    const next = await connect(a, b, started);
     if (next) setSuggestion(nearestPair(next.layout, partId));
   }
 
@@ -524,7 +522,7 @@ export function Editor({ ui, adapter }) {
     setSuggestion(null);
     if (pendingPin && pendingPin !== id) {
       setPendingPin(null);
-      edit([{ op: "connect", a: pendingPin, b: id }], { kind: "connect", started });
+      connect(pendingPin, id, started);
     } else {
       setPendingPin(pendingPin === id ? null : id);
     }

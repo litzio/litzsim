@@ -313,9 +313,19 @@ pub(crate) fn branch_cut(
             }
         }
     }
+    // A terminal whose branch failed can sit on a routed point without being
+    // attached there; it stays with the root side as documented.
+    let unrouted: BTreeSet<&str> = result
+        .issues
+        .iter()
+        .filter(|issue| issue.code == "routeFailed")
+        .map(|issue| issue.targets[0].id.as_str())
+        .collect();
     let pins: Vec<String> = document.layout_nets()[net]
         .iter()
-        .filter(|pin| far.contains(&result.pins[pin.as_str()].at))
+        .filter(|pin| {
+            !unrouted.contains(pin.as_str()) && far.contains(&result.pins[pin.as_str()].at)
+        })
         .cloned()
         .collect();
     debug_assert!(pins.contains(&terminals[1]) && !pins.contains(&terminals[0]));

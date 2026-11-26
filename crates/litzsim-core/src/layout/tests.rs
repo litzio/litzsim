@@ -595,3 +595,35 @@ fn insert_in_branch_cuts_the_chosen_segment_and_faces_the_first_pin_toward_from(
         );
     }
 }
+
+#[test]
+fn insert_in_branch_leaves_unrouted_terminals_on_the_original_net() {
+    // Review repro: G2 shares GND's position but its unmet bend fails to route.
+    let mut fixture: Value = serde_json::from_slice(RC).unwrap();
+    fixture["parts"]["G2"] = fixture["parts"]["GND"].clone();
+    fixture["layout"]["G2"] = fixture["layout"]["GND"].clone();
+    fixture["nets"]["ground"] = json!(["V1.n", "GND.ref", "G2.ref"]);
+    fixture["bends"] = json!({"G2.ref":{"x":2,"y":5}});
+    let doc = document(&fixture);
+    let drawn = layout(&doc);
+    assert!(
+        drawn
+            .issues
+            .iter()
+            .any(|issue| { issue.code == "routeFailed" && issue.targets[0].id == "G2.ref" })
+    );
+    let edited = apply(
+        &doc,
+        &doc.revision(),
+        &[Operation::InsertInBranch {
+            kind: "ammeter".into(),
+            terminals: ["V1.n".into(), "GND.ref".into()],
+            from: [0, 96],
+            to: [0, 160],
+        }],
+    )
+    .unwrap();
+    let nets = edited.document.layout_nets();
+    assert_eq!(nets["ground"], ["V1.n", "G2.ref", "AM1.p"]);
+    assert_eq!(nets["net1"], ["AM1.n", "GND.ref"]);
+}

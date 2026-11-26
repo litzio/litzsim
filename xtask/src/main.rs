@@ -51,6 +51,7 @@ fn package_plugin() -> Result<(), Box<dyn Error>> {
         "screen.jsx",
         "editor.jsx",
         "schematic.jsx",
+        "rules.js",
         "parts.js",
     ] {
         fs::copy(source.join(file), output.join(file))?;
