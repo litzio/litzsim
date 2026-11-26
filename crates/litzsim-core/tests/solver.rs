@@ -14,6 +14,94 @@ fn channel(wave: &litzsim_core::waves::Waveform, name: &str) -> usize {
     wave.channels().iter().position(|c| c.name == name).unwrap()
 }
 
+fn singular_circuit(parts: Value, nets: Value, reason: &str, ids: &[&str]) {
+    let mut value = json!({
+        "version": 1,
+        "layout": {},
+        "simulation": {"timeStep_s": 1e-6, "stopTime_s": 1e-5},
+        "parts": parts,
+        "nets": nets
+    });
+    value["parts"]["G"] = json!({"type": "ground", "parameters": {}});
+    let error = simulate(&document(&value), || false).unwrap_err();
+    assert_eq!(error.code, "singularCircuit", "{error:?}");
+    assert!(
+        ids.contains(&error.target_id.as_deref().unwrap()),
+        "{error:?}"
+    );
+    let (diagnosis, related) = error.message.split_once(" at 0 s: ").unwrap();
+    assert!(diagnosis.starts_with(reason), "{error:?}");
+    let mut related: Vec<_> = related.split(", ").collect();
+    let mut expected = ids.to_vec();
+    related.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(related, expected);
+}
+
+#[test]
+fn identifies_parallel_initial_voltage_constraints_and_voltage_source_loops() {
+    singular_circuit(
+        json!({
+            "Vin": {"type": "dc", "parameters": {"voltage_V": 5}},
+            "Cin": {"type": "capacitor", "parameters": {"capacitance_F": 1e-6, "initialVoltage_V": 5}}
+        }),
+        json!({"input": ["Vin.p", "Cin.p"], "gnd": ["G.ref", "Vin.n", "Cin.n"]}),
+        "Ideal voltage constraint loop",
+        &["Vin", "Cin"],
+    );
+    singular_circuit(
+        json!({
+            "Vin": {"type": "dc", "parameters": {"voltage_V": 5}},
+            "Vdrop": {"type": "dc", "parameters": {"voltage_V": 2}},
+            "Vout": {"type": "dc", "parameters": {"voltage_V": 3}}
+        }),
+        json!({
+            "input": ["Vin.p", "Vdrop.p"],
+            "output": ["Vdrop.n", "Vout.p"],
+            "gnd": ["G.ref", "Vin.n", "Vout.n"]
+        }),
+        "Ideal voltage constraint loop",
+        &["Vin", "Vdrop", "Vout"],
+    );
+}
+
+#[test]
+fn identifies_initial_inductor_current_cut_off_by_an_open_diode() {
+    singular_circuit(
+        json!({
+            "Vin": {"type": "dc", "parameters": {"voltage_V": 5}},
+            "L1": {"type": "inductor", "parameters": {"inductance_H": 1e-3, "initialCurrent_A": 0.2}},
+            "D1": {"type": "diode", "parameters": {}}
+        }),
+        json!({
+            "input": ["Vin.p", "L1.p"],
+            "isolated": ["L1.n", "D1.a"],
+            "gnd": ["G.ref", "Vin.n", "D1.k"]
+        }),
+        "Initial inductor current cutset",
+        &["L1", "D1"],
+    );
+}
+
+#[test]
+fn identifies_floating_node_between_open_diodes() {
+    singular_circuit(
+        json!({
+            "Vin": {"type": "dc", "parameters": {"voltage_V": 5}},
+            "D1": {"type": "diode", "parameters": {}},
+            "D2": {"type": "diode", "parameters": {}},
+            "VM": {"type": "voltmeter", "parameters": {}}
+        }),
+        json!({
+            "input": ["Vin.p", "D1.a"],
+            "isolated": ["D1.k", "D2.a", "VM.p"],
+            "gnd": ["G.ref", "Vin.n", "D2.k", "VM.n"]
+        }),
+        "Floating node",
+        &["D1", "D2"],
+    );
+}
+
 #[test]
 fn rc_and_rlc_converge_to_the_step_response() {
     for (name, example) in [("RC", RC), ("RLC", RLC)] {
