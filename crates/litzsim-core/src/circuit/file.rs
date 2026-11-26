@@ -63,13 +63,21 @@ pub fn save(path: &Path, document: &Document, mode: SaveMode<'_>) -> Result<Stri
                 io::ErrorKind::AlreadyExists => {
                     Error::new("fileExists", "Circuit file already exists")
                 }
-                _ => io_error(error),
+                _ => Error::new(
+                    "ioError",
+                    format!("Could not publish {}: {error}", path.display()),
+                ),
             })?;
         }
         SaveMode::Replace { .. } => {
             // Also catch edits by programs that wrote while the temp file synced.
             check_destination(&path, &mode)?;
-            fs::rename(&staged.0, &path).map_err(io_error)?;
+            fs::rename(&staged.0, &path).map_err(|error| {
+                Error::new(
+                    "ioError",
+                    format!("Could not replace {}: {error}", path.display()),
+                )
+            })?;
         }
     }
     Ok(revision(&bytes))
