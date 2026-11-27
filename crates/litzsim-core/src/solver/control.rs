@@ -116,6 +116,7 @@ struct Block<'a> {
     equation: Equation,
     inputs: Vec<usize>,
     needs_sense: bool,
+    observed: bool,
 }
 
 pub(super) struct Control<'a> {
@@ -123,13 +124,17 @@ pub(super) struct Control<'a> {
     order: Vec<usize>,
     values: Vec<f64>,
     recorded: Vec<usize>,
+    probes: Vec<(&'a str, usize)>,
     pwm_inputs: BTreeMap<&'a str, usize>,
     period: f64,
     tick: u64,
 }
 
 impl<'a> Control<'a> {
-    pub(super) fn compile(document: &'a Document) -> Result<Option<Self>, Error> {
+    pub(super) fn compile(
+        document: &'a Document,
+        signal_probes: &BTreeMap<&'a str, &'a str>,
+    ) -> Result<Option<Self>, Error> {
         let circuit = document.circuit();
         let parts: Vec<_> = circuit
             .parts
@@ -190,6 +195,7 @@ impl<'a> Control<'a> {
                 equation: Equation::from_part(id, part)?,
                 inputs,
                 needs_sense: false,
+                observed: part.record.output,
             });
         }
         let order = evaluation_order(&blocks)?;
@@ -207,12 +213,28 @@ impl<'a> Control<'a> {
                 "Control blocks require a controlSamplePeriod_s",
             )
         })?;
+        // Probes share the driver's held value and recording events without
+        // participating in the dependency graph.
+        let probes = signal_probes
+            .iter()
+            .map(|(&id, net)| {
+                let &driver = drivers.get(net).ok_or_else(|| {
+                    Error::invalid(
+                        id,
+                        format!("Unconnected signal input {id}.p: expected a signal output"),
+                    )
+                })?;
+                blocks[driver].observed = true;
+                Ok((id, driver))
+            })
+            .collect::<Result<_, Error>>()?;
         let values = vec![0.0; blocks.len()];
         Ok(Some(Self {
             blocks,
             order,
             values,
             recorded,
+            probes,
             pwm_inputs,
             period,
             tick: 0,
@@ -329,9 +351,7 @@ impl<'a> Control<'a> {
                     format!("Non-finite control output at {time} s"),
                 ));
             }
-            if value != self.values[index]
-                && (include_unrecorded_changes || self.recorded.binary_search(&index).is_ok())
-            {
+            if value != self.values[index] && (include_unrecorded_changes || block.observed) {
                 changed = true;
             }
             self.values[index] = value;
@@ -340,14 +360,22 @@ impl<'a> Control<'a> {
     }
 
     pub(super) fn channels(&self) -> impl Iterator<Item = Channel> + '_ {
-        self.recorded.iter().map(|&index| Channel {
-            name: format!("{}_out", self.blocks[index].id),
-            unit: RecordQuantity::Output.unit().into(),
-        })
+        self.recorded
+            .iter()
+            .map(|&index| format!("{}_out", self.blocks[index].id))
+            .chain(self.probes.iter().map(|&(id, _)| id.into()))
+            .map(|name| Channel {
+                name,
+                unit: RecordQuantity::Output.unit().into(),
+            })
     }
 
     pub(super) fn recorded_values(&self) -> impl Iterator<Item = f64> + Clone + '_ {
-        self.recorded.iter().map(|&index| self.values[index])
+        self.recorded
+            .iter()
+            .copied()
+            .chain(self.probes.iter().map(|&(_, driver)| driver))
+            .map(|index| self.values[index])
     }
 }
 

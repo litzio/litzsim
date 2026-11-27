@@ -533,6 +533,62 @@ fn added_voltage_probe_round_trips_with_its_ground_reference() {
 }
 
 #[test]
+fn signal_probe_round_trips_and_follows_the_renamed_channel() {
+    let original = Document::from_bytes(include_bytes!(
+        "../../../../examples/control-signals.litzsim"
+    ))
+    .unwrap();
+    let revision = original.revision();
+    let ops: Vec<Operation> = serde_json::from_value(json!([
+        {"op": "add", "type": "voltageProbe", "grid": [2, 9]},
+        {"op": "connect", "a": "VP1.p", "b": "RAMP1.out"},
+        {"op": "rename", "id": "VP1", "newId": "Command"}
+    ]))
+    .unwrap();
+    let edited = apply(&original, &revision, &ops).unwrap();
+    let folder = SaveTestDirectory::new("signal-probe");
+    let path = folder.0.join("signal-probe.litzsim");
+    save(&path, &edited.document, SaveMode::New).unwrap();
+    let opened = open(&path).unwrap();
+    assert_eq!(opened.document.to_bytes(), edited.document.to_bytes());
+    let inspection = opened.document.inspect();
+    assert_eq!(inspection.pin_nets["Command.p"], Some("ramp"));
+    assert_eq!(
+        json!(inspection.measurements["Command"]),
+        json!({"quantity": "output", "unit": "1", "fromPin": "p", "toPin": null})
+    );
+    crate::solver::validate_probe_reference(&opened.document).unwrap();
+    let wave = crate::solver::simulate(&opened.document, || false).unwrap();
+    assert!(
+        wave.channels()
+            .iter()
+            .any(|channel| channel.name == "Command")
+    );
+    assert!(
+        !wave
+            .channels()
+            .iter()
+            .any(|channel| channel.name.starts_with("VP1"))
+    );
+    let conflict = apply(
+        &opened.document,
+        &opened.revision,
+        &[rename("Command", "RAMP1_out")],
+    )
+    .unwrap();
+    let error = crate::solver::simulate(&conflict.document, || false).unwrap_err();
+    assert_eq!(error.target_id.as_deref(), Some("RAMP1_out"));
+    assert!(
+        error
+            .message
+            .contains("conflicts with an existing waveform channel")
+    );
+
+    let restored = undo(&opened.document, &opened.revision, &revision, &original).unwrap();
+    assert_eq!(restored.document.to_bytes(), original.to_bytes());
+}
+
+#[test]
 fn feedback_parts_round_trip_through_save_layout_and_undo() {
     let original = Document::from_bytes(BUCK).unwrap();
     let revision = original.revision();
