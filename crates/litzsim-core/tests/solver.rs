@@ -116,6 +116,82 @@ fn control_blocks_sample_in_dependency_order_and_hold_between_ticks() {
 }
 
 #[test]
+fn signal_probe_records_the_drivers_bits_with_or_without_output_recording() {
+    // RAMP1 changes at the final sample. GAIN1 produces a negative zero on
+    // earlier samples, which a floating-point equality check would miss.
+    for stop in [1.5_f64.next_down(), 1.5, 1.5_f64.next_up()] {
+        for stride in [None, Some(0.5)] {
+            let mut value: Value = serde_json::from_str(CONTROL).unwrap();
+            value["simulation"]["stopTime_s"] = json!(stop);
+            if let Some(stride) = stride {
+                value["simulation"]["outputStep_s"] = json!(stride);
+            }
+            value["parts"]["RAMP1"]["parameters"]["finalValue"] = json!(6);
+            let (original, original_warnings) =
+                simulate_with_warnings(&document(&value), |_| false).unwrap();
+            for (probe, net) in [("Ramp", "ramp"), ("Gain", "scaled"), ("Limit", "limit")] {
+                value["parts"][probe] = json!({"type": "voltageProbe", "parameters": {}});
+                if net == "limit" {
+                    value["nets"][net] = json!(["LIM1.out"]);
+                }
+                // Probe first exercises net classification independent of terminal order.
+                value["nets"][net]
+                    .as_array_mut()
+                    .unwrap()
+                    .insert(0, json!(format!("{probe}.p")));
+            }
+            for record_output in [true, false] {
+                for driver in ["RAMP1", "GAIN1", "LIM1"] {
+                    value["parts"][driver]["record"]["output"] = json!(record_output);
+                }
+                let (wave, warnings) =
+                    simulate_with_warnings(&document(&value), |_| false).unwrap();
+                assert_eq!(json!(warnings), json!(original_warnings));
+                assert_eq!(wave.rows().len(), original.rows().len());
+                assert_eq!(
+                    wave.rows()
+                        .rev()
+                        .take(2)
+                        .map(|row| row[0])
+                        .collect::<Vec<_>>(),
+                    [stop; 2],
+                );
+                let mut columns = original
+                    .channels()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(from, column)| {
+                        wave.channels()
+                            .iter()
+                            .position(|c| c.name == column.name)
+                            .map(|to| (from, to))
+                    })
+                    .collect::<Vec<_>>();
+                for (probe, driver) in [
+                    ("Ramp", "RAMP1_out"),
+                    ("Gain", "GAIN1_out"),
+                    ("Limit", "LIM1_out"),
+                ] {
+                    let index = channel(&wave, probe);
+                    assert_eq!(wave.channels()[index].unit, "1");
+                    assert_eq!(
+                        wave.channels().iter().any(|c| c.name == driver),
+                        record_output
+                    );
+                    columns.push((channel(&original, driver), index));
+                }
+                assert_eq!(columns.len(), wave.channels().len());
+                for (expected, actual) in original.rows().zip(wave.rows()) {
+                    for &(from, to) in &columns {
+                        assert_eq!(actual[to].to_bits(), expected[from].to_bits());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn sampled_sensors_match_meters_and_use_the_left_limit_at_pwm_edges() {
     let mut value: Value = serde_json::from_str(BUCK).unwrap();
     value["simulation"]["controlSamplePeriod_s"] = json!(50e-6);
@@ -270,6 +346,8 @@ fn check_pwm_control_stop(frequency: f64, step: f64, edge: f64, sample: f64, sto
         "type": "step", "parameters": {"stepTime_s": sample, "before": 0, "after": 1},
         "record": {"output": true}
     });
+    value["parts"]["VP1"] = json!({"type": "voltageProbe", "parameters": {}});
+    value["nets"]["command"] = json!(["VP1.p", "S.out"]);
     value["nets"]["gate"]
         .as_array_mut()
         .unwrap()
@@ -310,8 +388,16 @@ fn check_pwm_control_stop(frequency: f64, step: f64, edge: f64, sample: f64, sto
         [stop; 2],
         "{context}"
     );
-    assert_eq!(continued[0][2..], [10.0, 0.0, 20.0], "{context}");
-    assert_eq!(continued[1][2..], [0.0, 1.0, 20.0], "{context}");
+    assert_eq!(continued[0][2..], [10.0, 0.0, 20.0, 0.0], "{context}");
+    assert_eq!(continued[1][2..], [0.0, 1.0, 20.0, 1.0], "{context}");
+    for wave in [&short, &long] {
+        let (driver, probe) = (channel(wave, "S_out"), channel(wave, "VP1"));
+        assert!(
+            wave.rows()
+                .all(|row| row[driver].to_bits() == row[probe].to_bits()),
+            "{context}"
+        );
+    }
     for (final_row, continued_row) in final_rows.iter().zip(&continued) {
         assert!(
             (final_row[0] - continued_row[0]).abs() <= time_tolerance,
@@ -336,11 +422,20 @@ fn control_execution_reports_the_cycle_and_driverless_inputs() {
     let error = simulate(&document(&value), || false).unwrap_err();
     assert_eq!(error.target_id.as_deref(), Some("GAIN1"));
     assert_eq!(error.message, "Algebraic loop: GAIN1, SUM2, SUM1");
+    value["parts"]["VP1"] = json!({"type": "voltageProbe", "parameters": {}});
+    value["nets"]["observed"] = json!(["VP1.p", "LIM1.out"]);
+    let probed_error = simulate(&document(&value), || false).unwrap_err();
+    assert_eq!(json!(probed_error), json!(error));
 
     value["nets"]["constant"] = json!(["SUM1.in1", "LIM1.in"]);
     let error = simulate(&document(&value), || false).unwrap_err();
     assert_eq!(error.target_id.as_deref(), Some("LIM1"));
     assert!(error.message.contains("Unconnected signal input LIM1.in"));
+    value["nets"]["constant"] = json!(["VP1.p", "SUM1.in1", "LIM1.in"]);
+    value["nets"].as_object_mut().unwrap().remove("observed");
+    let probed_error = simulate(&document(&value), || false).unwrap_err();
+    assert_eq!(json!(probed_error), json!(error));
+    value["parts"].as_object_mut().unwrap().remove("VP1");
     value["nets"]["constant"] = json!(["CONST1.out", "SUM1.in1"]);
     let error = simulate(&document(&value), || false).unwrap_err();
     assert_eq!(error.target_id.as_deref(), Some("LIM1"));

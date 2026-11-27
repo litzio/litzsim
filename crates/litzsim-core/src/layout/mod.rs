@@ -230,7 +230,13 @@ pub fn layout(document: &Document) -> Layout<'_> {
         revision: inspection.revision,
         control_kinds,
         power_switch_kinds,
-        signal_nets: Default::default(),
+        signal_nets: document
+            .circuit()
+            .nets
+            .iter()
+            .filter(|(_, pins)| document.circuit().is_signal_net(pins))
+            .map(|(net, _)| net.as_str())
+            .collect(),
         symbols: Vec::new(),
         pins: BTreeMap::new(),
         labels: Vec::new(),
@@ -252,10 +258,10 @@ pub fn layout(document: &Document) -> Layout<'_> {
                 crate::circuit::PinKind::Electrical => None,
                 crate::circuit::PinKind::SignalInput => Some("input"),
                 crate::circuit::PinKind::SignalOutput => Some("output"),
+                crate::circuit::PinKind::VoltageProbe => net_id
+                    .filter(|net| result.signal_nets.contains(net))
+                    .map(|_| "input"),
             };
-            if let Some(net) = net_id.filter(|_| signal_direction.is_some()) {
-                result.signal_nets.insert(net);
-            }
             result.pins.insert(
                 id,
                 Pin {
