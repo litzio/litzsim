@@ -1,4 +1,6 @@
-use super::{CircuitV1, Document, Error, Mirror, Part, RecordQuantity, Sum, part_definition, sum};
+use super::{
+    Circuit, ControlTask, Document, Error, Mirror, Part, RecordQuantity, Sum, part_definition, sum,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +39,9 @@ pub enum Operation {
     SetSimulation {
         key: String,
         value: f64,
+    },
+    SetControlTask {
+        task: Option<ControlTask>,
     },
     Connect {
         a: String,
@@ -205,7 +210,7 @@ fn check_revision(document: &Document, expected: &str) -> Result<String, Error> 
     Ok(actual)
 }
 
-impl CircuitV1 {
+impl Circuit {
     fn apply(&mut self, op: &Operation) -> Result<(), Error> {
         match op {
             Operation::Add { kind, grid } => {
@@ -217,6 +222,11 @@ impl CircuitV1 {
                         ("inputs".into(), sum::DEFAULT_INPUTS.into()),
                         ("iconShape".into(), sum::DEFAULT_SHAPE.into()),
                     ])
+                } else if kind == "sampler" {
+                    BTreeMap::from([(
+                        "soc".into(),
+                        serde_json::json!({"mode": "task", "position": 0}),
+                    )])
                 } else {
                     definition
                         .defaults
@@ -304,6 +314,9 @@ impl CircuitV1 {
                         }
                     }
                     value.clone()
+                } else if part.kind == "sampler" {
+                    self.validate_soc(id, &BTreeMap::from([(key.clone(), value.clone())]))?;
+                    value.clone()
                 } else if let Some(value) = value.as_f64().filter(|value| value.is_finite()) {
                     value.into()
                 } else {
@@ -340,7 +353,6 @@ impl CircuitV1 {
                     "timeStep_s" => simulation.time_step_s = *value,
                     "stopTime_s" => simulation.stop_time_s = *value,
                     "outputStep_s" => simulation.output_step_s = Some(*value),
-                    "controlSamplePeriod_s" => simulation.control_sample_period_s = Some(*value),
                     _ => {
                         return Err(Error::invalid(
                             "simulation",
@@ -350,6 +362,12 @@ impl CircuitV1 {
                 }
                 simulation.validate()?;
             }
+            Operation::SetControlTask { task } => {
+                if let Some(task) = task {
+                    self.validate_control_task(task)?;
+                }
+                self.simulation.control_task.clone_from(task);
+            }
             Operation::Connect { a, b } => self.connect(a, b)?,
             Operation::Disconnect { pin } => {
                 self.require_pin(pin)?;
@@ -357,6 +375,19 @@ impl CircuitV1 {
             }
             Operation::Delete { id } => {
                 let part = self.require_part(id)?;
+                if matches!(&self.simulation.control_task,
+                    Some(ControlTask::Pwm { pwm, .. }) if pwm == id)
+                {
+                    return Err(Error::invalid(id, "PWM is referenced by the control task"));
+                }
+                if let Some((sampler, _)) = self.parts.iter().find(|(_, part)| {
+                    part.kind == "sampler" && part.parameters["soc"]["pwm"].as_str() == Some(id)
+                }) {
+                    return Err(Error::invalid(
+                        id,
+                        format!("PWM is referenced by sampler {sampler}"),
+                    ));
+                }
                 for (pin, _, _) in part.pins() {
                     let terminal = format!("{id}.{pin}");
                     self.disconnect(&terminal);
@@ -415,6 +446,21 @@ impl CircuitV1 {
         }
         let part = self.parts.remove(id).expect("required part");
         self.parts.insert(new_id.into(), part);
+        if let Some(ControlTask::Pwm { pwm, .. }) = &mut self.simulation.control_task
+            && pwm == id
+        {
+            *pwm = new_id.into();
+        }
+        for part in self
+            .parts
+            .values_mut()
+            .filter(|part| part.kind == "sampler")
+        {
+            let soc = part.parameters.get_mut("soc").expect("validated sampler");
+            if soc["pwm"].as_str() == Some(id) {
+                soc["pwm"] = new_id.into();
+            }
+        }
         if let Some(placement) = self.layout.remove(id) {
             self.layout.insert(new_id.into(), placement);
         }
@@ -727,7 +773,7 @@ fn receipt(
         .iter()
         .filter(|(id, part)| {
             let definition = part_definition(&part.kind).unwrap();
-            let shorted = |circuit: &CircuitV1, id: &str| {
+            let shorted = |circuit: &Circuit, id: &str| {
                 let [first, second] = definition.pins else {
                     return false;
                 };

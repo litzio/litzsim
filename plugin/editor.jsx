@@ -6,7 +6,7 @@ import {
 import { Schematic, sheetView, contentBounds } from "./schematic.jsx";
 import {
   EMPTY_SELECTION, deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex,
-  selectionBox, sourcePreviewRequest, sumParameterOps, undoRenamed,
+  selectionBox, pwmChoices, sourcePreviewRequest, sumParameterOps, undoRenamed,
 } from "./rules.js";
 import { SourcePreview } from "./source-preview.jsx";
 import { Waveform } from "./waveform.jsx";
@@ -145,8 +145,53 @@ const SIMULATION = [
   ["timeStep_s", "해석 간격", "s"],
   ["stopTime_s", "종료 시각", "s"],
   ["outputStep_s", "저장 간격", "s", "모든 스텝"],
-  ["controlSamplePeriod_s", "제어 샘플 주기", "s"],
 ];
+
+function ControlTaskProperties({ ui, task, parts, disabled, edit }) {
+  const choices = pwmChoices(parts, true);
+  const modes = [{ value: "none", label: "없음" }, { value: "fixed", label: "고정 주기" }];
+  if (choices.length) modes.push({ value: "pwm", label: "PWM 동기" });
+  const commit = next => edit([{ op: "setControlTask", task: next }]);
+  const field = (name, text, unit = "") => <NumberField key={name} ui={ui} owner="controlTask"
+    name={name} text={text} unit={unit} value={task[name]} disabled={disabled}
+    onCommit={(key, value) => commit({ ...task, [key]: value })} />;
+  return <>
+    <ui.Select label="제어 태스크" value={task?.mode ?? "none"} options={modes} disabled={disabled}
+      onValueChange={mode => {
+        if (mode === task?.mode) return;
+        if (mode === "none") commit(null);
+        if (mode === "fixed") commit({ mode, period_s: 1e-5, phase: 0 });
+        if (mode === "pwm") commit({ mode, pwm: choices[0].value, position: 0 });
+      }} />
+    {task?.mode === "fixed" && <>{field("period_s", "주기", "s")}{field("phase", "위상 (0–1)")}</>}
+    {task?.mode === "pwm" && <>
+      <ui.Select label="기준 PWM" value={task.pwm} options={choices} disabled={disabled}
+        onValueChange={pwm => commit({ ...task, pwm })} />
+      {field("position", "캐리어 위치 (0–1)")}
+    </>}
+  </>;
+}
+
+function SamplerProperties({ ui, soc, id, parts, disabled, edit }) {
+  const choices = pwmChoices(parts);
+  const modes = [{ value: "task", label: "태스크 주기 내 위치" }];
+  if (choices.length) modes.push(
+    { value: "onCenter", label: "PWM 켜짐 구간 중앙" },
+    { value: "offCenter", label: "PWM 꺼짐 구간 중앙" },
+  );
+  const commit = value => edit([{ op: "setParameter", id, key: "soc", value }]);
+  return <>
+    <ui.Select label="샘플 시점 (SOC)" value={soc.mode} options={modes} disabled={disabled}
+      onValueChange={mode => {
+        if (mode === soc.mode) return;
+        commit(mode === "task" ? { mode, position: 0 } : { mode, pwm: soc.pwm ?? choices[0].value });
+      }} />
+    {soc.mode === "task" ? <NumberField ui={ui} owner={id} name="position" text="위치 (0–1)"
+      value={soc.position} disabled={disabled} onCommit={(_, position) => commit({ ...soc, position })} />
+      : <ui.Select label="기준 PWM" value={soc.pwm} options={choices} disabled={disabled}
+        onValueChange={pwm => commit({ ...soc, pwm })} />}
+  </>;
+}
 
 function SumProperties({ ui, id, parameters, disabled, commit }) {
   const { inputs, iconShape } = parameters;
@@ -202,6 +247,7 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename, editSumParamete
         {SIMULATION.map(([name, text, unit, placeholder]) => <NumberField key={name} ui={ui} owner="simulation"
           name={name} text={text} unit={unit} placeholder={placeholder} value={simulation[name]} disabled={busy}
           onCommit={(key, value) => edit([{ op: "setSimulation", key, value }])} />)}
+        <ControlTaskProperties ui={ui} task={simulation.controlTask} parts={sheet.document.parts} disabled={busy} edit={edit} />
       </div>
       {missing.length > 0 && <div style={styles.group}>
         <h4 style={{ margin: 0 }}>미접속 단자 {missing.length}</h4>
@@ -225,6 +271,8 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename, editSumParamete
       <h4 style={{ margin: 0 }}>값</h4>
       {part.type === "sum" ? <SumProperties key={selectedId} ui={ui} id={selectedId}
         parameters={part.parameters} disabled={busy} commit={editSumParameter} />
+        : part.type === "sampler" ? <SamplerProperties ui={ui} soc={part.parameters.soc}
+          id={selectedId} parts={sheet.document.parts} disabled={busy} edit={edit} />
         : Object.entries(part.parameters).map(([name, value]) => <NumberField key={name} ui={ui} owner={selectedId}
         name={name} text={(PARAMETERS[name] ?? [name])[0]} unit={(PARAMETERS[name] ?? [name, ""])[1]} value={value}
         disabled={busy} onCommit={(key, next) => edit([{ op: "setParameter", id: selectedId, key, value: next }])} />)}

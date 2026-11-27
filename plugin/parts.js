@@ -42,6 +42,7 @@ const CONTROL_LABELS = {
   ramp: "램프 지령",
   sum: "합산",
   gain: "이득",
+  sampler: "샘플러",
   limiter: "리미터",
   integrator: "적분기",
   pi: "PI 제어기",

@@ -19,6 +19,182 @@ fn channel(wave: &litzsim_core::waves::Waveform, name: &str) -> usize {
     wave.channels().iter().position(|c| c.name == name).unwrap()
 }
 
+// An ideal output clamp keeps the inductor slopes constant in the CCM fixture.
+fn clamped_buck() -> Value {
+    let mut value: Value = serde_json::from_str(BUCK).unwrap();
+    value["layout"] = json!({});
+    value["bends"] = json!({});
+    value["simulation"] = json!({
+        "timeStep_s": 5e-6, "stopTime_s": 2e-4,
+        "controlTask": {"mode": "fixed", "period_s": 1e-4, "phase": 0}
+    });
+    let parts = value["parts"].as_object_mut().unwrap();
+    for id in ["C1", "R1", "VC"] {
+        parts.remove(id);
+    }
+    parts.get_mut("L1").unwrap()["parameters"]["initialCurrent_A"] = json!(1);
+    parts.insert(
+        "LOAD".into(),
+        json!({"type": "dc", "parameters": {"voltage_V": 2.5}}),
+    );
+    parts.insert(
+        "CS".into(),
+        json!({"type": "currentSensor", "parameters": {"gain": 1}}),
+    );
+    value["nets"]["output"] = json!(["LOAD.p", "CS.n"]);
+    value["nets"]["inductor"] = json!(["CS.p", "L1.n"]);
+    value["nets"]["ground"] = json!(["GND.ref", "V1.n", "D1.a", "LOAD.n"]);
+    value["nets"]["sense"] = json!(["CS.out", "ZOH.in"]);
+    value["parts"]["ZOH"] = json!({
+        "type": "sampler", "parameters": {"soc": {"mode": "task", "position": 0}},
+        "record": {"output": true}
+    });
+    value
+}
+
+#[test]
+fn buck_soc_matches_the_analytic_ccm_valley_mean_and_peak() {
+    let mut value = clamped_buck();
+    const PERIOD: f64 = 1e-4;
+    const DUTY: f64 = 0.5;
+    const SLOPE: f64 = 2.5 / 0.001;
+    for (soc, position, expected) in [
+        (json!({"mode": "task", "position": 0}), 0.0, 1.0),
+        (
+            json!({"mode": "onCenter", "pwm": "PWM"}),
+            DUTY / 2.0,
+            1.0 + SLOPE * PERIOD * DUTY / 2.0,
+        ),
+        (
+            json!({"mode": "task", "position": 0.499}),
+            0.499,
+            1.0 + SLOPE * PERIOD * 0.499,
+        ),
+        (
+            json!({"mode": "offCenter", "pwm": "PWM"}),
+            (1.0 + DUTY) / 2.0,
+            1.0 + SLOPE * PERIOD * DUTY / 2.0,
+        ),
+    ] {
+        value["parts"]["ZOH"]["parameters"]["soc"] = soc;
+        let wave = simulate(&document(&value), || false).unwrap();
+        let col = channel(&wave, "ZOH_out");
+        let at = PERIOD * (1.0 + position);
+        let row = wave
+            .rows()
+            .filter(|r| (r[0] - at).abs() <= 4.0 * f64::EPSILON * at)
+            .last()
+            .expect("SOC split the step");
+        assert!(
+            (row[col] - expected).abs() <= 1e-6,
+            "position {position}: {} A vs {expected} A",
+            row[col]
+        );
+    }
+
+    value["parts"]["BAD"] = json!({"type": "gain", "parameters": {"gain": 1}});
+    value["nets"]["sense"] = json!(["CS.out", "ZOH.in", "BAD.in"]);
+    let error = simulate(&document(&value), || false).unwrap_err();
+    assert_eq!(error.target_id.as_deref(), Some("CS"));
+    assert!(error.message.contains("must feed a sampler"));
+}
+
+#[test]
+fn pwm_midpoint_uses_latched_duty_through_zero_and_full_intervals() {
+    let mut value = clamped_buck();
+    value["simulation"]["controlTask"] = json!({"mode": "pwm", "pwm": "PWM", "position": 0.5});
+    value["parts"]["PWM"] = json!({
+        "type": "dutyPwm", "parameters": {"frequency_Hz": 10_000, "high_V": 10}
+    });
+    value["parts"]["STEP"] = json!({
+        "type": "step", "parameters": {"stepTime_s": 0.00015, "before": 0.5, "after": 1},
+        "record": {"output": true}
+    });
+    value["nets"]["duty"] = json!(["STEP.out", "PWM.duty"]);
+    for (mode, events) in [
+        (
+            "onCenter",
+            [(0.0, 1.0), (0.000125, 0.8125), (0.00025, 0.875)],
+        ),
+        (
+            "offCenter",
+            [(0.00005, 0.875), (0.000175, 0.8125), (0.0003, 1.0)],
+        ),
+    ] {
+        value["parts"]["ZOH"]["parameters"]["soc"] = json!({"mode": mode, "pwm": "PWM"});
+        for (event, expected) in events {
+            let event: f64 = event;
+            let mut check = |stop: f64, sparse: bool| {
+                value["simulation"]["stopTime_s"] = json!(stop);
+                if sparse {
+                    value["simulation"]["outputStep_s"] = json!(15e-6);
+                } else {
+                    value["simulation"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("outputStep_s");
+                }
+                value["parts"]["STEP"]["record"]["output"] = json!(!sparse);
+                let (wave, warnings) =
+                    simulate_with_warnings(&document(&value), |_| false).unwrap();
+                assert!(warnings.is_empty());
+                let col = channel(&wave, "ZOH_out");
+                let row = wave.rows().last().unwrap();
+                assert_eq!(row[0], stop);
+                assert!(
+                    (row[col] - expected).abs() <= 1e-6,
+                    "{mode} {stop:?}: {} A vs {expected} A",
+                    row[col]
+                );
+                row[col]
+            };
+            if event == 0.0 {
+                // At the first positive stop the zero-duty on interval has already captured.
+                check(1e-6, false);
+            } else {
+                for stop in [event.next_down(), event, event.next_up()] {
+                    let dense = check(stop, false);
+                    assert_eq!(check(stop, true), dense);
+                }
+            }
+        }
+    }
+
+    // The next full-duty on-center capture overflows before the coincident
+    // task. Recording settings must not change which event detects it.
+    value["parts"]["ZOH"]["parameters"]["soc"] = json!({"mode": "onCenter", "pwm": "PWM"});
+    value["parts"]["CS"]["parameters"]["gain"] = json!(1.7e308);
+    let boundary = 3.5 / 10_000.0_f64;
+    for stop in [boundary.next_down(), boundary, boundary.next_up()] {
+        value["simulation"]["stopTime_s"] = json!(stop);
+        for record in [true, false] {
+            value["parts"]["ZOH"]["record"]["output"] = json!(record);
+            value["simulation"]["outputStep_s"] = json!(if record { 5e-6 } else { 15e-6 });
+            let error = simulate(&document(&value), || false).unwrap_err();
+            assert_eq!(error.target_id.as_deref(), Some("ZOH"));
+            assert!(error.message.starts_with("Non-finite sampler output"));
+        }
+    }
+}
+
+#[test]
+fn source_preview_holds_zero_until_the_phased_task() {
+    let mut value = clamped_buck();
+    value["parts"]["REF"] = json!({"type": "constant", "parameters": {"value": 2}});
+    value["parts"]["PWM"] = json!({
+        "type": "dutyPwm", "parameters": {"frequency_Hz": 10_000, "high_V": 10}
+    });
+    value["nets"]["command"] = json!(["REF.out", "PWM.duty"]);
+    for task in [
+        json!({"mode": "fixed", "period_s": 0.0001, "phase": 0.5}),
+        json!({"mode": "pwm", "pwm": "PWM", "position": 0.5}),
+    ] {
+        value["simulation"]["controlTask"] = task;
+        let preview = source_preview(&document(&value), "REF").unwrap();
+        assert_eq!(preview.points, [[0.0, 0.0], [0.00005, 2.0], [0.0002, 2.0]]);
+    }
+}
+
 #[test]
 fn sum_uses_numbered_inputs_in_list_order() {
     for (inputs, values, expected) in [
@@ -30,8 +206,8 @@ fn sum_uses_numbered_inputs_in_list_order() {
         ("-", vec![7.0], -7.0),
     ] {
         let mut value = json!({
-            "version": 1,
-            "simulation": {"stopTime_s": 1, "timeStep_s": 1, "controlSamplePeriod_s": 1},
+            "version": 2,
+            "simulation": {"stopTime_s": 1, "timeStep_s": 1, "controlTask": {"mode": "fixed", "period_s": 1, "phase": 0}},
             "parts": {"SUM": {"type": "sum", "parameters": {
                 "inputs": inputs, "iconShape": "round"
             }, "record": {"output": true}}},
@@ -107,7 +283,7 @@ fn control_blocks_sample_in_dependency_order_and_hold_between_ticks() {
     );
 
     let mut decimal: Value = serde_json::from_str(CONTROL).unwrap();
-    decimal["simulation"]["controlSamplePeriod_s"] = json!(0.3);
+    decimal["simulation"]["controlTask"] = json!({"mode": "fixed", "period_s": 0.3, "phase": 0});
     decimal["simulation"]["stopTime_s"] = json!(1.0);
     decimal["parts"]["STEP1"]["parameters"]["stepTime_s"] = json!(0.9);
     let wave = simulate(&document(&decimal), || false).unwrap();
@@ -159,7 +335,8 @@ fn source_preview_uses_the_recorded_control_ticks_and_step_clock_tolerance() {
     }
 
     circuit["simulation"]["stopTime_s"] = json!(1.5);
-    circuit["simulation"]["controlSamplePeriod_s"] = json!(1.0 / 4096.0);
+    circuit["simulation"]["controlTask"] =
+        json!({"mode": "fixed", "period_s": 1.0 / 4096.0, "phase": 0});
     let doc = document(&circuit);
     let wave = simulate(&doc, || false).unwrap();
     let column = channel(&wave, "RAMP1_out");
@@ -177,7 +354,7 @@ fn source_preview_uses_the_recorded_control_ticks_and_step_clock_tolerance() {
 #[test]
 fn source_preview_matches_ideal_source_records_and_preserves_pwm_edges() {
     let mut circuit = json!({
-        "version": 1,
+        "version": 2,
         "simulation": { "timeStep_s": 0.03125, "stopTime_s": 0.6875 },
         "parts": {
             "V": { "type": "dc", "parameters": { "voltage_V": 2 }, "record": {"voltage": true} },
@@ -256,9 +433,9 @@ fn source_preview_matches_ideal_source_records_and_preserves_pwm_edges() {
 #[test]
 fn source_preview_keeps_both_pwm_values_when_falling_edge_rounds_to_stop() {
     let circuit = json!({
-        "version": 1,
+        "version": 2,
         "simulation": {
-            "timeStep_s": 0.000001, "stopTime_s": 0.000011, "controlSamplePeriod_s": 0.000001
+            "timeStep_s": 0.000001, "stopTime_s": 0.000011, "controlTask": {"mode": "fixed", "period_s": 0.000001, "phase": 0}
         },
         "parts": {
             "V": {"type": "pwm", "parameters": {"frequency_Hz": 50000, "duty": 0.55, "high_V": 5}},
@@ -419,7 +596,7 @@ fn signal_probe_records_the_drivers_bits_with_or_without_output_recording() {
 #[test]
 fn sampled_sensors_match_meters_and_use_the_left_limit_at_pwm_edges() {
     let mut value: Value = serde_json::from_str(BUCK).unwrap();
-    value["simulation"]["controlSamplePeriod_s"] = json!(50e-6);
+    value["simulation"]["controlTask"] = json!({"mode": "fixed", "period_s": 50e-6, "phase": 0});
     value["simulation"]["stopTime_s"] = json!(160e-6);
     for (id, kind, gain) in [("VS1", "voltageSensor", 3.0), ("CS1", "currentSensor", 2.0)] {
         value["parts"][id] = json!({
@@ -499,7 +676,7 @@ fn final_control_change_at_pwm_edge_matches_the_rows_of_a_longer_run() {
         "legacy stop has only its left limit"
     );
 
-    value["simulation"]["controlSamplePeriod_s"] = json!(edge);
+    value["simulation"]["controlTask"] = json!({"mode": "fixed", "period_s": edge, "phase": 0});
     value["parts"]["VS"] = json!({
         "type": "voltageSensor", "parameters": {"gain": 2}, "record": {"output": true}
     });
@@ -561,12 +738,17 @@ fn final_pwm_control_rows_match_with_one_ulp_clock_offsets() {
 fn check_pwm_control_stop(frequency: f64, step: f64, edge: f64, sample: f64, stop: f64) {
     let mut value: Value = serde_json::from_str(BUCK).unwrap();
     value["simulation"]["timeStep_s"] = json!(step);
-    value["simulation"]["controlSamplePeriod_s"] = json!(sample);
+    value["simulation"]["controlTask"] = json!({"mode": "fixed", "period_s": sample, "phase": 0});
     value["parts"]["PWM"]["parameters"]["frequency_Hz"] = json!(frequency);
     value["parts"]["VG"] = json!({"type": "voltmeter", "parameters": {}});
     value["parts"]["VS"] = json!({
-        "type": "voltageSensor", "parameters": {"gain": 2}, "record": {"output": true}
+        "type": "voltageSensor", "parameters": {"gain": 2}
     });
+    value["parts"]["ZOH"] = json!({
+        "type": "sampler", "parameters": {"soc": {"mode": "task", "position": 1}},
+        "record": {"output": true}
+    });
+    value["nets"]["sense"] = json!(["VS.out", "ZOH.in"]);
     value["parts"]["S"] = json!({
         "type": "step", "parameters": {"stepTime_s": sample, "before": 0, "after": 1},
         "record": {"output": true}
@@ -613,7 +795,7 @@ fn check_pwm_control_stop(frequency: f64, step: f64, edge: f64, sample: f64, sto
         [stop; 2],
         "{context}"
     );
-    assert_eq!(continued[0][2..], [10.0, 0.0, 20.0, 0.0], "{context}");
+    assert_eq!(continued[0][2..], [10.0, 0.0, 0.0, 0.0], "{context}");
     assert_eq!(continued[1][2..], [0.0, 1.0, 20.0, 1.0], "{context}");
     for wave in [&short, &long] {
         let (driver, probe) = (channel(wave, "S_out"), channel(wave, "VP1"));
@@ -783,7 +965,7 @@ fn pwm_capacitor_short_is_diagnosed_off_the_recording_grid() {
     assert_eq!(sparse.message, full.message);
 
     circuit["simulation"]["stopTime_s"] = json!(755e-6);
-    circuit["simulation"]["controlSamplePeriod_s"] = json!(755e-6);
+    circuit["simulation"]["controlTask"] = json!({"mode": "fixed", "period_s": 755e-6, "phase": 0});
     circuit["parts"]["STEP"] = json!({
         "type": "step", "parameters": {"stepTime_s": 755e-6, "before": 0, "after": 1}
     });
@@ -852,7 +1034,8 @@ fn timed_switch_and_control_share_final_rows_with_one_ulp_clock_offsets() {
         for at in adjacent(edge) {
             circuit["parts"]["SW1"]["parameters"]["switchTime_s"] = json!(at);
             for sample in adjacent(edge) {
-                circuit["simulation"]["controlSamplePeriod_s"] = json!(sample);
+                circuit["simulation"]["controlTask"] =
+                    json!({"mode": "fixed", "period_s": sample, "phase": 0});
                 circuit["simulation"]["stopTime_s"] = json!(0.001);
                 let long = simulate(&document(&circuit), || false).unwrap();
                 let continued: Vec<_> = long
@@ -925,9 +1108,9 @@ fn timed_switch_opening_reports_the_floating_node_at_the_edge() {
 #[test]
 fn integrator_and_pi_update_at_each_tick_and_saturate_without_winding_up() {
     let value = json!({
-        "version": 1,
+        "version": 2,
         "layout": {},
-        "simulation": {"timeStep_s": 0.25, "stopTime_s": 1.5, "controlSamplePeriod_s": 0.25},
+        "simulation": {"timeStep_s": 0.25, "stopTime_s": 1.5, "controlTask": {"mode": "fixed", "period_s": 0.25, "phase": 0}},
         "parts": {
             "S": {"type": "step", "parameters": {"before": 2, "after": -1, "stepTime_s": 0.75}},
             "R": {"type": "step", "parameters": {"before": 0, "after": 2, "stepTime_s": 1.5}},
@@ -1011,7 +1194,7 @@ fn constant_duty_input_matches_fixed_pwm_bit_for_bit() {
     ] {
         let mut value =
             buck_with_duty_input(json!({"type": "constant", "parameters": {"value": duty}}));
-        value["simulation"]["controlSamplePeriod_s"] = json!(ts);
+        value["simulation"]["controlTask"] = json!({"mode": "fixed", "period_s": ts, "phase": 0});
         value["parts"]["PWM"]["parameters"]["frequency_Hz"] = json!(frequency);
         let sampled = simulate(&document(&value), || false).unwrap();
         if frequency == 100_000.0 {
@@ -1051,8 +1234,7 @@ fn coincident_carrier_uses_pi_output_from_left_limit_gate_measurement() {
         "type": "pi", "parameters": {"kp": 1, "ki": 0, "initialIntegral": 0, "min": 0, "max": 1},
         "record": {"output": true}
     }));
-    value["simulation"] =
-        json!({"timeStep_s": 3e-7, "stopTime_s": 210e-6, "controlSamplePeriod_s": 100e-6});
+    value["simulation"] = json!({"timeStep_s": 3e-7, "stopTime_s": 210e-6, "controlTask": {"mode": "fixed", "period_s": 100e-6, "phase": 0}});
     value["parts"]["REF"] = json!({"type": "constant", "parameters": {"value": 1}});
     value["parts"]["VS"] =
         json!({"type": "voltageSensor", "parameters": {"gain": 0.1}, "record": {"output": true}});
@@ -1066,7 +1248,10 @@ fn coincident_carrier_uses_pi_output_from_left_limit_gate_measurement() {
         .unwrap()
         .push(json!("VS.n"));
     value["nets"]["reference"] = json!(["REF.out", "ERROR.in1"]);
-    value["nets"]["sensed"] = json!(["VS.out", "ERROR.in2"]);
+    value["parts"]["SAMPLE"] =
+        json!({"type": "sampler", "parameters": {"soc": {"mode": "task", "position": 0}}});
+    value["nets"]["sense_raw"] = json!(["VS.out", "SAMPLE.in"]);
+    value["nets"]["sensed"] = json!(["SAMPLE.out", "ERROR.in2"]);
     value["nets"]["error"] = json!(["ERROR.out", "COMMAND.in"]);
 
     let wave = simulate(&document(&value), || false).unwrap();
@@ -1087,7 +1272,7 @@ fn duty_pwm_holds_until_carrier_start_and_clamps_without_extra_gate_edges() {
     let mut value =
         buck_with_duty_input(json!({"type": "sum", "parameters": {"sign1": 1, "sign2": 1}}));
     value["simulation"] = json!({
-        "timeStep_s": 3e-6, "stopTime_s": 470e-6, "controlSamplePeriod_s": 70e-6
+        "timeStep_s": 3e-6, "stopTime_s": 470e-6, "controlTask": {"mode": "fixed", "period_s": 70e-6, "phase": 0}
     });
     value["parts"]["A"] =
         json!({"type": "step", "parameters": {"before": 0.25, "after": 1.5, "stepTime_s": 70e-6}});
@@ -1146,7 +1331,7 @@ fn duty_pwm_uses_coincident_samples_at_carrier_start_and_handles_final_edges() {
                         "type": "step", "parameters": {"before": before, "after": after, "stepTime_s": sample},
                         "record": {"output": true}
                     }));
-                    value["simulation"] = json!({"timeStep_s": step, "stopTime_s": stop, "controlSamplePeriod_s": sample});
+                    value["simulation"] = json!({"timeStep_s": step, "stopTime_s": stop, "controlTask": {"mode": "fixed", "period_s": sample, "phase": 0}});
                     let short = simulate(&document(&value), || false).unwrap();
                     value["simulation"]["stopTime_s"] = json!(edge + 1e-6);
                     let long = simulate(&document(&value), || false).unwrap();
@@ -1484,7 +1669,7 @@ fn buck_probe_matches_a_two_pin_voltmeter_without_changing_existing_samples() {
 
 fn singular_circuit(parts: Value, nets: Value, reason: &str, ids: &[&str]) {
     let mut value = json!({
-        "version": 1,
+        "version": 2,
         "layout": {},
         "simulation": {"timeStep_s": 1e-6, "stopTime_s": 1e-5},
         "parts": parts,
@@ -1627,7 +1812,7 @@ fn rc_and_rlc_converge_to_the_step_response() {
 
 fn inrush(step: f64, initial: f64) -> Value {
     json!({
-        "version": 1,
+        "version": 2,
         "layout": {},
         "simulation": {"timeStep_s": step, "stopTime_s": 5e-6},
         "parts": {
@@ -1880,7 +2065,7 @@ fn output_stride_preserves_grid_samples_and_the_off_grid_stop() {
 #[test]
 fn nmos_body_diode_conducts_source_to_drain_while_gate_is_low() {
     let value = json!({
-        "version": 1,
+        "version": 2,
         "layout": {},
         "simulation": {"timeStep_s": 0.37e-6, "stopTime_s": 100e-6},
         "parts": {

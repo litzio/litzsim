@@ -1,4 +1,4 @@
-use super::control::{Equation, sample_period};
+use super::control::{Equation, TickClock, task_clock};
 use super::{Kind, checked_series_resistance, device_kind, same_clock_time, sine_voltage};
 use crate::circuit::{Document, Error};
 use serde::Serialize;
@@ -41,7 +41,7 @@ pub fn source_preview(document: &Document, id: &str) -> Result<SourcePreview, Er
     match part.kind.as_str() {
         "constant" | "step" | "ramp" => {
             let equation = Equation::from_part(id, part)?;
-            let period = sample_period(document)?;
+            let clock = task_clock(document)?;
             preview.unit = "1";
             preview.hold_samples = true;
             match equation {
@@ -60,7 +60,7 @@ pub fn source_preview(document: &Document, id: &str) -> Result<SourcePreview, Er
                 }
                 _ => {}
             }
-            let (points, decimated) = control_points(&equation, period, stop)?;
+            let (points, decimated) = control_points(&equation, clock, stop)?;
             preview.points = points;
             preview.decimated = decimated;
         }
@@ -147,29 +147,50 @@ impl SourcePreview {
 
 fn control_points(
     equation: &Equation,
-    period: f64,
+    clock: TickClock,
     stop: f64,
 ) -> Result<(Vec<[f64; 2]>, bool), Error> {
-    let first_value = equation.source_value(0.0);
-    if matches!(equation, Equation::Constant(_)) {
-        return Ok((vec![[0.0, first_value], [stop, first_value]], false));
+    let first = clock.time(0);
+    let first_value = equation.source_value(first);
+    let mut points = vec![[0.0, if first == 0.0 { first_value } else { 0.0 }]];
+    if first > stop && !same_clock_time(first, stop) {
+        points.push([stop, 0.0]);
+        return Ok((points, false));
     }
-    let time = |tick: u64| tick as f64 * period;
+    if first > 0.0 && first_value != 0.0 {
+        points.push([
+            if same_clock_time(first, stop) {
+                stop
+            } else {
+                first
+            },
+            first_value,
+        ]);
+    }
+    if matches!(equation, Equation::Constant(_)) {
+        if points.last().expect("initial point")[0] < stop {
+            points.push([stop, first_value]);
+        }
+        return Ok((points, false));
+    }
+    let time = |tick| clock.time(tick);
     let value = |tick| equation.source_value(time(tick));
     // Beyond the last consecutive integer in f64 the solver's tick clock
     // itself would stop advancing.
-    let upper = (stop / period).ceil() as u64;
+    let upper = (stop / clock.period() - clock.position).ceil() as u64;
     if upper >= 1 << 53 {
         return Err(Error::new(
             "simulationFailed",
             "Time step below clock resolution",
         ));
     }
-    let last = upper - u64::from(time(upper) > stop && !same_clock_time(time(upper), stop));
+    let last =
+        upper - u64::from(upper > 0 && time(upper) > stop && !same_clock_time(time(upper), stop));
     let last_value = value(last);
-    let mut points = vec![[0.0, first_value]];
     if first_value == last_value {
-        points.push([stop, last_value]);
+        if points.last().expect("initial point")[0] < stop {
+            points.push([stop, last_value]);
+        }
         return Ok((points, false));
     }
 

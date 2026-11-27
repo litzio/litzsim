@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "simulation": {
     "timeStep_s": 0.00001,
     "stopTime_s": 0.005

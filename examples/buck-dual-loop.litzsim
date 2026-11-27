@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "simulation": {"timeStep_s": 1e-7, "stopTime_s": 0.012, "controlSamplePeriod_s": 1e-5},
+  "version": 2,
+  "simulation": {"timeStep_s": 1e-7, "stopTime_s": 0.012, "controlTask": {"mode": "pwm", "pwm": "PWM", "position": 0}},
   "parts": {
     "V1": {"type": "dc", "parameters": {"voltage_V": 12}},
     "Q1": {"type": "nmos", "parameters": {}},
@@ -21,6 +21,8 @@
     "GND": {"type": "ground", "parameters": {}},
     "VS": {"type": "voltageSensor", "parameters": {"gain": 1}},
     "CS": {"type": "currentSensor", "parameters": {"gain": 1}},
+    "ZOH_V": {"type": "sampler", "parameters": {"soc": {"mode": "task", "position": 0}}},
+    "ZOH_I": {"type": "sampler", "parameters": {"soc": {"mode": "onCenter", "pwm": "PWM"}}},
     "REF": {
       "type": "ramp",
       "parameters": {"startTime_s": 0, "slope_per_s": 2500, "finalValue": 5}
@@ -30,7 +32,7 @@
       "type": "pi",
       "parameters": {"kp": 2.212, "ki": 8338, "initialIntegral": 0, "min": 0.25, "max": 4}
     },
-    "I_REF": {"type": "limiter", "parameters": {"min": 0.25, "max": 4}},
+    "I_REF": {"type": "limiter", "parameters": {"min": 0.25, "max": 4}, "record": {"output": true}},
     "ERR_I": {"type": "sum", "parameters": {"inputs": "|+-", "iconShape": "round"}},
     "PI_I": {
       "type": "pi",
@@ -48,11 +50,13 @@
     "load_step": ["R2.n", "SW1.p"],
     "ground": ["GND.ref", "V1.n", "D1.a", "C1.n", "R1.n", "SW1.n", "VS.n"],
     "ramp": ["REF.out", "ERR_V.in1"],
-    "voltage_feedback": ["VS.out", "ERR_V.in2"],
+    "voltage_sample": ["VS.out", "ZOH_V.in"],
+    "voltage_feedback": ["ZOH_V.out", "ERR_V.in2"],
     "voltage_error": ["ERR_V.out", "PI_V.in"],
     "current_command": ["PI_V.out", "I_REF.in"],
     "current_reference": ["I_REF.out", "ERR_I.in1"],
-    "current_feedback": ["CS.out", "ERR_I.in2"],
+    "current_sample": ["CS.out", "ZOH_I.in"],
+    "current_feedback": ["ZOH_I.out", "ERR_I.in2"],
     "current_error": ["ERR_I.out", "PI_I.in"],
     "duty": ["PI_I.out", "PWM.duty"]
   },
@@ -74,7 +78,9 @@
     "PI_V": {"x": 12, "y": 14},
     "I_REF": {"x": 18, "y": 14},
     "ERR_I": {"x": 24, "y": 14},
-    "PI_I": {"x": 30, "y": 14}
+    "PI_I": {"x": 30, "y": 14},
+    "ZOH_I": {"x": 20, "y": 10},
+    "ZOH_V": {"x": 35, "y": 17, "rotation": 180}
   },
   "bends": {
     "Q1.d": {"x": 0, "y": 1}

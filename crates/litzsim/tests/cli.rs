@@ -417,7 +417,7 @@ fn control_connections_are_checked_on_load_and_edit_and_undo_restores_bytes() {
         json!([
             {"op": "add", "type": "gain", "grid": [21, 5]},
             {"op": "connect", "a": "GAIN1.out", "b": "GAIN2.in"},
-            {"op": "setSimulation", "key": "controlSamplePeriod_s", "value": 0.125},
+            {"op": "setControlTask", "task": {"mode": "fixed", "period_s": 0.125, "phase": 0}},
             {"op": "setRecording", "id": "GAIN2", "quantity": "output", "enabled": true}
         ])
         .to_string(),
@@ -433,7 +433,7 @@ fn control_connections_are_checked_on_load_and_edit_and_undo_restores_bytes() {
     assert_eq!(reopened["diskRevision"], edited["diskRevision"]);
     assert_eq!(reopened["document"], edited["document"]);
     assert_eq!(
-        reopened["document"]["simulation"]["controlSamplePeriod_s"],
+        reopened["document"]["simulation"]["controlTask"]["period_s"],
         0.125
     );
     assert_eq!(
@@ -806,7 +806,7 @@ fn file_commands_round_trip_and_reject_failed_batches() {
     assert_eq!(stored["revision"], after);
     assert_eq!(stored["diskRevision"], edited["diskRevision"]);
     assert_eq!(stored["document"]["layout"]["Q1"]["mirror"], "horizontal");
-    assert_eq!(stored["document"]["version"], 1);
+    assert_eq!(stored["document"]["version"], 2);
     assert_eq!(
         stored["document"]["parts"]["L1"]["record"],
         json!({"voltage": true, "current": true})

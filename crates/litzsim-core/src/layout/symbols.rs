@@ -31,6 +31,7 @@ const CONTROL_SYMBOLS: &[&str] = &[
     "ramp",
     "sum",
     "gain",
+    "sampler",
     "limiter",
     "integrator",
     "pi",
@@ -81,6 +82,14 @@ fn control_block(kind: &str) -> Vec<Stroke> {
         "constant" => body.push(line(&[[-12, 0], [12, 0]])),
         "step" => body.push(line(&[[-12, 6], [0, 6], [0, -6], [12, -6]])),
         "ramp" => body.push(line(&[[-12, 6], [-8, 6], [5, -6], [12, -6]])),
+        "sampler" => body.push(line(&[
+            [-12, 8],
+            [-5, 8],
+            [-5, 0],
+            [3, 0],
+            [3, -8],
+            [12, -8],
+        ])),
         "gain" => body.extend([
             line(&[[-6, -9], [-6, 9]]),
             line(&[[6, -9], [-6, 0], [6, 9]]),

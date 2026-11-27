@@ -1,9 +1,9 @@
 {
-  "version": 1,
+  "version": 2,
   "simulation": {
     "timeStep_s": 0.25,
     "stopTime_s": 1.5,
-    "controlSamplePeriod_s": 0.375
+    "controlTask": {"mode": "fixed", "period_s": 0.375, "phase": 0}
   },
   "parts": {
     "CONST1": {"type": "constant", "parameters": {"value": 2}, "record": {"output": true}},

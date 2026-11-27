@@ -1,4 +1,4 @@
-//! Transient modified nodal analysis for the v1 circuit document.
+//! Transient modified nodal analysis for the LitzSim circuit document.
 
 mod control;
 mod preview;
@@ -102,7 +102,9 @@ pub fn simulate_with_warnings(
                 let Kind::Pulse(clock) = device.kind else {
                     return None;
                 };
-                control.pwm_input(device.id).map(|input| (clock, input))
+                control
+                    .pwm_input(device.id)
+                    .map(|input| (device.id, clock, input))
             })
         })
         .collect();
@@ -130,13 +132,22 @@ pub fn simulate_with_warnings(
         }
     }
 
-    // At zero, sensor-independent commands can set their gates before the
-    // electrical solve. Feedback-driven gates stay low until sensors are read.
-    if !sampled_clocks.is_empty() {
-        let control = control.as_mut().expect("sampled PWM has control inputs");
-        control.prepare_initial()?;
-        for &(clock, input) in &sampled_clocks {
-            clocks[clock].latch_initial(control.held(input));
+    // At zero, commands independent of electrical measurements and samplers
+    // can set their gates before the initial electrical solve.
+    let mut initial_pending = Vec::new();
+    if let Some(control) = &mut control {
+        let task_due = control.due(0.0);
+        if task_due {
+            control.prepare_initial()?;
+        }
+        for &(id, clock, input) in &sampled_clocks {
+            if !task_due || control.initially_known(input) {
+                let duty = control.held(input);
+                clocks[clock].latch_initial(duty);
+                control.latch_pwm(id, 0, clocks[clock].pulse.frequency, duty);
+            } else {
+                initial_pending.push((id, clock, input));
+            }
         }
     }
 
@@ -150,15 +161,21 @@ pub fn simulate_with_warnings(
         // left limit, and the next interval uses the newly switched state.
         let sample = Sample::step(time, previous);
         solve_sample(&mut devices, &mut system, &clocks, sample)?;
-        if time == 0.0 && !sampled_clocks.is_empty() {
-            let control = control.as_mut().expect("sampled PWM has control inputs");
-            control.sample(true, false, |id, quantity| {
-                sense(&devices, &system.rhs, id, quantity)
-            })?;
-            let mut changed = false;
-            for &(clock, input) in &sampled_clocks {
-                changed |= clocks[clock].latch_initial(control.held(input));
+        if time == 0.0
+            && let Some(control) = &mut control
+        {
+            let read = |id: &str, quantity| sense(&devices, &system.rhs, id, quantity);
+            control.capture(time, false, read)?;
+            if control.due(time) {
+                control.run_task(true, false, read)?;
             }
+            let mut changed = false;
+            for &(id, clock, input) in &initial_pending {
+                let duty = control.held(input);
+                changed |= clocks[clock].latch_initial(duty);
+                control.latch_pwm(id, 0, clocks[clock].pulse.frequency, duty);
+            }
+            control.capture(time, false, read)?;
             if changed {
                 for device in &mut devices {
                     device.driven = false;
@@ -189,19 +206,31 @@ pub fn simulate_with_warnings(
         }
         let at_stop = time == stop;
         let mut control_changed = false;
-        if let Some(control) = &mut control
-            && control.due(time)
-        {
-            control_changed = control.sample(false, at_stop, |id, quantity| {
-                sense(&devices, x, id, quantity)
-            })?;
-        }
-        // The just-computed control outputs are visible to any carrier that
-        // starts at this endpoint. This updates only the right-side state.
         let mut sampled_switching = false;
-        if let Some(control) = &control {
-            for &(clock, input) in &sampled_clocks {
-                sampled_switching |= clocks[clock].advance(time, control.held(input));
+        if time != 0.0
+            && let Some(control) = &mut control
+        {
+            let read = |id: &str, quantity| sense(&devices, x, id, quantity);
+            control_changed |= control.capture(time, at_stop, read)?;
+            if control.due(time) {
+                control_changed |= control.run_task(false, at_stop, read)?;
+            }
+            // The task can set duty for a carrier that starts at this endpoint.
+            let mut latched = false;
+            for &(id, index, input) in &sampled_clocks {
+                let clock = &mut clocks[index];
+                let duty = control.held(input);
+                let (switched, new_cycle) = clock.advance(time, duty);
+                sampled_switching |= switched;
+                if let Some(cycle) = new_cycle {
+                    control.latch_pwm(id, cycle, clock.pulse.frequency, duty);
+                    latched = true;
+                }
+            }
+            // A zero-length on interval starts at the new carrier boundary.
+            // Its SOC is known only after the duty latch.
+            if latched {
+                control_changed |= control.capture(time, at_stop, read)?;
             }
         }
         if record && time == 0.0 {
@@ -234,7 +263,7 @@ pub fn simulate_with_warnings(
             .fold(edge, |next, switch| next.min(switch.at));
         let edge = control
             .as_ref()
-            .map_or(edge, |control| edge.min(control.next_sample()));
+            .map_or(edge, |control| edge.min(control.next_event()));
         // Merge clocks separated only by floating-point roundoff.
         let next = if same_clock_time(boundary, edge) {
             boundary
@@ -448,19 +477,22 @@ impl Clock {
             .latch(0.0, self.pulse.frequency, duty)
     }
 
-    fn advance(&mut self, time: f64, duty: f64) -> bool {
+    fn advance(&mut self, time: f64, duty: f64) -> (bool, Option<u64>) {
         let sampled = self.sampled.as_mut().expect("sampled PWM");
-        let cycle = sampled.next_cycle as f64;
-        if same_clock_time(time, cycle / self.pulse.frequency) {
+        let cycle = sampled.next_cycle;
+        if same_clock_time(time, cycle as f64 / self.pulse.frequency) {
             sampled.next_cycle += 1;
-            return sampled.latch(cycle, self.pulse.frequency, duty);
+            return (
+                sampled.latch(cycle as f64, self.pulse.frequency, duty),
+                Some(cycle),
+            );
         }
         if same_clock_time(time, sampled.falling) {
             sampled.falling = f64::INFINITY;
             sampled.high = false;
-            return true;
+            return (true, None);
         }
-        false
+        (false, None)
     }
 }
 
