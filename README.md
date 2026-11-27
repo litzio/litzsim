@@ -93,6 +93,8 @@ $edited = & $cli apply buck.litzsim --expect $before.revision --ops ops.json | C
 
 `label`은 단자 `p` 하나와 비어 있지 않은 한 줄 문자열 `parameters.text`를 사용합니다. 이름은 양끝 공백을 제거한 뒤 유니코드 소문자로 변환해 비교하고 도면에는 입력한 이름을 그대로 표시합니다. 같은 이름으로 배선된 라벨들의 파일 네트는 하나의 해석 연결로 합쳐집니다. 라벨만 있는 연결은 해석 노드를 추가하지 않고 미접속 라벨도 해석을 막지 않습니다. 같은 이름이 하나뿐이면 `inspect`와 `layout`의 `labelWarnings`에서 `unpairedLabel`을 반환합니다. 하나의 해석 연결에 전기·신호 단자가 섞이거나 신호 출력이 둘 이상이면 오류에 해당 연결의 라벨 ID와 이름을 표시합니다. 라벨 텍스트는 `setParameter`로 바꾸며 소자 ID는 `rename`으로 바꿉니다. [제어 신호 라벨 예제](examples/control-signals-labels.litzsim)는 계단 지령선에 라벨을 사용합니다.
 
+라벨로 이은 회로의 해석 결과는 각 연결을 대표 네트 ID(정렬상 가장 앞선 파일 네트 ID)로 배선한 회로와 비트 단위로 일치합니다. 선을 라벨로 나눠 대표 네트 ID가 바뀌면 노드 순서가 달라져 이름 변경 때와 같은 수준의 반올림 차이가 생길 수 있습니다.
+
 각 소자의 선택 필드 `record`에는 켜진 항목만 저장합니다(예: `{"current":true}`). `voltage`, `current`, `output`은 기본값이 `false`이며 모두 꺼져 있으면 `record`를 생략합니다.
 
 RC·RLC·벅 예제는 [examples](examples/)에 있습니다. [노드 전압계 벅 예제](examples/buck-probe.litzsim)는 스위칭 노드 `sw`에 `VP1.p`를 연결합니다. PFC 예제는 지원 범위 밖 제어 설정이 있어 읽기를 거절합니다. 회로 파일에는 revision이나 Undo 기록을 저장하지 않습니다. 저장 중에는 시스템 임시 폴더의 경로별 OS 잠금을 사용합니다. 신규 저장은 하드 링크를 지원하는 파일시스템에서 완성된 파일을 원자적으로 게시합니다. 동일한 회로로 덮어쓰면 기존 바이트와 `diskRevision`을 유지합니다. 저항 기본값이 파일에 명시돼 있으면 저장할 때 그 키를 생략합니다.
