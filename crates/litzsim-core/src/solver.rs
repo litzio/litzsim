@@ -165,6 +165,9 @@ pub fn simulate_with_warnings(
             && let Some(control) = &mut control
         {
             let read = |id: &str, quantity| sense(&devices, &system.rhs, id, quantity);
+            for &(id, _, _) in &initial_pending {
+                control.preserve_pwm_inputs(id);
+            }
             control.capture(time, false, read)?;
             if control.due(time) {
                 control.run_task(true, false, read)?;
@@ -175,7 +178,7 @@ pub fn simulate_with_warnings(
                 changed |= clocks[clock].latch_initial(duty);
                 control.latch_pwm(id, 0, clocks[clock].pulse.frequency, duty);
             }
-            control.capture(time, false, read)?;
+            control.capture_after_latch(time, false, read)?;
             if changed {
                 for device in &mut devices {
                     device.driven = false;
@@ -211,6 +214,13 @@ pub fn simulate_with_warnings(
             && let Some(control) = &mut control
         {
             let read = |id: &str, quantity| sense(&devices, x, id, quantity);
+            // The duty latch can schedule a new SOC at this same boundary.
+            // Keep its input from before either the known SOCs or the task run.
+            for &(id, index, _) in &sampled_clocks {
+                if clocks[index].cycle_starts_at(time) {
+                    control.preserve_pwm_inputs(id);
+                }
+            }
             control_changed |= control.capture(time, at_stop, read)?;
             if control.due(time) {
                 control_changed |= control.run_task(false, at_stop, read)?;
@@ -230,7 +240,7 @@ pub fn simulate_with_warnings(
             // A zero-length on interval starts at the new carrier boundary.
             // Its SOC is known only after the duty latch.
             if latched {
-                control_changed |= control.capture(time, at_stop, read)?;
+                control_changed |= control.capture_after_latch(time, at_stop, read)?;
             }
         }
         if record && time == 0.0 {
@@ -477,10 +487,16 @@ impl Clock {
             .latch(0.0, self.pulse.frequency, duty)
     }
 
+    fn cycle_starts_at(&self, time: f64) -> bool {
+        let cycle = self.sampled.as_ref().expect("sampled PWM").next_cycle;
+        same_clock_time(time, cycle as f64 / self.pulse.frequency)
+    }
+
     fn advance(&mut self, time: f64, duty: f64) -> (bool, Option<u64>) {
+        let cycle_starts = self.cycle_starts_at(time);
         let sampled = self.sampled.as_mut().expect("sampled PWM");
         let cycle = sampled.next_cycle;
-        if same_clock_time(time, cycle as f64 / self.pulse.frequency) {
+        if cycle_starts {
             sampled.next_cycle += 1;
             return (
                 sampled.latch(cycle as f64, self.pulse.frequency, duty),

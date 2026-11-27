@@ -178,6 +178,69 @@ fn pwm_midpoint_uses_latched_duty_through_zero_and_full_intervals() {
 }
 
 #[test]
+fn pwm_boundary_soc_reads_left_limits_when_the_task_changes_duty() {
+    let boundary = 1e-4_f64;
+    for (mode, before, gate_left) in [("onCenter", 0.5, 0.0), ("offCenter", 1.0, 10.0)] {
+        let mut value: Value = serde_json::from_str(BUCK).unwrap();
+        value["simulation"] = json!({
+            "timeStep_s": 5e-6, "stopTime_s": boundary,
+            "controlTask": {"mode": "pwm", "pwm": "PWM", "position": 0}
+        });
+        value["parts"]["PWM"] = json!({
+            "type": "dutyPwm", "parameters": {"frequency_Hz": 10_000, "high_V": 10}
+        });
+        value["parts"]["CMD"] = json!({
+            "type": "step", "parameters": {"stepTime_s": boundary, "before": before, "after": 0}
+        });
+        let midpoint = json!({"mode": mode, "pwm": "PWM"});
+        for (name, soc) in [
+            ("S0", json!({"mode": "task", "position": 0})),
+            ("ZOH", midpoint.clone()),
+            ("GATE_SAMPLE", midpoint),
+        ] {
+            value["parts"][name] = json!({
+                "type": "sampler", "parameters": {"soc": soc}, "record": {"output": true}
+            });
+        }
+        value["nets"]["duty"] = json!(["CMD.out", "PWM.duty", "S0.in", "ZOH.in"]);
+        value["parts"]["VS"] = json!({"type": "voltageSensor", "parameters": {"gain": 1}});
+        value["parts"]["VG"] = json!({"type": "voltmeter", "parameters": {}});
+        value["nets"]["gate"]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!("VS.p"), json!("VG.p")]);
+        value["nets"]["sw"]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!("VS.n"), json!("VG.n")]);
+        value["nets"]["gate_sense"] = json!(["VS.out", "GATE_SAMPLE.in"]);
+
+        for stop in [boundary.next_down(), boundary, boundary.next_up()] {
+            value["simulation"]["stopTime_s"] = json!(stop);
+            for output_step in [5e-6, 15e-6] {
+                value["simulation"]["outputStep_s"] = json!(output_step);
+                for record in [true, false] {
+                    value["parts"]["CMD"]["record"]["output"] = json!(record);
+                    let (wave, warnings) =
+                        simulate_with_warnings(&document(&value), |_| false).unwrap();
+                    assert!(warnings.is_empty());
+                    let row = wave.rows().last().unwrap();
+                    let read = |name| row[channel(&wave, name)];
+                    assert_eq!(row[0], stop);
+                    if record {
+                        assert_eq!(read("CMD_out"), 0.0);
+                    }
+                    assert_eq!(read("S0_out"), before);
+                    assert_eq!(read("ZOH_out"), before, "{mode} at {stop:?}");
+                    assert_eq!(read("GATE_SAMPLE_out"), gate_left);
+                    assert_eq!(read("VG_V"), 0.0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn source_preview_holds_zero_until_the_phased_task() {
     let mut value = clamped_buck();
     value["parts"]["REF"] = json!({"type": "constant", "parameters": {"value": 2}});

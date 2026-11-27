@@ -260,6 +260,7 @@ fn midpoint(on: bool, duty: f64) -> f64 {
 struct Sampler {
     index: usize,
     clock: SampleClock,
+    boundary_input: Option<f64>,
 }
 
 struct Block<'a> {
@@ -360,6 +361,7 @@ impl<'a> Control<'a> {
                 samplers.push(Sampler {
                     index: blocks.len(),
                     clock: SampleClock::new(document, clock, Soc::read(id, &part.parameters)?)?,
+                    boundary_input: None,
                 });
             }
             blocks.push(Block {
@@ -435,6 +437,17 @@ impl<'a> Control<'a> {
         self.due(0.0) && !self.blocks[index].deferred
     }
 
+    pub(super) fn preserve_pwm_inputs(&mut self, id: &str) {
+        for sampler in &mut self.samplers {
+            if matches!(&sampler.clock, SampleClock::PwmCenter { pwm, .. } if pwm == id) {
+                let driver = self.blocks[sampler.index].inputs[0];
+                if !matches!(self.blocks[driver].equation, Equation::Sensor(..)) {
+                    sampler.boundary_input = Some(self.values[driver]);
+                }
+            }
+        }
+    }
+
     pub(super) fn latch_pwm(&mut self, id: &str, cycle: u64, frequency: f64, duty: f64) {
         for sampler in &mut self.samplers {
             if let SampleClock::PwmCenter { pwm, on, next } = &mut sampler.clock
@@ -449,16 +462,41 @@ impl<'a> Control<'a> {
         &mut self,
         time: f64,
         include_unrecorded_changes: bool,
+        sense: impl FnMut(&str, RecordQuantity) -> f64,
+    ) -> Result<bool, Error> {
+        self.capture_due(time, include_unrecorded_changes, false, sense)
+    }
+
+    pub(super) fn capture_after_latch(
+        &mut self,
+        time: f64,
+        include_unrecorded_changes: bool,
+        sense: impl FnMut(&str, RecordQuantity) -> f64,
+    ) -> Result<bool, Error> {
+        self.capture_due(time, include_unrecorded_changes, true, sense)
+    }
+
+    fn capture_due(
+        &mut self,
+        time: f64,
+        include_unrecorded_changes: bool,
+        after_latch: bool,
         mut sense: impl FnMut(&str, RecordQuantity) -> f64,
     ) -> Result<bool, Error> {
         // Capture simultaneously from the pre-event electrical and held signal values.
         for sampler in &mut self.samplers {
+            // Discard the saved input after this boundary even if the SOC is later.
+            let boundary_input = if after_latch {
+                sampler.boundary_input.take()
+            } else {
+                None
+            };
             if same_clock_time(sampler.clock.next(), time) {
                 let driver = self.blocks[sampler.index].inputs[0];
                 let source = &self.blocks[driver];
                 let value = match source.equation {
                     Equation::Sensor(quantity, gain) => sense(source.id, quantity) * gain,
-                    _ => self.values[driver],
+                    _ => boundary_input.unwrap_or(self.values[driver]),
                 };
                 self.captures.push((sampler.index, value));
                 sampler.clock.advance();
