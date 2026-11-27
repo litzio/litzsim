@@ -97,6 +97,38 @@ test("the measurement library offers the node voltage probe on N", () => {
   assert.deepEqual(Object.values(PARTS).filter(part => part.key === "N"), [PARTS.voltageProbe]);
 });
 
+test("the editor can connect a node voltage probe to a signal net through the core", async () => {
+  const opened = await call("inspect", { file: `${root}examples/control-signals.litzsim` });
+  const sheet = await apply(opened, [
+    { op: "add", type: "voltageProbe", grid: [-3, 3] },
+    { op: "connect", a: "VP1.p", b: "RAMP1.out" },
+  ]);
+  const { pins, segments, signalNets } = sheet.layout;
+  assert.equal(pins["VP1.p"].netId, "ramp");
+  assert.equal(pins["VP1.p"].signalDirection, "input");
+  assert.ok(signalNets.includes("ramp"));
+  const branch = segments.find(segment => segment.terminals[0] === "VP1.p");
+  assert.ok(branch);
+  assert.equal(wireStyle(signalNets, branch.netId).stroke, "var(--id-color-accent-blue-paper)");
+
+  for (const [type, id] of [["voltmeter", "VM1"], ["ammeter", "AM1"], ["constant", "CONST2"]]) {
+    const terminal = type === "constant" ? `${id}.out` : `${id}.p`;
+    const refused = await send("apply", {
+      document: sheet.document, expectedRevision: sheet.revision,
+      ops: [{ op: "add", type }, { op: "connect", a: "VP1.p", b: terminal }],
+    });
+    assert.equal(refused.ok, false);
+    assert.match(refused.error.message, type === "constant"
+      ? /^Signal net has multiple outputs:/ : /^Cannot connect signal and electrical terminals:/);
+  }
+  const refused = await send("apply", {
+    document: sheet.document, expectedRevision: sheet.revision,
+    ops: [{ op: "insertInBranch", type: "ammeter", terminals: branch.terminals, from: branch.from, to: branch.to }],
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.message, "expected an electrical branch");
+});
+
 test("the control library, recording and wire styles follow the core layout", async () => {
   const sheet = await apply(await rc(), [
     { op: "add", type: "constant", grid: [1, 10] },

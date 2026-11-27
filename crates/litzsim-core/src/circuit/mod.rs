@@ -422,7 +422,14 @@ impl Document {
                 let terminal = format!("{id}.{pin}");
                 pin_positions.insert(terminal, position.pin_position(offset));
             }
-            if let Some(measurement) = definition.measurement {
+            if let Some(mut measurement) = definition.measurement {
+                if part.kind == "voltageProbe"
+                    && let Some(net) = pin_nets[&format!("{id}.p")]
+                    && self.0.is_signal_net(&self.0.nets[net])
+                {
+                    measurement.quantity = "output";
+                    measurement.unit = RecordQuantity::Output.unit();
+                }
                 measurements.insert(id.as_str(), measurement);
             }
         }
@@ -449,6 +456,14 @@ impl Default for Document {
 }
 
 impl CircuitV1 {
+    pub(crate) fn is_signal_net(&self, pins: &[String]) -> bool {
+        // The fixed terminals of a validated net already agree on its domain.
+        pins.iter()
+            .map(|pin| self.require_pin(pin).expect("validated terminal"))
+            .find(|&kind| kind != PinKind::VoltageProbe)
+            .is_some_and(PinKind::is_signal)
+    }
+
     pub(crate) fn pin_nets(&self) -> BTreeMap<String, Option<&str>> {
         let mut pin_nets = BTreeMap::new();
         for (id, part) in &self.parts {
@@ -572,6 +587,9 @@ impl CircuitV1 {
         let mut output = None;
         for terminal in terminals {
             let kind = self.require_pin(terminal)?;
+            if kind == PinKind::VoltageProbe {
+                continue;
+            }
             if let Some((first, signal)) = domain
                 && kind.is_signal() != signal
             {

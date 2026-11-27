@@ -571,9 +571,17 @@ fn insert_in_branch(
     else {
         return Err(Error::invalid(kind, "expected a two-terminal part"));
     };
-    if document.0.require_pin(&terminals[0])?.is_signal() {
+    let first_terminal = &terminals[0];
+    let kind_at_terminal = document.0.require_pin(first_terminal)?;
+    if kind_at_terminal.is_signal()
+        || kind_at_terminal == super::PinKind::VoltageProbe
+            && document
+                .0
+                .net_of(first_terminal)
+                .is_some_and(|net| document.0.is_signal_net(&document.0.nets[net]))
+    {
         return Err(Error::invalid(
-            &terminals[0],
+            first_terminal,
             "expected an electrical branch",
         ));
     }

@@ -24,7 +24,7 @@ pub struct Measurement {
     pub quantity: &'static str,
     pub unit: &'static str,
     pub from_pin: &'static str,
-    /// None uses the circuit's reference ground.
+    /// A voltage measurement without a return pin uses the circuit's ground.
     pub to_pin: Option<&'static str>,
 }
 
@@ -53,11 +53,12 @@ pub(crate) enum PinKind {
     Electrical,
     SignalInput,
     SignalOutput,
+    VoltageProbe,
 }
 
 impl PinKind {
     pub(crate) fn is_signal(self) -> bool {
-        self != Self::Electrical
+        matches!(self, Self::SignalInput | Self::SignalOutput)
     }
 }
 
@@ -241,6 +242,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         voltage_source: matches!(kind, "dc" | "sine" | "pwm" | "dutyPwm"),
         duty_update_timing: (kind == "dutyPwm").then_some("cycleStart"),
         pin_kinds: match kind {
+            "voltageProbe" => &[PinKind::VoltageProbe],
             "voltageSensor" | "currentSensor" => &[Electrical, Electrical, SignalOutput],
             "constant" | "step" | "ramp" => &[SignalOutput],
             "sum" => &[SignalOutput],
