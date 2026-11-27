@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "simulation": {"timeStep_s": 1e-7, "stopTime_s": 0.012, "controlTask": {"mode": "pwm", "pwm": "PWM", "position": 0}},
   "parts": {
     "V1": {"type": "dc", "parameters": {"voltage_V": 12}},

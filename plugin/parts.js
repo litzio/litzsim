@@ -22,6 +22,7 @@ export const CATEGORIES = [
     ],
   },
   { id: "control", label: "제어", parts: [{ type: "pwm", label: "PWM 신호", key: "P" }] },
+  { id: "connections", label: "연결", parts: [{ type: "label", label: "네트 라벨" }] },
   {
     id: "meters", label: "측정", parts: [
       { type: "ammeter", label: "전류계", key: "A" },

@@ -1,7 +1,7 @@
 mod routing;
 mod symbols;
 
-use crate::circuit::{Document, Error, RecordQuantity};
+use crate::circuit::{Document, Error, LabelWarning, RecordQuantity};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -68,6 +68,8 @@ pub struct Layout<'a> {
     pub jumps: Vec<Jump<'a>>,
     pub labels: Vec<Label<'a>>,
     pub issues: Vec<Issue>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub label_warnings: Vec<LabelWarning<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -224,19 +226,15 @@ struct Obstacle<'a> {
 
 /// Compute the schematic from the normalized document, in scene units.
 pub fn layout(document: &Document) -> Layout<'_> {
-    let inspection = document.inspect();
+    let connections = document.circuit().connections();
+    let signal_nets = connections.signal_nets().collect();
+    let inspection = document.inspect_with_connections(connections);
     let (control_kinds, power_switch_kinds) = symbols::library_kinds();
     let mut result = Layout {
         revision: inspection.revision,
         control_kinds,
         power_switch_kinds,
-        signal_nets: document
-            .circuit()
-            .nets
-            .iter()
-            .filter(|(_, pins)| document.circuit().is_signal_net(pins))
-            .map(|(net, _)| net.as_str())
-            .collect(),
+        signal_nets,
         symbols: Vec::new(),
         pins: BTreeMap::new(),
         labels: Vec::new(),
@@ -244,6 +242,7 @@ pub fn layout(document: &Document) -> Layout<'_> {
         junctions: Vec::new(),
         jumps: Vec::new(),
         issues: Vec::new(),
+        label_warnings: inspection.label_warnings,
     };
 
     let mut captions = Vec::new();
@@ -258,7 +257,7 @@ pub fn layout(document: &Document) -> Layout<'_> {
                 crate::circuit::PinKind::Electrical => None,
                 crate::circuit::PinKind::SignalInput => Some("input"),
                 crate::circuit::PinKind::SignalOutput => Some("output"),
-                crate::circuit::PinKind::VoltageProbe => net_id
+                crate::circuit::PinKind::VoltageProbe | crate::circuit::PinKind::NetLabel => net_id
                     .filter(|net| result.signal_nets.contains(net))
                     .map(|_| "input"),
             };

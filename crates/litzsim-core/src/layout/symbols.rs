@@ -256,6 +256,14 @@ fn strokes(kind: &str) -> Vec<Stroke> {
             line(&[[-32, 0], [-20, 0]]),
             line(&[[20, 0], [32, 0]]),
         ],
+        "label" => vec![line(&[
+            [0, 32],
+            [0, -8],
+            [15, -8],
+            [20, -2],
+            [15, 4],
+            [0, 4],
+        ])],
         "voltageProbe" => vec![
             Stroke::Circle {
                 center: [0, 0],
@@ -558,7 +566,20 @@ pub(super) fn geometry<'a>(
             [bounds.max[0] + 5 + value_width / 2, center[1] + 12],
         )
     };
-    labels.push(caption(id, LabelKind::Id, id.into(), None, id_pos));
+    let name = if kind == "label" {
+        part.parameters["text"].as_str().expect("validated label")
+    } else {
+        id
+    };
+    let anchor = if kind == "label" {
+        [
+            bounds.max[0] + 5 + (10 * name.chars().count() as i64 + 4) / 2,
+            center[1],
+        ]
+    } else {
+        id_pos
+    };
+    labels.push(caption(id, LabelKind::Id, name.into(), None, anchor));
     if let Some(value) = value {
         labels.push(caption(id, LabelKind::Value, value, None, value_pos));
     }

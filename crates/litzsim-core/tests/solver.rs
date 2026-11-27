@@ -19,6 +19,133 @@ fn channel(wave: &litzsim_core::waves::Waveform, name: &str) -> usize {
     wave.channels().iter().position(|c| c.name == name).unwrap()
 }
 
+fn assert_wave_bits(wired: &Value, linked: &Value) {
+    let expected = simulate(&document(wired), || false).unwrap();
+    let actual = simulate(&document(linked), || false).unwrap();
+    assert_eq!(json!(expected.channels()), json!(actual.channels()));
+    assert_eq!(expected.rows().len(), actual.rows().len());
+    for (expected, actual) in expected.rows().zip(actual.rows()) {
+        assert!(
+            expected
+                .iter()
+                .zip(actual)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+    }
+}
+
+#[test]
+fn labels_match_wired_power_nodes_including_reference_ground() {
+    let mut wired: Value = serde_json::from_str(RC).unwrap();
+    wired["parts"]["VP"] = json!({"type":"voltageProbe","parameters":{}});
+    wired["nets"]["output"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VP.p"));
+    let mut linked = wired.clone();
+    for (id, text) in [
+        ("A", "OUT"),
+        ("B", "out"),
+        ("C", "REF"),
+        ("D", "ref"),
+        ("E", "Unused"),
+        ("F", "unused"),
+        ("G", "Detached"),
+    ] {
+        linked["parts"][id] = json!({"type":"label","parameters":{"text":text}});
+    }
+    linked["nets"]["output"] = json!(["R1.n", "C1.p", "A.p"]);
+    linked["nets"]["remote_output"] = json!(["VC.p", "VP.p", "B.p"]);
+    linked["nets"]["ground"] = json!(["GND.ref", "C.p"]);
+    linked["nets"]["remote_ground"] = json!(["V1.n", "C1.n", "VC.n", "D.p"]);
+    linked["nets"]["label_only"] = json!(["E.p", "F.p"]);
+    assert_wave_bits(&wired, &linked);
+    let circuit = document(&linked);
+    let warning = &circuit.inspect().label_warnings[0];
+    assert_eq!(
+        (warning.code, warning.part_id, warning.text),
+        ("unpairedLabel", "G", "Detached")
+    );
+}
+
+#[test]
+fn labels_match_wired_control_through_a_label_only_bridge_and_probe() {
+    let mut wired: Value = serde_json::from_str(CONTROL).unwrap();
+    let mut linked: Value = serde_json::from_str(include_str!(
+        "../../../examples/control-signals-labels.litzsim"
+    ))
+    .unwrap();
+    for circuit in [&mut wired, &mut linked] {
+        circuit["parts"]["VP"] = json!({"type":"voltageProbe","parameters":{}});
+    }
+    wired["nets"]["step"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("VP.p"));
+    for (id, text) in [
+        ("BRIDGE_A", "Step"),
+        ("BRIDGE_B", "Remote"),
+        ("REMOTE", "remote"),
+    ] {
+        linked["parts"][id] = json!({"type":"label","parameters":{"text":text}});
+    }
+    linked["nets"]["bridge"] = json!(["BRIDGE_A.p", "BRIDGE_B.p"]);
+    linked["nets"]["monitor"] = json!(["REMOTE.p", "VP.p"]);
+    let circuit = document(&linked);
+    let layout = litzsim_core::layout::layout(&circuit);
+    assert_eq!(circuit.inspect().measurements["VP"].quantity, "output");
+    assert!(
+        layout.signal_nets.is_superset(
+            &["bridge", "monitor", "step", "step_receiver"]
+                .into_iter()
+                .collect()
+        )
+    );
+    assert_wave_bits(&wired, &linked);
+}
+
+#[test]
+fn invalid_label_connections_report_label_ids_and_text() {
+    let mut linked: Value = serde_json::from_str(include_str!(
+        "../../../examples/control-signals-labels.litzsim"
+    ))
+    .unwrap();
+    linked["parts"]["GND"] = json!({"type":"ground","parameters":{}});
+    let invalid_document =
+        |value: &Value| Document::from_bytes(&serde_json::to_vec(value).unwrap()).unwrap_err();
+    linked["nets"]["step_receiver"] = json!(["STEP_TO.p", "GND.ref"]);
+    let mixed = invalid_document(&linked);
+    assert!(mixed.message.contains("signal and electrical"));
+    for target in ["STEP_FROM", "STEP_TO", "Step"] {
+        assert!(mixed.message.contains(target));
+    }
+    linked["nets"].as_object_mut().unwrap().remove("ramp");
+    linked["nets"]["step_receiver"] = json!(["STEP_TO.p", "RAMP1.out"]);
+    let drivers = invalid_document(&linked);
+    assert!(drivers.message.contains("multiple outputs"));
+    for target in ["STEP_FROM", "STEP_TO", "Step"] {
+        assert!(drivers.message.contains(target));
+    }
+
+    let mut linked: Value =
+        serde_json::from_str(include_str!("../../../examples/buck-dual-loop.litzsim")).unwrap();
+    for id in ["SENSOR_FLAG", "CTRL_FLAG"] {
+        linked["parts"][id] = json!({"type":"label","parameters":{"text":"feedback"}});
+    }
+    linked["nets"]["voltage_sample"] = json!(["VS.out", "SENSOR_FLAG.p"]);
+    linked["nets"]["voltage_feedback"] = json!(["CTRL_FLAG.p", "ERR_V.in2"]);
+    let error = simulate(&document(&linked), || false).unwrap_err();
+    assert_eq!(error.target_id.as_deref(), Some("VS"));
+    for target in [
+        "must feed a sampler",
+        "SENSOR_FLAG",
+        "CTRL_FLAG",
+        "feedback",
+    ] {
+        assert!(error.message.contains(target));
+    }
+}
+
 // An ideal output clamp keeps the inductor slopes constant in the CCM fixture.
 fn clamped_buck() -> Value {
     let mut value: Value = serde_json::from_str(BUCK).unwrap();
@@ -269,7 +396,7 @@ fn sum_uses_numbered_inputs_in_list_order() {
         ("-", vec![7.0], -7.0),
     ] {
         let mut value = json!({
-            "version": 2,
+            "version": 3,
             "simulation": {"stopTime_s": 1, "timeStep_s": 1, "controlTask": {"mode": "fixed", "period_s": 1, "phase": 0}},
             "parts": {"SUM": {"type": "sum", "parameters": {
                 "inputs": inputs, "iconShape": "round"
@@ -417,7 +544,7 @@ fn source_preview_uses_the_recorded_control_ticks_and_step_clock_tolerance() {
 #[test]
 fn source_preview_matches_ideal_source_records_and_preserves_pwm_edges() {
     let mut circuit = json!({
-        "version": 2,
+        "version": 3,
         "simulation": { "timeStep_s": 0.03125, "stopTime_s": 0.6875 },
         "parts": {
             "V": { "type": "dc", "parameters": { "voltage_V": 2 }, "record": {"voltage": true} },
@@ -496,7 +623,7 @@ fn source_preview_matches_ideal_source_records_and_preserves_pwm_edges() {
 #[test]
 fn source_preview_keeps_both_pwm_values_when_falling_edge_rounds_to_stop() {
     let circuit = json!({
-        "version": 2,
+        "version": 3,
         "simulation": {
             "timeStep_s": 0.000001, "stopTime_s": 0.000011, "controlTask": {"mode": "fixed", "period_s": 0.000001, "phase": 0}
         },
@@ -1171,7 +1298,7 @@ fn timed_switch_opening_reports_the_floating_node_at_the_edge() {
 #[test]
 fn integrator_and_pi_update_at_each_tick_and_saturate_without_winding_up() {
     let value = json!({
-        "version": 2,
+        "version": 3,
         "layout": {},
         "simulation": {"timeStep_s": 0.25, "stopTime_s": 1.5, "controlTask": {"mode": "fixed", "period_s": 0.25, "phase": 0}},
         "parts": {
@@ -1732,7 +1859,7 @@ fn buck_probe_matches_a_two_pin_voltmeter_without_changing_existing_samples() {
 
 fn singular_circuit(parts: Value, nets: Value, reason: &str, ids: &[&str]) {
     let mut value = json!({
-        "version": 2,
+        "version": 3,
         "layout": {},
         "simulation": {"timeStep_s": 1e-6, "stopTime_s": 1e-5},
         "parts": parts,
@@ -1875,7 +2002,7 @@ fn rc_and_rlc_converge_to_the_step_response() {
 
 fn inrush(step: f64, initial: f64) -> Value {
     json!({
-        "version": 2,
+        "version": 3,
         "layout": {},
         "simulation": {"timeStep_s": step, "stopTime_s": 5e-6},
         "parts": {
@@ -2128,7 +2255,7 @@ fn output_stride_preserves_grid_samples_and_the_off_grid_stop() {
 #[test]
 fn nmos_body_diode_conducts_source_to_drain_while_gate_is_low() {
     let value = json!({
-        "version": 2,
+        "version": 3,
         "layout": {},
         "simulation": {"timeStep_s": 0.37e-6, "stopTime_s": 100e-6},
         "parts": {

@@ -227,6 +227,28 @@ impl Circuit {
                         "soc".into(),
                         serde_json::json!({"mode": "task", "position": 0}),
                     )])
+                } else if kind == "label" {
+                    let text = (0..)
+                        .map(|suffix| {
+                            if suffix == 0 {
+                                id.clone()
+                            } else {
+                                format!("{id}_{suffix}")
+                            }
+                        })
+                        .find(|candidate| {
+                            !self.parts.values().any(|part| {
+                                part.kind == "label"
+                                    && part.parameters["text"]
+                                        .as_str()
+                                        .unwrap()
+                                        .trim()
+                                        .to_lowercase()
+                                        == candidate.to_lowercase()
+                            })
+                        })
+                        .expect("available label name");
+                    BTreeMap::from([("text".into(), text.into())])
                 } else {
                     definition
                         .defaults
@@ -291,7 +313,11 @@ impl Circuit {
                 if !part.parameters.contains_key(key) {
                     return Err(Error::invalid(id, format!("unknown parameter: {key}")));
                 }
-                let value = if part.kind == "sum" {
+                let is_label = part.kind == "label";
+                let value = if is_label {
+                    super::connections::read_text(id, Some(value))?;
+                    value.clone()
+                } else if part.kind == "sum" {
                     let mut parameters = part.parameters.clone();
                     parameters.insert(key.clone(), value.clone());
                     let revised = Sum::read(id, &parameters)?;
@@ -330,6 +356,9 @@ impl Circuit {
                     .unwrap()
                     .parameters
                     .insert(key.clone(), value);
+                if is_label {
+                    self.connections().validate(self)?;
+                }
             }
             Operation::SetRecording {
                 id,
@@ -523,7 +552,7 @@ impl Circuit {
                 pins.push(pin.into());
             }
         }
-        Ok(())
+        self.connections().validate(self)
     }
 
     fn disconnect(&mut self, pin: &str) {
@@ -619,12 +648,11 @@ fn insert_in_branch(
     };
     let first_terminal = &terminals[0];
     let kind_at_terminal = document.0.require_pin(first_terminal)?;
+    let connections = document.0.connections();
     if kind_at_terminal.is_signal()
-        || kind_at_terminal == super::PinKind::VoltageProbe
-            && document
-                .0
-                .net_of(first_terminal)
-                .is_some_and(|net| document.0.is_signal_net(&document.0.nets[net]))
+        || connections
+            .net_of(first_terminal)
+            .is_some_and(|net| connections.nets[net].signal)
     {
         return Err(Error::invalid(
             first_terminal,
@@ -767,24 +795,26 @@ fn receipt(
             );
         }
     }
+    let before_connections = before.0.connections();
+    let after_connections = after.0.connections();
     receipt.shorted_sources = after
         .0
         .parts
         .iter()
         .filter(|(id, part)| {
             let definition = part_definition(&part.kind).unwrap();
-            let shorted = |circuit: &Circuit, id: &str| {
+            let shorted = |connections: &super::Connections<'_>, id: &str| {
                 let [first, second] = definition.pins else {
                     return false;
                 };
-                let net = |pin| circuit.net_of(&format!("{id}.{pin}")).map(str::to_owned);
+                let net = |pin| connections.net_of(&format!("{id}.{pin}"));
                 net(first).is_some() && net(first) == net(second)
             };
             definition.voltage_source
-                && shorted(&after.0, id)
+                && shorted(&after_connections, id)
                 && !origins
                     .get(id.as_str())
-                    .is_some_and(|old| shorted(&before.0, old))
+                    .is_some_and(|old| shorted(&before_connections, old))
         })
         .map(|(id, _)| id.clone())
         .collect();

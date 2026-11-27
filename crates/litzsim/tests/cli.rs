@@ -806,7 +806,7 @@ fn file_commands_round_trip_and_reject_failed_batches() {
     assert_eq!(stored["revision"], after);
     assert_eq!(stored["diskRevision"], edited["diskRevision"]);
     assert_eq!(stored["document"]["layout"]["Q1"]["mirror"], "horizontal");
-    assert_eq!(stored["document"]["version"], 2);
+    assert_eq!(stored["document"]["version"], 3);
     assert_eq!(
         stored["document"]["parts"]["L1"]["record"],
         json!({"voltage": true, "current": true})

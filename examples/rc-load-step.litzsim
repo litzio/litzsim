@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "simulation": {"timeStep_s": 0.000002, "stopTime_s": 0.002},
   "parts": {
     "V1": {"type": "dc", "parameters": {"voltage_V": 5}},

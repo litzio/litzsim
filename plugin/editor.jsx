@@ -57,6 +57,7 @@ const ICONS = {
   passive: "M2 12h4l2-4 3 8 3-8 3 8 2-4h3",
   switches: "M3 12h6M15 12h6M9 7v10l6-5zM15 7v10",
   control: "M3 16h4V8h5v8h5V8h4",
+  connections: "M6 21V4h10l3 4-3 4H6",
   meters: "M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16M9 15l3-7 3 7M10 13h4",
 };
 
@@ -114,28 +115,30 @@ function NumberField({ ui, owner, name, text, unit, value, placeholder, disabled
   </label>;
 }
 
-/** Enter or leaving the field renames the part; Esc restores its ID. A refused name keeps the text and shows why. */
-function NameField({ ui, id, disabled, onRename }) {
-  const [draft, setDraft] = React.useState(id);
+/** Enter or blur commits the text. Esc restores the accepted value. */
+function NameField({ ui, id, disabled, onRename, labelText }) {
+  const value = labelText ?? id;
+  const [draft, setDraft] = React.useState(value);
   const [problem, setProblem] = React.useState(null);
   const owner = React.useRef(id);
   const sending = React.useRef(null);
-  React.useEffect(() => { owner.current = id; setDraft(id); setProblem(null); }, [id]);
+  React.useEffect(() => { owner.current = id; setDraft(value); setProblem(null); }, [id, value]);
   async function commit() {
     // Disabling the field while the edit runs blurs it; do not send the same name twice.
-    if (sending.current === draft) return;
+    if (draft === value || sending.current === draft) return;
     sending.current = draft;
     const reason = await onRename(id, draft);
     sending.current = null;
     if (owner.current === id) setProblem(reason);
   }
   return <label style={styles.field}>
-    <span>이름</span>
-    <ui.Input value={draft} disabled={disabled} aria-invalid={problem ? true : undefined} data-name={id}
+    <span>{labelText === undefined ? "이름" : "라벨 이름"}</span>
+    <ui.Input value={draft} disabled={disabled} aria-invalid={problem ? true : undefined}
+      data-name={labelText === undefined ? id : undefined} data-parameter={labelText === undefined ? undefined : "text"}
       spellCheck={false} autoComplete="off" onChange={event => setDraft(event.target.value)} onBlur={commit}
       onKeyDown={event => {
         if (event.key === "Enter") { event.preventDefault(); commit(); }
-        if (event.key === "Escape") { setDraft(id); setProblem(null); }
+        if (event.key === "Escape") { setDraft(value); setProblem(null); }
       }} />
     {problem && <span role="alert" style={{ color: "var(--id-color-danger)", fontSize: "var(--font-size-xs)" }}>{problem}</span>}
   </label>;
@@ -230,7 +233,7 @@ function SumProperties({ ui, id, parameters, disabled, commit }) {
   </>;
 }
 
-function Properties({ ui, sheet, selectedId, busy, edit, rename, editSumParameter, adapter }) {
+function Properties({ ui, sheet, selectedId, busy, edit, rename, editLabelText, editSumParameter, adapter }) {
   const part = selectedId && sheet.document.parts[selectedId];
   const pins = Object.entries(sheet.layout.pins);
   if (!part) {
@@ -267,7 +270,10 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename, editSumParamete
     <div style={styles.group}>
       <NameField ui={ui} id={selectedId} disabled={busy} onRename={rename} />
     </div>
-    {Object.keys(part.parameters).length > 0 && <div style={styles.group}>
+    {part.type === "label" ? <div style={styles.group}>
+      <NameField key={selectedId} ui={ui} id={selectedId} labelText={part.parameters.text}
+        disabled={busy} onRename={editLabelText} />
+    </div> : Object.keys(part.parameters).length > 0 && <div style={styles.group}>
       <h4 style={{ margin: 0 }}>값</h4>
       {part.type === "sum" ? <SumProperties key={selectedId} ui={ui} id={selectedId}
         parameters={part.parameters} disabled={busy} commit={editSumParameter} />
@@ -556,6 +562,19 @@ export function Editor({ ui, adapter }) {
     });
   }
 
+  function editLabelText(id, value) {
+    return perform(async () => {
+      try {
+        const next = await applyNow([{ op: "setParameter", id, key: "text", value }], {
+          review: confirmShortedSources,
+        });
+        return next ? null : "라벨 이름 변경을 취소했습니다.";
+      } catch (failure) {
+        return failure.message;
+      }
+    });
+  }
+
   function undo() {
     perform(async () => {
       const { sheet: current, history: undoable } = latest.current;
@@ -686,17 +705,20 @@ export function Editor({ ui, adapter }) {
     edit([{ op: "insertInBranch", type: "ammeter", terminals: segment.terminals, from: segment.from, to: segment.to }]);
   }
 
-  /** Connect two terminals; confirm first if a voltage source would end up shorted. */
+  function confirmShortedSources({ receipt }) {
+    return !receipt.shortedSources.length || adapter.confirm({
+      title: "전압원을 단락할까요?",
+      message: `${receipt.shortedSources.join(", ")}의 두 단자가 같은 네트가 됩니다.`,
+      confirmLabel: "그래도 적용",
+    });
+  }
+
   /** Connect two terminals; if the core reports a newly shorted voltage source, ask first. */
   function connect(a, b, started) {
     return edit([{ op: "connect", a, b }], {
       kind: "connect",
       started,
-      review: ({ receipt }) => !receipt.shortedSources.length || adapter.confirm({
-        title: "전압원을 단락할까요?",
-        message: `${receipt.shortedSources.join(", ")}의 두 단자가 같은 네트가 됩니다.`,
-        confirmLabel: "그래도 연결",
-      }),
+      review: confirmShortedSources,
     });
   }
 
@@ -1008,6 +1030,9 @@ export function Editor({ ui, adapter }) {
       <section id="litzsim-panel-circuit" role="tabpanel" aria-label="LitzSim 회로 편집기"
         style={{ ...styles.body, ...styles.pane, ...(shownTab === "circuit" ? null : styles.hidden) }} onKeyDown={onKeyDown} onKeyUp={onKeyUp}>
         {error && <ui.Notice tone="error">{error}</ui.Notice>}
+        {sheet.layout.labelWarnings?.length > 0 && <ui.Notice tone="warning">
+          {sheet.layout.labelWarnings.map(warning => `${warning.partId} (${warning.text})`).join(", ")}와 이름이 같은 라벨이 없습니다.
+        </ui.Notice>}
         {run?.state === "failed" && run.error && <ui.Notice tone="error">{`실행 실패 — ${run.error.message ?? run.error.code}`}</ui.Notice>}
         {saving && <ui.Toolbar label="새 회로 저장">
           <label style={styles.field}>
@@ -1079,7 +1104,7 @@ export function Editor({ ui, adapter }) {
           </div>
           <aside aria-label="속성" style={styles.panel}>
             <Properties ui={ui} sheet={sheet} selectedId={selectedId} busy={busy} edit={edit} rename={rename}
-              editSumParameter={editSumParameter} adapter={adapter} />
+              editSumParameter={editSumParameter} editLabelText={editLabelText} adapter={adapter} />
           </aside>
         </div>
         <footer style={styles.status} aria-live="polite">

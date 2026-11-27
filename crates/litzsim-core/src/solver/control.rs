@@ -287,6 +287,7 @@ pub(super) struct Control<'a> {
 impl<'a> Control<'a> {
     pub(super) fn compile(
         document: &'a Document,
+        connections: &crate::circuit::Connections<'a>,
         signal_probes: &BTreeMap<&'a str, &'a str>,
     ) -> Result<Option<Self>, Error> {
         let circuit = document.circuit();
@@ -308,13 +309,12 @@ impl<'a> Control<'a> {
             .enumerate()
             .map(|(index, (id, _))| (id.as_str(), index))
             .collect();
-        let pin_nets = circuit.pin_nets();
         let mut drivers = BTreeMap::new();
-        for (net, pins) in &circuit.nets {
-            for terminal in pins {
+        for (&id, net) in connections.nets.iter().filter(|(_, net)| net.signal) {
+            for terminal in &net.terminals {
                 if circuit.require_pin(terminal)? == PinKind::SignalOutput {
-                    let (id, _) = terminal.split_once('.').expect("validated terminal");
-                    drivers.insert(net.as_str(), indices[id]);
+                    let (part, _) = terminal.split_once('.').expect("validated terminal");
+                    drivers.insert(id, indices[part]);
                 }
             }
         }
@@ -331,23 +331,31 @@ impl<'a> Control<'a> {
                 .filter(|(_, _, kind)| *kind == PinKind::SignalInput)
             {
                 let terminal = format!("{id}.{pin}");
-                let driver = pin_nets[&terminal].and_then(|net| drivers.get(net));
+                let net = connections.net_of(&terminal);
+                let driver = net.and_then(|net| drivers.get(net));
                 let driver = driver.ok_or_else(|| {
-                    Error::invalid(
+                    let error = Error::invalid(
                         id,
                         format!("Unconnected signal input {terminal}: expected a signal output"),
-                    )
+                    );
+                    match net {
+                        Some(net) => connections.nets[net].describe_labels(error, false),
+                        None => error,
+                    }
                 })?;
                 let (sensor_id, source) = parts[*driver];
                 if part.kind != "sampler"
                     && matches!(source.kind.as_str(), "voltageSensor" | "currentSensor")
                 {
-                    return Err(Error::invalid(
+                    let error = Error::invalid(
                         sensor_id,
                         format!(
                             "Sensor {sensor_id} must feed a sampler before control input {terminal}"
                         ),
-                    ));
+                    );
+                    return Err(
+                        connections.nets[net.expect("driven net")].describe_labels(error, false)
+                    );
                 }
                 inputs.push(*driver);
             }
@@ -385,9 +393,12 @@ impl<'a> Control<'a> {
             .iter()
             .map(|(&id, net)| {
                 let &driver = drivers.get(net).ok_or_else(|| {
-                    Error::invalid(
-                        id,
-                        format!("Unconnected signal input {id}.p: expected a signal output"),
+                    connections.nets[net].describe_labels(
+                        Error::invalid(
+                            id,
+                            format!("Unconnected signal input {id}.p: expected a signal output"),
+                        ),
+                        false,
                     )
                 })?;
                 blocks[driver].observed = true;

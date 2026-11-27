@@ -5,7 +5,9 @@ mod preview;
 
 pub use preview::{SourcePreview, source_preview};
 
-use crate::circuit::{Document, Error, Part, Record, RecordQuantity, part_definition};
+use crate::circuit::{
+    Connections, Document, Error, Part, PinKind, Record, RecordQuantity, part_definition,
+};
 use crate::waves::{Channel, Waveform};
 use control::Control;
 use serde::{Deserialize, Serialize};
@@ -38,7 +40,12 @@ pub struct Warning {
 
 /// Inspect simple voltage-source charging paths before a background run.
 pub fn warnings(document: &Document) -> Vec<Warning> {
-    match assemble(document, &signal_probes(document)) {
+    let connections = document.circuit().connections();
+    match assemble(
+        document,
+        &connections,
+        &signal_probes(document, &connections),
+    ) {
         Ok((mut devices, _, _)) => {
             source_paths(&mut devices, document.circuit().simulation.time_step_s)
         }
@@ -67,9 +74,10 @@ pub fn simulate_with_warnings(
     document: &Document,
     mut should_stop: impl FnMut(f64) -> bool,
 ) -> Result<(Waveform, Vec<Warning>), Error> {
-    let signal_probes = signal_probes(document);
-    let mut control = Control::compile(document, &signal_probes)?;
-    let (mut devices, size, mut clocks) = assemble(document, &signal_probes)?;
+    let connections = document.circuit().connections();
+    let signal_probes = signal_probes(document, &connections);
+    let mut control = Control::compile(document, &connections, &signal_probes)?;
+    let (mut devices, size, mut clocks) = assemble(document, &connections, &signal_probes)?;
     let mut system = System::new(size);
     let settings = &document.circuit().simulation;
     let step = settings.time_step_s;
@@ -597,16 +605,19 @@ impl Device<'_> {
     }
 }
 
-fn signal_probes(document: &Document) -> BTreeMap<&str, &str> {
+fn signal_probes<'a>(
+    document: &'a Document,
+    connections: &Connections<'a>,
+) -> BTreeMap<&'a str, &'a str> {
     let circuit = document.circuit();
-    circuit
+    connections
         .nets
         .iter()
-        .filter(|(_, pins)| circuit.is_signal_net(pins))
-        .flat_map(|(net, pins)| {
-            pins.iter().filter_map(move |terminal| {
+        .filter(|(_, net)| net.signal)
+        .flat_map(|(&net_id, net)| {
+            net.terminals.iter().filter_map(move |terminal| {
                 let id = terminal.strip_suffix(".p")?;
-                (circuit.parts[id].kind == "voltageProbe").then_some((id, net.as_str()))
+                (circuit.parts[id].kind == "voltageProbe").then_some((id, net_id))
             })
         })
         .collect()
@@ -614,7 +625,10 @@ fn signal_probes(document: &Document) -> BTreeMap<&str, &str> {
 
 /// Reject ground-referenced probes before a background run is admitted.
 pub fn validate_probe_reference(document: &Document) -> Result<(), Error> {
-    check_probe_reference(document, &signal_probes(document))
+    check_probe_reference(
+        document,
+        &signal_probes(document, &document.circuit().connections()),
+    )
 }
 
 fn check_probe_reference(
@@ -637,37 +651,49 @@ fn check_probe_reference(
 
 fn assemble<'a>(
     document: &'a Document,
+    connections: &Connections<'a>,
     signal_probes: &BTreeMap<&str, &str>,
 ) -> Result<(Vec<Device<'a>>, usize, Vec<Clock>), Error> {
     check_probe_reference(document, signal_probes)?;
     let circuit = document.circuit();
-    let pin_nets = circuit.pin_nets();
-    let missing: Vec<_> = pin_nets
+    let mut missing: Vec<_> = circuit
+        .parts
         .iter()
-        .filter_map(|(pin, net)| {
-            (net.is_none()
-                && !circuit
-                    .require_pin(pin)
-                    .expect("validated terminal")
-                    .is_signal())
-            .then_some(pin.as_str())
+        .flat_map(|(id, part)| {
+            part.pins().into_iter().filter_map(move |(pin, _, kind)| {
+                if kind.is_signal() || kind == PinKind::NetLabel {
+                    return None;
+                }
+                let terminal = format!("{id}.{pin}");
+                connections.net_of(&terminal).is_none().then_some(terminal)
+            })
         })
         .collect();
+    missing.sort_unstable();
     if let Some(first) = missing.first() {
         return Err(Error::invalid(
             first,
             format!("Unconnected pins: {}", missing.join(", ")),
         ));
     }
-    let pin_net = |id, pin| pin_nets[format!("{id}.{pin}").as_str()].expect("connected terminal");
+    let pin_net = |id, pin| {
+        connections
+            .net_of(&format!("{id}.{pin}"))
+            .expect("connected terminal")
+    };
     let grounds: BTreeSet<_> = circuit
         .parts
         .iter()
         .filter(|(_, part)| part.kind == "ground")
         .map(|(id, _)| pin_net(id.as_str(), "ref"))
         .collect();
-    let signal_only = !circuit.parts.is_empty()
-        && circuit.parts.iter().all(|(id, part)| {
+    let mut modeled_parts = circuit
+        .parts
+        .iter()
+        .filter(|(_, part)| part.kind != "label")
+        .peekable();
+    let signal_only = modeled_parts.peek().is_some()
+        && modeled_parts.all(|(id, part)| {
             let definition = part_definition(&part.kind).expect("validated part");
             signal_probes.contains_key(id.as_str())
                 || definition.is_control() && definition.measurement.is_none()
@@ -677,22 +703,19 @@ fn assemble<'a>(
     }
 
     let mut size = 0;
-    let nodes: BTreeMap<_, _> = circuit
+    let nodes: BTreeMap<_, _> = connections
         .nets
         .iter()
-        .filter(|(_, pins)| !pins.is_empty() && !circuit.is_signal_net(pins))
-        .map(|(net, _)| {
-            (
-                net.as_str(),
-                (!grounds.contains(net.as_str())).then(|| take_index(&mut size)),
-            )
-        })
+        .filter(|(_, net)| !net.terminals.is_empty() && !net.signal)
+        .map(|(&net, _)| (net, (!grounds.contains(net)).then(|| take_index(&mut size))))
         .collect();
     let pin_node = |id, pin| nodes[pin_net(id, pin)];
     let mut devices = Vec::new();
     let mut clocks = Vec::new();
     for (id, part) in &circuit.parts {
-        if part.kind == "ground" || signal_probes.contains_key(id.as_str()) {
+        if matches!(part.kind.as_str(), "ground" | "label")
+            || signal_probes.contains_key(id.as_str())
+        {
             continue;
         }
         let definition = part_definition(&part.kind).expect("validated part");
