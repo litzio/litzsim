@@ -167,6 +167,7 @@ fn inspect_file(path: &Path) -> Result<Value, Value> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Request<'a> {
     op: &'a str,
+    part_id: Option<&'a str>,
     file: Option<PathBuf>,
     document: Option<&'a RawValue>,
     expected_revision: Option<&'a str>,
@@ -291,6 +292,23 @@ fn handle(runs: &mut Runs, request: Request<'_>) -> Result<Value, Value> {
             (None, Some(raw)) => Ok(success(litzsim_core::layout::layout(&document(raw)?))),
             _ => Err(request_error("layout requires either file or document")),
         },
+        "sourcePreview" => {
+            let document = match (request.file, request.document) {
+                (Some(file), None) => circuit::open(&file).map_err(core_error)?.document,
+                (None, Some(raw)) => document(raw)?,
+                _ => {
+                    return Err(request_error(
+                        "sourcePreview requires either file or document",
+                    ));
+                }
+            };
+            let preview = litzsim_core::solver::source_preview(
+                &document,
+                required(request.part_id, "partId")?,
+            )
+            .map_err(core_error)?;
+            Ok(success(preview))
+        }
         "save" => {
             let file = required(request.file, "file")?;
             let document = document(required(request.document, "document")?)?;

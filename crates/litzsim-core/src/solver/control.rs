@@ -3,7 +3,7 @@ use crate::circuit::{Document, Error, Part, PinKind, RecordQuantity, part_defini
 use crate::waves::Channel;
 use std::collections::{BTreeMap, VecDeque};
 
-enum Equation {
+pub(super) enum Equation {
     Sensor(RecordQuantity, f64),
     Constant(f64),
     Step {
@@ -38,7 +38,7 @@ enum Equation {
 }
 
 impl Equation {
-    fn from_part(id: &str, part: &Part) -> Result<Self, Error> {
+    pub(super) fn from_part(id: &str, part: &Part) -> Result<Self, Error> {
         let param = |key: &str| part.parameters[key].as_f64().expect("validated parameter");
         Ok(match part.kind.as_str() {
             "voltageSensor" => Self::Sensor(RecordQuantity::Voltage, param("gain")),
@@ -109,6 +109,40 @@ impl Equation {
             _ => unreachable!("control library and equations use the same block types"),
         })
     }
+
+    pub(super) fn source_value(&self, time: f64) -> f64 {
+        match *self {
+            Self::Constant(value) => value,
+            Self::Step { at, before, after } => {
+                if at > time && !same_clock_time(at, time) {
+                    before
+                } else {
+                    after
+                }
+            }
+            Self::Ramp {
+                start,
+                slope,
+                final_value,
+            } => {
+                ((time - start).max(0.0) * slope).clamp(final_value.min(0.0), final_value.max(0.0))
+            }
+            _ => unreachable!("expected an independent control source"),
+        }
+    }
+}
+
+pub(super) fn sample_period(document: &Document) -> Result<f64, Error> {
+    document
+        .circuit()
+        .simulation
+        .control_sample_period_s
+        .ok_or_else(|| {
+            Error::invalid(
+                "controlSamplePeriod_s",
+                "Control blocks require a controlSamplePeriod_s",
+            )
+        })
 }
 
 struct Block<'a> {
@@ -207,12 +241,7 @@ impl<'a> Control<'a> {
                     .iter()
                     .any(|&driver| blocks[driver].needs_sense);
         }
-        let period = circuit.simulation.control_sample_period_s.ok_or_else(|| {
-            Error::invalid(
-                "controlSamplePeriod_s",
-                "Control blocks require a controlSamplePeriod_s",
-            )
-        })?;
+        let period = sample_period(document)?;
         // Probes share the driver's held value and recording events without
         // participating in the dependency graph.
         let probes = signal_probes
@@ -297,20 +326,9 @@ impl<'a> Control<'a> {
             let input = |pin: usize| self.values[block.inputs[pin]];
             let value = match &mut block.equation {
                 Equation::Sensor(quantity, gain) => sense(block.id, *quantity) * *gain,
-                Equation::Constant(value) => *value,
-                Equation::Step { at, before, after } => {
-                    if *at > time && !same_clock_time(*at, time) {
-                        *before
-                    } else {
-                        *after
-                    }
+                Equation::Constant(_) | Equation::Step { .. } | Equation::Ramp { .. } => {
+                    block.equation.source_value(time)
                 }
-                Equation::Ramp {
-                    start,
-                    slope,
-                    final_value,
-                } => ((time - *start).max(0.0) * *slope)
-                    .clamp(final_value.min(0.0), final_value.max(0.0)),
                 Equation::Sum(signs) => {
                     let mut terms = signs
                         .iter()
