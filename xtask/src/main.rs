@@ -50,6 +50,7 @@ fn package_plugin() -> Result<(), Box<dyn Error>> {
         "host.mjs",
         "screen.jsx",
         "editor.jsx",
+        "source-preview.jsx",
         "schematic.jsx",
         "rules.js",
         "parts.js",

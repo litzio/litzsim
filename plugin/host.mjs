@@ -95,6 +95,7 @@ export async function activate() {
       new: () => invoke("new"),
       inspect: payload => invoke("inspect", payload),
       layout: payload => invoke("layout", payload),
+      sourcePreview: payload => invoke("sourcePreview", payload),
       apply: payload => invoke("apply", payload),
       undo: payload => invoke("undo", payload),
       save: async ({ folder, name, ...payload }) => {

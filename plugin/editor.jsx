@@ -6,8 +6,9 @@ import {
 import { Schematic, sheetView, contentBounds } from "./schematic.jsx";
 import {
   EMPTY_SELECTION, deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex,
-  selectionBox, sumParameterOps, undoRenamed,
+  selectionBox, sourcePreviewRequest, sumParameterOps, undoRenamed,
 } from "./rules.js";
+import { SourcePreview } from "./source-preview.jsx";
 import { Waveform } from "./waveform.jsx";
 
 // The editor owns only screen state: selection, drag previews, hover, the
@@ -184,7 +185,7 @@ function SumProperties({ ui, id, parameters, disabled, commit }) {
   </>;
 }
 
-function Properties({ ui, sheet, selectedId, busy, edit, rename, editSumParameter }) {
+function Properties({ ui, sheet, selectedId, busy, edit, rename, editSumParameter, adapter }) {
   const part = selectedId && sheet.document.parts[selectedId];
   const pins = Object.entries(sheet.layout.pins);
   if (!part) {
@@ -214,6 +215,7 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename, editSumParamete
   const symbol = sheet.layout.symbols.find(symbol => symbol.id === selectedId);
   const recordable = symbol?.recordable ?? [];
   const dutyUpdate = DUTY_UPDATE_LABELS[symbol?.dutyUpdateTiming];
+  const preview = sourcePreviewRequest(sheet.document, selectedId);
   return <>
     <h3 style={{ margin: 0 }}>{partLabel(part.type)}</h3>
     <div style={styles.group}>
@@ -227,6 +229,7 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename, editSumParamete
         name={name} text={(PARAMETERS[name] ?? [name])[0]} unit={(PARAMETERS[name] ?? [name, ""])[1]} value={value}
         disabled={busy} onCommit={(key, next) => edit([{ op: "setParameter", id: selectedId, key, value: next }])} />)}
     </div>}
+    {preview && <SourcePreview key={JSON.stringify([sheet.revision, selectedId])} adapter={adapter} request={preview} />}
     {dutyUpdate && <div style={styles.fact}><span>듀티 갱신 시점</span><span>{dutyUpdate}</span></div>}
     {recordable.length > 0 && <div style={styles.group}>
       {recordable.map(quantity => <label key={quantity} style={styles.fact}>
@@ -1028,7 +1031,7 @@ export function Editor({ ui, adapter }) {
           </div>
           <aside aria-label="속성" style={styles.panel}>
             <Properties ui={ui} sheet={sheet} selectedId={selectedId} busy={busy} edit={edit} rename={rename}
-              editSumParameter={editSumParameter} />
+              editSumParameter={editSumParameter} adapter={adapter} />
           </aside>
         </div>
         <footer style={styles.status} aria-live="polite">

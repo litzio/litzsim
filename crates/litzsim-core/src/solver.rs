@@ -1,6 +1,9 @@
 //! Transient modified nodal analysis for the v1 circuit document.
 
 mod control;
+mod preview;
+
+pub use preview::{SourcePreview, source_preview};
 
 use crate::circuit::{Document, Error, Part, Record, RecordQuantity, part_definition};
 use crate::waves::{Channel, Waveform};
@@ -376,6 +379,10 @@ impl TimedSwitch {
     fn pending(self, time: f64) -> bool {
         self.at > time && !same_clock_time(self.at, time)
     }
+
+    fn closed(self, interval_start: f64) -> bool {
+        self.initially_closed ^ !self.pending(interval_start)
+    }
 }
 
 struct Clock {
@@ -405,6 +412,14 @@ impl Clock {
         self.sampled
             .as_ref()
             .map_or_else(|| self.pulse.is_high(interior), |duty| duty.high)
+    }
+
+    fn voltage(&self, interior: f64) -> f64 {
+        if self.is_high(interior) {
+            self.pulse.high
+        } else {
+            0.0
+        }
     }
 
     fn fixed_switches(&self, left: f64, right: f64) -> bool {
@@ -605,13 +620,7 @@ fn assemble(document: &Document) -> Result<(Vec<Device<'_>>, usize, Vec<Clock>),
         if is_control && definition.measurement.is_none() {
             continue;
         }
-        let mut series_resistance = 0.0;
-        if let Some((key, _)) = definition.series_resistance() {
-            series_resistance = part.parameters[key].as_f64().expect("validated parameter");
-            if series_resistance < 0.0 {
-                return Err(Error::invalid(id, format!("{key} must be nonnegative")));
-            }
-        }
+        let series_resistance = checked_series_resistance(id, part)?;
         let kind = device_kind(id, part, &mut clocks)?;
         let (p, n) = match definition.measurement {
             Some(probe) => (probe.from_pin, probe.to_pin),
@@ -739,6 +748,22 @@ fn take_index(size: &mut usize) -> usize {
     index
 }
 
+fn checked_series_resistance(id: &str, part: &Part) -> Result<f64, Error> {
+    let definition = part_definition(&part.kind).expect("validated part");
+    let Some((key, _)) = definition.series_resistance() else {
+        return Ok(0.0);
+    };
+    let value = part.parameters[key].as_f64().expect("validated parameter");
+    if value < 0.0 {
+        return Err(Error::invalid(id, format!("{key} must be nonnegative")));
+    }
+    Ok(value)
+}
+
+fn sine_voltage(amplitude: f64, frequency: f64, time: f64) -> f64 {
+    amplitude * (std::f64::consts::TAU * time * frequency).sin()
+}
+
 fn device_kind(id: &str, part: &Part, clocks: &mut Vec<Clock>) -> Result<Kind, Error> {
     let param = |key: &str| part.parameters[key].as_f64().expect("validated parameter");
     let positive = |key| {
@@ -814,9 +839,7 @@ fn solve_sample(
     for device in devices.iter_mut() {
         let driven = match device.kind {
             Kind::Nmos(Some(clock)) => clocks[clock].is_high(interior),
-            Kind::TimedSwitch(switch) => {
-                switch.initially_closed ^ !switch.pending(sample.interval_start)
-            }
+            Kind::TimedSwitch(switch) => switch.closed(sample.interval_start),
             _ => continue,
         };
         turned_on |= driven && !device.driven;
@@ -1143,17 +1166,9 @@ fn stamp(
         Kind::Sine(amplitude, frequency) => (
             true,
             -device.series_resistance,
-            amplitude * (std::f64::consts::TAU * time * frequency).sin(),
+            sine_voltage(amplitude, frequency, time),
         ),
-        Kind::Pulse(clock) => (
-            true,
-            0.0,
-            if clocks[clock].is_high(interior) {
-                clocks[clock].pulse.high
-            } else {
-                0.0
-            },
-        ),
+        Kind::Pulse(clock) => (true, 0.0, clocks[clock].voltage(interior)),
         Kind::Ammeter | Kind::Diode | Kind::Nmos(_) | Kind::TimedSwitch(_) => (true, 0.0, 0.0),
         Kind::Voltmeter | Kind::Resistance(_) => unreachable!(),
     };

@@ -1,0 +1,199 @@
+use super::control::{Equation, sample_period};
+use super::{Kind, checked_series_resistance, device_kind, same_clock_time, sine_voltage};
+use crate::circuit::{Document, Error};
+use serde::Serialize;
+
+const MAX_POINTS: usize = 256;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePreview {
+    pub points: Vec<[f64; 2]>,
+    pub events: Vec<PreviewEvent>,
+    pub unit: &'static str,
+    pub hold_samples: bool,
+    pub decimated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewEvent {
+    pub time: f64,
+    pub kind: &'static str,
+}
+
+/// Evaluate a source on its own, so it can be previewed while wiring the circuit.
+/// Points give the programmed source voltage, control output or switch state.
+pub fn source_preview(document: &Document, id: &str) -> Result<SourcePreview, Error> {
+    let part = document
+        .circuit()
+        .parts
+        .get(id)
+        .ok_or_else(|| Error::invalid(id, "Unknown source"))?;
+    let stop = document.stop_time_s();
+    let mut preview = SourcePreview {
+        points: Vec::new(),
+        events: Vec::new(),
+        unit: "V",
+        hold_samples: false,
+        decimated: false,
+    };
+    match part.kind.as_str() {
+        "constant" | "step" | "ramp" => {
+            let equation = Equation::from_part(id, part)?;
+            let period = sample_period(document)?;
+            preview.unit = "1";
+            preview.hold_samples = true;
+            match equation {
+                Equation::Step { at, .. } => preview.mark(at, stop, "step"),
+                Equation::Ramp {
+                    start,
+                    slope,
+                    final_value,
+                } => {
+                    let end = if final_value == 0.0 {
+                        start
+                    } else {
+                        start + final_value / slope
+                    };
+                    preview.mark(end, stop, "rampEnd");
+                }
+                _ => {}
+            }
+            let (points, decimated) = control_points(&equation, period, stop)?;
+            preview.points = points;
+            preview.decimated = decimated;
+        }
+        "dc" | "sine" | "pwm" | "timedSwitch" => {
+            checked_series_resistance(id, part)?;
+            let mut clocks = Vec::new();
+            preview.points = match device_kind(id, part, &mut clocks)? {
+                Kind::Dc(voltage) => vec![[0.0, voltage], [stop, voltage]],
+                Kind::Sine(amplitude, frequency) => {
+                    let end = stop.min(3.0 / frequency.abs());
+                    (0..MAX_POINTS)
+                        .map(|i| {
+                            let time = end * (i as f64 / (MAX_POINTS - 1) as f64);
+                            [time, sine_voltage(amplitude, frequency, time)]
+                        })
+                        .collect()
+                }
+                Kind::Pulse(index) => {
+                    let clock = &clocks[index];
+                    let end = stop.min(3.0 / clock.pulse.frequency);
+                    let mut start = 0.0;
+                    let mut points = Vec::new();
+                    // Plot both limits at the exact edge. The solver evaluates
+                    // fixed PWM in the interior of each interval as well.
+                    loop {
+                        let edge = clock.next_edge(start);
+                        let limit = edge.min(end);
+                        let value = clock.voltage(start + (limit - start) / 2.0);
+                        points.extend([[start, value], [limit, value]]);
+                        if edge > end {
+                            break;
+                        }
+                        if edge == end {
+                            let next = clock.next_edge(edge);
+                            points.push([end, clock.voltage(edge + (next - edge) / 2.0)]);
+                            break;
+                        }
+                        start = edge;
+                    }
+                    points
+                }
+                Kind::TimedSwitch(switch) => {
+                    preview.unit = "state";
+                    let state = |time| u8::from(switch.closed(time)) as f64;
+                    let mut points = vec![[0.0, state(0.0)]];
+                    if switch.at > 0.0 && switch.closed(0.0) != switch.closed(stop) {
+                        let at = switch.at.min(stop);
+                        points.extend([[at, state(0.0)], [at, state(at)]]);
+                    }
+                    preview.mark(switch.at, stop, "switch");
+                    points.push([stop, state(stop)]);
+                    points
+                }
+                _ => unreachable!("expected a time-dependent device"),
+            };
+        }
+        _ => return Err(Error::invalid(id, "This part has no source preview")),
+    }
+    if preview.points.iter().any(|point| !point[1].is_finite()) {
+        return Err(Error::new("simulationFailed", "Non-finite waveform value"));
+    }
+    Ok(preview)
+}
+
+impl SourcePreview {
+    fn mark(&mut self, time: f64, stop: f64, kind: &'static str) {
+        if time <= stop || same_clock_time(time, stop) {
+            self.events.push(PreviewEvent {
+                time: time.min(stop),
+                kind,
+            });
+        }
+    }
+}
+
+fn control_points(
+    equation: &Equation,
+    period: f64,
+    stop: f64,
+) -> Result<(Vec<[f64; 2]>, bool), Error> {
+    let first_value = equation.source_value(0.0);
+    if matches!(equation, Equation::Constant(_)) {
+        return Ok((vec![[0.0, first_value], [stop, first_value]], false));
+    }
+    let time = |tick: u64| tick as f64 * period;
+    let value = |tick| equation.source_value(time(tick));
+    // Beyond the last consecutive integer in f64 the solver's tick clock
+    // itself would stop advancing.
+    let upper = (stop / period).ceil() as u64;
+    if upper >= 1 << 53 {
+        return Err(Error::new(
+            "simulationFailed",
+            "Time step below clock resolution",
+        ));
+    }
+    let last = upper - u64::from(time(upper) > stop && !same_clock_time(time(upper), stop));
+    let last_value = value(last);
+    let mut points = vec![[0.0, first_value]];
+    if first_value == last_value {
+        points.push([stop, last_value]);
+        return Ok((points, false));
+    }
+
+    // Step and clamped ramp are monotonic. Find the active span in ticks
+    // without iterating through a potentially long leading or trailing hold.
+    let first_change = first_tick(last, |tick| value(tick) != first_value);
+    let last_change = first_tick(last, |tick| value(tick) == last_value);
+    let span = last_change - first_change;
+    let intervals = span.min((MAX_POINTS - 3) as u64);
+    for i in 0..=intervals {
+        let tick = first_change + i * span / intervals.max(1);
+        let at = time(tick);
+        points.push([
+            if same_clock_time(at, stop) { stop } else { at },
+            value(tick),
+        ]);
+    }
+    if points.last().expect("initial point")[0] < stop {
+        points.push([stop, last_value]);
+    }
+    Ok((points, intervals < span))
+}
+
+/// First tick for which a monotonic predicate becomes true.
+fn first_tick(mut high: u64, predicate: impl Fn(u64) -> bool) -> u64 {
+    let mut low = 0;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if predicate(mid) {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    low
+}

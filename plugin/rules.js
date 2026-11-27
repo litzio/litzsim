@@ -96,3 +96,9 @@ export function renameProblem(error) {
 export function sumParameterOps(id, key, value) {
   return [{ op: "setParameter", id, key, value }];
 }
+
+const PREVIEW_SOURCES = new Set(["constant", "step", "ramp", "dc", "sine", "pwm", "timedSwitch"]);
+
+export function sourcePreviewRequest(document, partId) {
+  return PREVIEW_SOURCES.has(document.parts[partId]?.type) ? { document, partId } : null;
+}

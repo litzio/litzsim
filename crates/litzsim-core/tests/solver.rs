@@ -1,6 +1,6 @@
 use litzsim_core::{
     circuit::Document,
-    solver::{simulate, simulate_with_warnings},
+    solver::{simulate, simulate_with_warnings, source_preview},
 };
 use serde_json::{Value, json};
 use std::time::Instant;
@@ -113,6 +113,176 @@ fn control_blocks_sample_in_dependency_order_and_hold_between_ticks() {
     let wave = simulate(&document(&decimal), || false).unwrap();
     let step = channel(&wave, "STEP1_out");
     assert_eq!(wave.rows().last().unwrap()[step], -1.0);
+}
+
+#[test]
+fn source_preview_uses_the_recorded_control_ticks_and_step_clock_tolerance() {
+    let mut circuit: Value = serde_json::from_str(CONTROL).unwrap();
+    for at in [0.75_f64.next_down(), 0.75, 0.75_f64.next_up()] {
+        circuit["parts"]["STEP1"]["parameters"]["stepTime_s"] = json!(at);
+        let doc = document(&circuit);
+        let wave = simulate(&doc, || false).unwrap();
+        for id in ["CONST1", "STEP1", "RAMP1"] {
+            let preview = source_preview(&doc, id).unwrap();
+            let column = channel(&wave, &format!("{id}_out"));
+            assert!(preview.hold_samples);
+            for [time, value] in preview.points {
+                let row = wave.rows().rfind(|row| row[0] == time).unwrap();
+                assert_eq!(value, row[column], "{id} at {time}");
+            }
+        }
+        let step = source_preview(&doc, "STEP1").unwrap();
+        assert_eq!(step.points, [[0.0, 1.0], [0.75, -1.0], [1.5, -1.0]]);
+        assert_eq!(step.events[0].time, at);
+    }
+    let ramp = source_preview(&document(&circuit), "RAMP1").unwrap();
+    assert_eq!(ramp.events[0].time, 0.875);
+
+    circuit["simulation"]["controlSamplePeriod_s"] = json!(1.0 / 4096.0);
+    let doc = document(&circuit);
+    let wave = simulate(&doc, || false).unwrap();
+    let column = channel(&wave, "RAMP1_out");
+    let ramp = source_preview(&doc, "RAMP1").unwrap();
+    assert!(ramp.decimated);
+    assert_eq!(ramp.points.len(), 256);
+    assert_eq!(ramp.points[1][0], 0.125 + 1.0 / 4096.0);
+    assert_eq!(ramp.points[254], [0.875, 3.0]);
+    for [time, value] in ramp.points {
+        let row = wave.rows().rfind(|row| row[0] == time).unwrap();
+        assert_eq!(value, row[column], "ramp at {time}");
+    }
+}
+
+#[test]
+fn source_preview_matches_ideal_source_records_and_preserves_pwm_edges() {
+    let mut circuit = json!({
+        "version": 1,
+        "simulation": { "timeStep_s": 0.03125, "stopTime_s": 0.6875 },
+        "parts": {
+            "V": { "type": "dc", "parameters": { "voltage_V": 2 }, "record": {"voltage": true} },
+            "G": { "type": "ground", "parameters": {} },
+            "M": { "type": "voltmeter", "parameters": {} }
+        },
+        "nets": { "p": ["V.p", "M.p"], "n": ["V.n", "G.ref", "M.n"] },
+        "layout": {}
+    });
+    let doc = document(&circuit);
+    let wave = simulate(&doc, || false).unwrap();
+    let column = channel(&wave, "V_V");
+    let dc = source_preview(&doc, "V").unwrap();
+    assert_eq!(
+        dc.points,
+        [
+            [0.0, wave.rows().next().unwrap()[column]],
+            [0.6875, wave.rows().last().unwrap()[column]]
+        ]
+    );
+
+    circuit["parts"]["V"] = json!({"type": "sine", "parameters": {
+        "amplitude_V": 2, "frequency_Hz": 4
+    }, "record": {"voltage": true}});
+    let doc = document(&circuit);
+    let wave = simulate(&doc, || false).unwrap();
+    let sine = source_preview(&doc, "V").unwrap();
+    assert_eq!(sine.points.len(), 256);
+    assert_eq!(sine.points[0], [0.0, wave.rows().next().unwrap()[column]]);
+    assert_eq!(
+        sine.points[255],
+        [0.6875, wave.rows().last().unwrap()[column]]
+    );
+    circuit["simulation"]["stopTime_s"] = json!(1);
+    assert_eq!(
+        source_preview(&document(&circuit), "V").unwrap().points[255][0],
+        0.75
+    );
+
+    circuit["parts"]["V"] = json!({"type": "pwm", "parameters": {
+        "high_V": 4, "duty": 0.5, "frequency_Hz": 4
+    }});
+    circuit["nets"] = json!({"p": ["V.out", "M.p"], "n": ["V.ref", "G.ref", "M.n"]});
+    circuit["simulation"]["stopTime_s"] = json!(0.6875);
+    let doc = document(&circuit);
+    let wave = simulate(&doc, || false).unwrap();
+    let column = channel(&wave, "M_V");
+    let pwm = source_preview(&doc, "V").unwrap();
+    assert_eq!(pwm.points.last().unwrap()[0], 0.6875);
+    for edge in [0.125, 0.25, 0.375, 0.5, 0.625] {
+        let plotted: Vec<_> = pwm
+            .points
+            .iter()
+            .filter(|point| point[0] == edge)
+            .map(|point| point[1])
+            .collect();
+        let recorded: Vec<_> = wave
+            .rows()
+            .filter(|row| row[0] == edge)
+            .map(|row| row[column])
+            .collect();
+        assert_eq!(plotted.len(), 2);
+        assert_eq!(plotted, recorded);
+    }
+    circuit["simulation"]["stopTime_s"] = json!(1);
+    assert_eq!(
+        source_preview(&document(&circuit), "V")
+            .unwrap()
+            .points
+            .last()
+            .unwrap()[0],
+        0.75
+    );
+}
+
+#[test]
+fn source_preview_returns_the_same_parameter_errors_as_simulation() {
+    for (example, id, parameter, value, message) in [
+        (
+            CONTROL,
+            "RAMP1",
+            "slope_per_s",
+            -1.0,
+            "Ramp slope must point toward finalValue",
+        ),
+        (
+            CONTROL,
+            "RAMP1",
+            "startTime_s",
+            -1.0,
+            "startTime_s must be nonnegative",
+        ),
+        (
+            CONTROL,
+            "STEP1",
+            "stepTime_s",
+            -1.0,
+            "stepTime_s must be nonnegative",
+        ),
+        (BUCK, "PWM", "duty", 1.0, "PWM duty must be in (0, 1)"),
+        (
+            LOAD_STEP,
+            "SW1",
+            "switchTime_s",
+            -1.0,
+            "switchTime_s must be nonnegative",
+        ),
+        (
+            RC,
+            "V1",
+            "internalResistance_ohm",
+            -1.0,
+            "internalResistance_ohm must be nonnegative",
+        ),
+    ] {
+        let mut circuit: Value = serde_json::from_str(example).unwrap();
+        circuit["parts"][id]["parameters"][parameter] = json!(value);
+        let doc = document(&circuit);
+        let simulation = simulate(&doc, || false).unwrap_err();
+        let preview = source_preview(&doc, id).unwrap_err();
+        assert_eq!(simulation.message, message);
+        assert_eq!(
+            serde_json::to_value(preview).unwrap(),
+            serde_json::to_value(simulation).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -364,6 +534,19 @@ fn timed_switch_closes_a_parallel_rc_load_off_grid() {
     let at_edge: Vec<_> = wave.rows().filter(|row| row[0] == edge).collect();
     assert_eq!(at_edge.len(), 2);
     assert_eq!(at_edge[0][v], at_edge[1][v]);
+    let preview = source_preview(&document(&circuit), "SW1").unwrap();
+    assert_eq!(preview.events[0].time, edge);
+    let recorded = at_edge
+        .iter()
+        .map(|row| if row[sw_v] == 0.0 { 1.0 } else { 0.0 });
+    assert!(
+        preview
+            .points
+            .iter()
+            .filter(|point| point[0] == edge)
+            .map(|point| point[1])
+            .eq(recorded)
+    );
     let mut closed = false;
     for row in wave.rows() {
         let expected = if closed {

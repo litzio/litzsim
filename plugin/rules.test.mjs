@@ -15,7 +15,7 @@ import {
 import { CATEGORIES, DUTY_UPDATE_LABELS, PARTS, RECORDING_LABELS, ROTATE_SHORTCUT, libraryCategories, partLabel, shortcutOf } from "./parts.js";
 import {
   deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex, selectionBox,
-  sumParameterOps, undoRenamed, wireStyle,
+  sourcePreviewRequest, sumParameterOps, undoRenamed, wireStyle,
 } from "./rules.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -164,6 +164,23 @@ test("new control and switch types use the same display names in the library and
     assert.equal(entries.find(part => part.type === type)?.label, label);
     assert.equal(partLabel(type), label);
   }
+});
+
+test("properties request a preview for the selected source using the current document", async () => {
+  const sheet = await call("inspect", { file: `${root}examples/control-signals.litzsim` });
+  const request = sourcePreviewRequest(sheet.document, "RAMP1");
+  assert.deepEqual(request, { document: sheet.document, partId: "RAMP1" });
+  assert.equal(sourcePreviewRequest(sheet.document, "SUM1"), null);
+  const buck = await call("inspect", { file: `${root}examples/buck-voltage-loop.litzsim` });
+  assert.equal(sourcePreviewRequest(buck.document, "PWM"), null);
+  const before = await call("sourcePreview", request);
+  const changed = await apply(sheet, [{ op: "setParameter", id: "RAMP1", key: "slope_per_s", value: 8 }]);
+  const after = await call("sourcePreview", sourcePreviewRequest(changed.document, "RAMP1"));
+  assert.notDeepEqual(before.points, after.points);
+  assert.deepEqual(after.events, [{ kind: "rampEnd", time: 0.5 }]);
+  const invalid = await apply(changed, [{ op: "setParameter", id: "RAMP1", key: "slope_per_s", value: -8 }]);
+  const rejected = await send("sourcePreview", sourcePreviewRequest(invalid.document, "RAMP1"));
+  assert.equal(rejected.error.message, "Ramp slope must point toward finalValue");
 });
 
 test("a new circuit with only a changed simulation setting is unsaved", async () => {
