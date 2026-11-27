@@ -87,15 +87,16 @@ pub fn source_preview(document: &Document, id: &str) -> Result<SourcePreview, Er
                     // fixed PWM in the interior of each interval as well.
                     loop {
                         let edge = clock.next_edge(start);
-                        let limit = edge.min(end);
+                        let at_end = same_clock_time(edge, end);
+                        let limit = if at_end { end } else { edge.min(end) };
                         let value = clock.voltage(start + (limit - start) / 2.0);
                         points.extend([[start, value], [limit, value]]);
-                        if edge > end {
+                        if at_end {
+                            let next = clock.next_edge(end);
+                            points.push([end, clock.voltage(end + (next - end) / 2.0)]);
                             break;
                         }
-                        if edge == end {
-                            let next = clock.next_edge(edge);
-                            points.push([end, clock.voltage(edge + (next - edge) / 2.0)]);
+                        if edge > end {
                             break;
                         }
                         start = edge;
@@ -105,13 +106,21 @@ pub fn source_preview(document: &Document, id: &str) -> Result<SourcePreview, Er
                 Kind::TimedSwitch(switch) => {
                     preview.unit = "state";
                     let state = |time| u8::from(switch.closed(time)) as f64;
-                    let mut points = vec![[0.0, state(0.0)]];
-                    if switch.at > 0.0 && switch.closed(0.0) != switch.closed(stop) {
-                        let at = switch.at.min(stop);
-                        points.extend([[at, state(0.0)], [at, state(at)]]);
+                    let initial = state(0.0);
+                    let final_state = state(stop);
+                    let at = if same_clock_time(switch.at, stop) {
+                        stop
+                    } else {
+                        switch.at
+                    };
+                    let mut points = vec![[0.0, initial]];
+                    if initial != final_state {
+                        points.extend([[at, initial], [at, final_state]]);
                     }
-                    preview.mark(switch.at, stop, "switch");
-                    points.push([stop, state(stop)]);
+                    preview.mark(at, stop, "switch");
+                    if points.last().expect("initial point")[0] < stop {
+                        points.push([stop, final_state]);
+                    }
                     points
                 }
                 _ => unreachable!("expected a time-dependent device"),

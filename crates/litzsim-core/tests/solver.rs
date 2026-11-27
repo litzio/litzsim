@@ -138,6 +138,27 @@ fn source_preview_uses_the_recorded_control_ticks_and_step_clock_tolerance() {
     let ramp = source_preview(&document(&circuit), "RAMP1").unwrap();
     assert_eq!(ramp.events[0].time, 0.875);
 
+    // A sample one ULP on either side of stop is evaluated at its own clock
+    // time, but its new held value becomes visible at the recorded stop time.
+    let sample = 0.75_f64;
+    for stop in [sample.next_down(), sample, sample.next_up()] {
+        circuit["simulation"]["stopTime_s"] = json!(stop);
+        let doc = document(&circuit);
+        let wave = simulate(&doc, || false).unwrap();
+        for id in ["STEP1", "RAMP1"] {
+            let preview = source_preview(&doc, id).unwrap();
+            let column = channel(&wave, &format!("{id}_out"));
+            let last = preview.points.len() - 1;
+            let mut recorded = wave.rows().rev();
+            let right = recorded.next().unwrap();
+            let left = recorded.next().unwrap();
+            assert_eq!(preview.points[last], [stop, right[column]]);
+            assert_eq!(preview.points[last - 1][1], left[column]);
+            assert_eq!(left[0], stop);
+        }
+    }
+
+    circuit["simulation"]["stopTime_s"] = json!(1.5);
     circuit["simulation"]["controlSamplePeriod_s"] = json!(1.0 / 4096.0);
     let doc = document(&circuit);
     let wave = simulate(&doc, || false).unwrap();
@@ -230,6 +251,40 @@ fn source_preview_matches_ideal_source_records_and_preserves_pwm_edges() {
             .unwrap()[0],
         0.75
     );
+}
+
+#[test]
+fn source_preview_keeps_both_pwm_values_when_falling_edge_rounds_to_stop() {
+    let circuit = json!({
+        "version": 1,
+        "simulation": {
+            "timeStep_s": 0.000001, "stopTime_s": 0.000011, "controlSamplePeriod_s": 0.000001
+        },
+        "parts": {
+            "V": {"type": "pwm", "parameters": {"frequency_Hz": 50000, "duty": 0.55, "high_V": 5}},
+            "M": {"type": "voltmeter", "parameters": {}},
+            "G": {"type": "ground", "parameters": {}},
+            "K": {"type": "constant", "parameters": {"value": 1}, "record": {"output": true}}
+        },
+        "nets": {"p": ["V.out", "M.p"], "n": ["V.ref", "G.ref", "M.n"]},
+        "layout": {}
+    });
+    let doc = document(&circuit);
+    let stop = doc.stop_time_s();
+    assert_eq!(0.55 / 50_000.0, stop.next_up());
+    let wave = simulate(&doc, || false).unwrap();
+    let meter = channel(&wave, "M_V");
+    let recorded: Vec<_> = wave
+        .rows()
+        .rev()
+        .take(2)
+        .map(|row| [row[0], row[meter]])
+        .collect();
+    assert_eq!(recorded, [[stop, 0.0], [stop, 5.0]]);
+
+    let preview = source_preview(&doc, "V").unwrap();
+    let plotted: Vec<_> = preview.points.iter().rev().take(2).copied().collect();
+    assert_eq!(plotted, recorded);
 }
 
 #[test]
@@ -712,7 +767,8 @@ fn timed_switch_and_control_share_final_rows_with_one_ulp_clock_offsets() {
                 assert_eq!(continued.len(), 2);
                 for stop in adjacent(edge) {
                     circuit["simulation"]["stopTime_s"] = json!(stop);
-                    let short = simulate(&document(&circuit), || false).unwrap();
+                    let short_doc = document(&circuit);
+                    let short = simulate(&short_doc, || false).unwrap();
                     let final_rows: Vec<_> = short.rows().filter(|row| row[0] == stop).collect();
                     assert_eq!(final_rows.len(), 2);
                     assert_eq!(short.rows().last().unwrap()[0], stop);
@@ -728,6 +784,13 @@ fn timed_switch_and_control_share_final_rows_with_one_ulp_clock_offsets() {
                     assert!(final_rows[0][sw_v] > 2.0);
                     assert_eq!(final_rows[1][sw_v], 0.0);
                     assert!(final_rows[1][sw_i] > 2e-3);
+                    let preview = source_preview(&short_doc, "SW1").unwrap();
+                    let states: Vec<_> = final_rows
+                        .iter()
+                        .map(|row| [row[0], f64::from(row[sw_v] == 0.0)])
+                        .collect();
+                    assert_eq!(&preview.points[preview.points.len() - 2..], states);
+                    assert_eq!(preview.events[0].time, stop);
                     for (short, long) in final_rows.into_iter().zip(&continued) {
                         for index in [v, sw_v, sw_i] {
                             assert!((short[index] - long[index]).abs() <= 1e-12);
