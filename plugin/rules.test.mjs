@@ -14,7 +14,7 @@ import {
 } from "./plot.js";
 import { CATEGORIES, DUTY_UPDATE_LABELS, PARTS, RECORDING_LABELS, ROTATE_SHORTCUT, libraryCategories, partLabel, shortcutOf } from "./parts.js";
 import {
-  deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex, selectionBox,
+  deleteSelection, isDirty, nearestPair, pwmChoices, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex, selectionBox,
   sourcePreviewRequest, sumParameterOps, undoRenamed, wireStyle,
 } from "./rules.js";
 
@@ -80,6 +80,27 @@ test("area selection collects intersecting parts and wires and deletes them in o
   assert.deepEqual(undone.document, sheet.document);
 });
 
+test("sampler SOC and control task edits use core PWM references", async () => {
+  const sheet = await apply(await rc(), [
+    { op: "add", type: "pwm" },
+    { op: "add", type: "dutyPwm" },
+    { op: "add", type: "sampler", grid: [0, 8] },
+  ]);
+  assert.deepEqual(pwmChoices(sheet.document.parts).map(choice => choice.value), ["PWM1", "PWM2"]);
+  assert.deepEqual(pwmChoices(sheet.document.parts, true).map(choice => choice.value), ["PWM2"]);
+  assert.equal(partLabel("sampler"), "샘플러");
+  assert.equal(sheet.layout.pins["ZOH1.in"].signalDirection, "input");
+  assert.equal(sheet.layout.pins["ZOH1.out"].signalDirection, "output");
+  assert.deepEqual(sheet.document.parts.ZOH1.parameters.soc, { mode: "task", position: 0 });
+  const timed = await apply(sheet, [
+    { op: "setControlTask", task: { mode: "pwm", pwm: "PWM2", position: 0.75 } },
+    { op: "setParameter", id: "ZOH1", key: "soc", value: { mode: "onCenter", pwm: "PWM2" } },
+    ...renameOps("PWM2", "Carrier"),
+  ]);
+  assert.equal(timed.document.simulation.controlTask.pwm, "Carrier");
+  assert.equal(timed.document.parts.ZOH1.parameters.soc.pwm, "Carrier");
+});
+
 test("R places a resistor and Shift+R rotates the selection", () => {
   assert.equal(shortcutOf({ key: "r" }), PARTS.resistor.key);
   assert.equal(PARTS.resistor.key, "R");
@@ -142,7 +163,7 @@ test("the control library, recording and wire styles follow the core layout", as
   assert.equal(control.label, "제어");
   assert.deepEqual(control.parts.map(part => [part.type, part.key]), [
     ["pwm", "P"], ["voltageSensor", undefined], ["currentSensor", undefined], ["constant", undefined],
-    ["step", undefined], ["ramp", undefined], ["sum", undefined], ["gain", undefined], ["limiter", undefined],
+    ["step", undefined], ["ramp", undefined], ["sum", undefined], ["gain", undefined], ["sampler", undefined], ["limiter", undefined],
     ["integrator", undefined], ["pi", undefined], ["dutyPwm", undefined],
   ]);
   assert.ok(categories.find(group => group.id === "switches").parts.some(part => part.type === "timedSwitch"));

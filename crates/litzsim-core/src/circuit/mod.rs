@@ -79,11 +79,11 @@ impl std::error::Error for Error {}
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
-pub struct Document(CircuitV1);
+pub struct Document(Circuit);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircuitV1 {
+pub(crate) struct Circuit {
     #[serde(deserialize_with = "integer")]
     version: i32,
     #[serde(deserialize_with = "unique_map")]
@@ -273,18 +273,71 @@ pub(crate) struct Simulation {
     )]
     pub(crate) output_step_s: Option<f64>,
     #[serde(
-        rename = "controlSamplePeriod_s",
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "present"
     )]
-    pub(crate) control_sample_period_s: Option<f64>,
+    #[serde(rename = "controlTask")]
+    pub(crate) control_task: Option<ControlTask>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "present"
     )]
     model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ControlTask {
+    Fixed {
+        #[serde(rename = "period_s")]
+        period_s: f64,
+        phase: f64,
+    },
+    Pwm {
+        pwm: String,
+        position: f64,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum Soc {
+    Task { position: f64 },
+    OnCenter { pwm: String },
+    OffCenter { pwm: String },
+}
+
+impl Soc {
+    pub(crate) fn read(id: &str, parameters: &BTreeMap<String, Value>) -> Result<Self, Error> {
+        let Some(value) = parameters.get("soc").filter(|_| parameters.len() == 1) else {
+            return Err(Error::invalid(
+                id,
+                "Sampler requires a single soc parameter",
+            ));
+        };
+        let soc = Self::deserialize(value)
+            .map_err(|error| Error::invalid(id, format!("Invalid soc: {error}")))?;
+        if let Self::Task { position } = soc {
+            validate_position(id, position)?;
+        }
+        Ok(soc)
+    }
+
+    fn pwm(&self) -> Option<&str> {
+        match self {
+            Self::Task { .. } => None,
+            Self::OnCenter { pwm } | Self::OffCenter { pwm } => Some(pwm),
+        }
+    }
+}
+
+fn validate_position(id: &str, position: f64) -> Result<(), Error> {
+    if !(0.0..=1.0).contains(&position) {
+        return Err(Error::invalid(id, "Clock position must be in [0, 1]"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -327,8 +380,8 @@ impl Document {
     }
 
     pub fn new() -> Self {
-        Self(CircuitV1 {
-            version: 1,
+        Self(Circuit {
+            version: 2,
             parts: BTreeMap::new(),
             nets: BTreeMap::new(),
             layout: BTreeMap::new(),
@@ -337,7 +390,7 @@ impl Document {
                 time_step_s: 1e-6,
                 stop_time_s: 0.001,
                 output_step_s: None,
-                control_sample_period_s: None,
+                control_task: None,
                 model: None,
             },
         })
@@ -348,7 +401,7 @@ impl Document {
     }
 
     fn read(bytes: &[u8]) -> Result<(Self, bool), Error> {
-        let mut circuit: CircuitV1 = serde_json::from_slice(bytes)
+        let mut circuit: Circuit = serde_json::from_slice(bytes)
             .map_err(|error| Error::new("invalidCircuit", error.to_string()))?;
         let mut has_legacy_sum = false;
         for (id, part) in &mut circuit.parts {
@@ -406,7 +459,7 @@ impl Document {
         self.0.simulation.stop_time_s
     }
 
-    pub(crate) fn circuit(&self) -> &CircuitV1 {
+    pub(crate) fn circuit(&self) -> &Circuit {
         &self.0
     }
 
@@ -455,7 +508,7 @@ impl Default for Document {
     }
 }
 
-impl CircuitV1 {
+impl Circuit {
     pub(crate) fn is_signal_net(&self, pins: &[String]) -> bool {
         // The fixed terminals of a validated net already agree on its domain.
         pins.iter()
@@ -480,13 +533,16 @@ impl CircuitV1 {
     }
 
     fn validate(&self) -> Result<(), Error> {
-        if self.version != 1 {
+        if self.version != 2 {
             return Err(Error::invalid(
                 "version",
                 format!("unsupported circuit version: {}", self.version),
             ));
         }
         self.simulation.validate()?;
+        if let Some(task) = &self.simulation.control_task {
+            self.validate_control_task(task)?;
+        }
         for (id, part) in &self.parts {
             if !identifier(id) {
                 return Err(Error::invalid(id, "invalid part ID"));
@@ -507,6 +563,10 @@ impl CircuitV1 {
                     id,
                     "part does not support waveform recording",
                 ));
+            }
+            if part.kind == "sampler" {
+                self.validate_soc(id, &part.parameters)?;
+                continue;
             }
             if part.kind == "sum" {
                 Sum::read(id, &part.parameters)?;
@@ -555,6 +615,51 @@ impl CircuitV1 {
             }
         }
         Ok(())
+    }
+
+    fn validate_control_task(&self, task: &ControlTask) -> Result<(), Error> {
+        let target = "controlTask";
+        match task {
+            ControlTask::Fixed { period_s, phase } => {
+                if !period_s.is_finite() || *period_s <= 0.0 {
+                    return Err(Error::invalid(
+                        target,
+                        "Control task period must be positive and finite",
+                    ));
+                }
+                validate_position(target, *phase)
+            }
+            ControlTask::Pwm { pwm, position } => {
+                self.validate_pwm(target, pwm, true)?;
+                validate_position(target, *position)
+            }
+        }
+    }
+
+    fn validate_soc(&self, id: &str, parameters: &BTreeMap<String, Value>) -> Result<(), Error> {
+        if let Some(pwm) = Soc::read(id, parameters)?.pwm() {
+            self.validate_pwm(id, pwm, false)?;
+        }
+        Ok(())
+    }
+
+    fn validate_pwm(&self, target: &str, pwm: &str, duty_input_only: bool) -> Result<(), Error> {
+        if self
+            .parts
+            .get(pwm)
+            .is_some_and(|part| part.kind == "dutyPwm" || !duty_input_only && part.kind == "pwm")
+        {
+            return Ok(());
+        }
+        let expected = if duty_input_only {
+            "a duty input PWM"
+        } else {
+            "a PWM"
+        };
+        Err(Error::invalid(
+            target,
+            format!("{pwm} must identify {expected}"),
+        ))
     }
 
     fn require_part(&self, id: &str) -> Result<&Part, Error> {
@@ -645,14 +750,6 @@ impl Simulation {
                     "must be a positive integer multiple of timeStep_s",
                 ));
             }
-        }
-        if let Some(period) = self.control_sample_period_s
-            && (!period.is_finite() || period <= 0.0)
-        {
-            return Err(Error::invalid(
-                "controlSamplePeriod_s",
-                "expected positive finite control sample period",
-            ));
         }
         Ok(())
     }

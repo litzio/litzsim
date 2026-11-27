@@ -9,8 +9,8 @@ const BUCK: &[u8] = include_bytes!("../../../../examples/buck.litzsim");
 const PFC: &[u8] = include_bytes!("../../../../examples/pfc.litzsim");
 
 #[test]
-fn archived_examples_keep_v1_data_and_have_canonical_bytes() {
-    // SHA-256 of the canonical v1 output captured before adding mirror support.
+fn archived_examples_keep_their_data_and_have_canonical_bytes() {
+    // Compare against the canonical v1 baseline after reverting only the version bump.
     for (bytes, before_mirror) in [
         (
             RC,
@@ -30,7 +30,12 @@ fn archived_examples_keep_v1_data_and_have_canonical_bytes() {
         let reopened = Document::from_bytes(&saved).unwrap();
         assert_eq!(original, reopened);
         assert_eq!(saved, reopened.to_bytes());
-        assert_eq!(revision(&saved), before_mirror);
+        let version_one =
+            std::str::from_utf8(&saved)
+                .unwrap()
+                .replacen(r#""version": 2"#, r#""version": 1"#, 1);
+        assert_eq!(revision(version_one.as_bytes()), before_mirror);
+        assert!(Document::from_bytes(version_one.as_bytes()).is_err());
         let mut source: Value = serde_json::from_slice(bytes).unwrap();
         let mut canonical: Value = serde_json::from_slice(&saved).unwrap();
         normalize_numbers(&mut source);
@@ -606,7 +611,7 @@ fn feedback_parts_round_trip_through_save_layout_and_undo() {
         {"op": "setParameter", "id": "INT1", "key": "initialValue", "value": 0.25},
         {"op": "setParameter", "id": "PI1", "key": "ki", "value": 125},
         {"op": "setRecording", "id": "PI1", "quantity": "output", "enabled": true},
-        {"op": "setSimulation", "key": "controlSamplePeriod_s", "value": 0.0001}
+        {"op": "setControlTask", "task": {"mode": "fixed", "period_s": 0.0001, "phase": 0}}
     ]))
     .unwrap();
     let edited = apply(&original, &revision, &ops).unwrap();
@@ -622,6 +627,53 @@ fn feedback_parts_round_trip_through_save_layout_and_undo() {
         json!(crate::layout::layout(&edited.document)),
     );
     let restored = undo(&opened.document, &opened.revision, &revision, &original).unwrap();
+    assert_eq!(restored.document.to_bytes(), original.to_bytes());
+}
+
+#[test]
+fn pwm_clock_references_follow_rename_and_survive_save_and_undo() {
+    let bytes = include_bytes!("../../../../examples/buck-dual-loop.litzsim");
+    let original = Document::from_bytes(bytes).unwrap();
+    let delete = |id: &str| Operation::Delete { id: id.into() };
+    let renamed = apply(&original, &original.revision(), &[rename("PWM", "Carrier")])
+        .unwrap()
+        .document;
+    let path = SaveTestDirectory::new("soc-reference");
+    let file = path.0.join("soc.litzsim");
+    save(&file, &renamed, SaveMode::New).unwrap();
+    let reopened = open(&file).unwrap().document;
+    assert_eq!(renamed.to_bytes(), reopened.to_bytes());
+    let data = json!(reopened);
+    assert_eq!(data["simulation"]["controlTask"]["pwm"], "Carrier");
+    assert_eq!(
+        data["parts"]["ZOH_I"]["parameters"]["soc"]["pwm"],
+        "Carrier"
+    );
+
+    let refused = apply(&reopened, &reopened.revision(), &[delete("Carrier")]).unwrap_err();
+    assert!(refused.message.contains("control task"));
+    let without_task = apply(
+        &reopened,
+        &reopened.revision(),
+        &[Operation::SetControlTask { task: None }],
+    )
+    .unwrap()
+    .document;
+    let refused = apply(
+        &without_task,
+        &without_task.revision(),
+        &[delete("Carrier")],
+    )
+    .unwrap_err();
+    assert!(refused.message.contains("ZOH_I"));
+
+    let restored = undo(
+        &reopened,
+        &reopened.revision(),
+        &original.revision(),
+        &original,
+    )
+    .unwrap();
     assert_eq!(restored.document.to_bytes(), original.to_bytes());
 }
 

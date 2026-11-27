@@ -50,11 +50,12 @@ fn averaged_buck() -> Vec<CycleMean> {
         limits: (0.0, 0.9),
     };
     let mut state = [0.0, 0.25];
+    let mut sampled_current = 0.0; // No previous on-center capture at startup.
     (0..CYCLES)
         .map(|cycle| {
             let reference = (cycle as f64 * PERIOD * 2500.0).min(TARGET);
             let requested_current = voltage_pi.sample(reference - state[0]).clamp(0.25, 4.0);
-            let duty = current_pi.sample(requested_current - state[1]);
+            let duty = current_pi.sample(requested_current - sampled_current);
             let load = if cycle < LOAD_STEP {
                 LOAD_BEFORE
             } else {
@@ -82,18 +83,21 @@ fn averaged_buck() -> Vec<CycleMean> {
                     state[j] = next;
                 }
             }
-            [sum[0] / SUBSTEPS as f64, sum[1] / SUBSTEPS as f64, duty]
+            // The next boundary task consumes the previous carrier's current capture.
+            // The averaged power stage represents it by that carrier's mean.
+            sampled_current = sum[1] / SUBSTEPS as f64;
+            [sum[0] / SUBSTEPS as f64, sampled_current, duty]
         })
         .collect()
 }
 
-fn switching_buck(input: &Value) -> Vec<CycleMean> {
+fn switching_buck(input: &Value) -> (Vec<CycleMean>, Vec<f64>) {
     let step = input["simulation"]["timeStep_s"].as_f64().unwrap();
     let document = Document::from_bytes(&serde_json::to_vec(&input).unwrap()).unwrap();
     let start = Instant::now();
     let wave = simulate(&document, || false).unwrap();
     let solve_time = start.elapsed();
-    let names = CHANNELS.map(str::to_owned);
+    let names = [CHANNELS[0], CHANNELS[1], CHANNELS[2], "I_REF_out"].map(str::to_owned);
     let current = wave
         .channels()
         .iter()
@@ -108,20 +112,23 @@ fn switching_buck(input: &Value) -> Vec<CycleMean> {
         "h={step}: minimum current {minimum_current} A"
     );
     assert_eq!(wave.rows().last().unwrap()[0], 0.012);
-    let means = (0..CYCLES)
+    let (means, references) = (0..CYCLES)
         .map(|cycle| {
             let from = cycle as f64 * PERIOD;
             let to = (cycle + 1) as f64 * PERIOD;
             let interval = wave.measure(&names, from, to).unwrap();
-            std::array::from_fn(|j| interval.channels[j].average.unwrap())
+            (
+                std::array::from_fn(|j| interval.channels[j].average.unwrap()),
+                interval.channels[3].average.unwrap(),
+            )
         })
-        .collect();
+        .unzip();
     eprintln!(
         "h={step}: {solve_time:?} solve, {:?} with statistics, {} rows, min I={minimum_current:.6} A",
         start.elapsed(),
         wave.rows().len()
     );
-    means
+    (means, references)
 }
 
 fn rmse(a: &[CycleMean], b: &[CycleMean]) -> CycleMean {
@@ -153,18 +160,32 @@ fn dual_loop_buck_tracks_the_reference_and_recovers_from_a_ccm_load_step() {
     let mut input: Value = serde_json::from_str(EXAMPLE).unwrap();
     let step = input["simulation"]["timeStep_s"].as_f64().unwrap();
     assert_eq!(step, 1e-7);
-    let nominal = switching_buck(&input);
+    let (nominal, commands) = switching_buck(&input);
     input["simulation"]["timeStep_s"] = json!(2.0 * step);
-    let coarse = switching_buck(&input);
+    let (coarse, _) = switching_buck(&input);
     input["simulation"]["timeStep_s"] = json!(step / 2.0);
-    let fine = switching_buck(&input);
+    let (fine, _) = switching_buck(&input);
 
     for (window, resistance) in [(500..600, LOAD_BEFORE), (1000..1200, LOAD_AFTER)] {
         let cycles = &nominal[window.clone()];
         let mean = |j: usize| cycles.iter().map(|row| row[j]).sum::<f64>() / cycles.len() as f64;
         let (voltage, inductor) = (mean(0), mean(1));
         let load = voltage / resistance;
-        eprintln!("cycles {window:?}: V={voltage:.6}, I={inductor:.6}, load={load:.6}");
+        let command = commands[window.clone()].iter().sum::<f64>() / cycles.len() as f64;
+        eprintln!(
+            "cycles {window:?}: V={voltage:.6}, I={inductor:.6}, load={load:.6}, Iref={command:.6}"
+        );
+        assert!(
+            (inductor - command).abs() <= 0.005,
+            "mean current {inductor} A, command {command} A"
+        );
+        for (row, command) in cycles.iter().zip(&commands[window]) {
+            assert!(
+                (row[1] - command).abs() <= 0.005,
+                "cycle current {} A, command {command} A",
+                row[1]
+            );
+        }
         assert!((voltage - TARGET).abs() <= 0.025, "mean output {voltage} V");
         assert!(
             (inductor - load).abs() <= 0.005,

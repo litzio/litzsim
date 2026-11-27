@@ -1,5 +1,7 @@
 use super::same_clock_time;
-use crate::circuit::{Document, Error, Part, PinKind, RecordQuantity, part_definition};
+use crate::circuit::{
+    ControlTask, Document, Error, Part, PinKind, RecordQuantity, Soc, part_definition,
+};
 use crate::waves::Channel;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -35,6 +37,7 @@ pub(super) enum Equation {
         max: f64,
     },
     DutyPwm,
+    Sampler,
 }
 
 impl Equation {
@@ -106,6 +109,7 @@ impl Equation {
                 }
             }
             "dutyPwm" => Self::DutyPwm,
+            "sampler" => Self::Sampler,
             _ => unreachable!("control library and equations use the same block types"),
         })
     }
@@ -132,24 +136,138 @@ impl Equation {
     }
 }
 
-pub(super) fn sample_period(document: &Document) -> Result<f64, Error> {
-    document
-        .circuit()
-        .simulation
-        .control_sample_period_s
-        .ok_or_else(|| {
-            Error::invalid(
-                "controlSamplePeriod_s",
-                "Control blocks require a controlSamplePeriod_s",
-            )
-        })
+#[derive(Clone, Copy)]
+pub(super) struct TickClock {
+    period: f64,
+    frequency: Option<f64>,
+    pub(super) position: f64,
+}
+
+impl TickClock {
+    fn fixed(period: f64, position: f64) -> Self {
+        Self {
+            period,
+            frequency: None,
+            position,
+        }
+    }
+
+    fn pwm(frequency: f64, position: f64) -> Self {
+        Self {
+            period: 1.0 / frequency,
+            frequency: Some(frequency),
+            position,
+        }
+    }
+
+    fn at_position(self, position: f64) -> Self {
+        Self { position, ..self }
+    }
+
+    pub(super) fn time(self, tick: u64) -> f64 {
+        let cycle = tick as f64 + self.position;
+        self.frequency
+            .map_or_else(|| cycle * self.period, |frequency| cycle / frequency)
+    }
+
+    pub(super) fn period(self) -> f64 {
+        self.period
+    }
+}
+
+fn pwm_frequency(document: &Document, id: &str) -> Result<f64, Error> {
+    let frequency = document.circuit().parts[id].parameters["frequency_Hz"]
+        .as_f64()
+        .expect("validated parameter");
+    if frequency <= 0.0 || !(1.0 / frequency).is_finite() {
+        return Err(Error::invalid(
+            id,
+            "PWM frequency must have a positive, finite period",
+        ));
+    }
+    Ok(frequency)
+}
+
+pub(super) fn task_clock(document: &Document) -> Result<TickClock, Error> {
+    Ok(match &document.circuit().simulation.control_task {
+        Some(ControlTask::Fixed { period_s, phase }) => TickClock::fixed(*period_s, *phase),
+        Some(ControlTask::Pwm { pwm, position }) => {
+            TickClock::pwm(pwm_frequency(document, pwm)?, *position)
+        }
+        None => {
+            return Err(Error::invalid(
+                "controlTask",
+                "Control blocks require a controlTask",
+            ));
+        }
+    })
+}
+
+enum SampleClock {
+    Periodic { clock: TickClock, tick: u64 },
+    PwmCenter { pwm: String, on: bool, next: f64 },
+}
+
+impl SampleClock {
+    fn new(document: &Document, task: TickClock, soc: Soc) -> Result<Self, Error> {
+        let (pwm, on) = match soc {
+            Soc::Task { position } => {
+                return Ok(Self::Periodic {
+                    clock: task.at_position(position),
+                    tick: 0,
+                });
+            }
+            Soc::OnCenter { pwm } => (pwm, true),
+            Soc::OffCenter { pwm } => (pwm, false),
+        };
+        let part = &document.circuit().parts[&pwm];
+        if part.kind == "dutyPwm" {
+            Ok(Self::PwmCenter {
+                pwm,
+                on,
+                next: f64::INFINITY,
+            })
+        } else {
+            let duty = part.parameters["duty"]
+                .as_f64()
+                .expect("validated parameter");
+            Ok(Self::Periodic {
+                clock: TickClock::pwm(pwm_frequency(document, &pwm)?, midpoint(on, duty)),
+                tick: 0,
+            })
+        }
+    }
+
+    fn next(&self) -> f64 {
+        match *self {
+            Self::Periodic { clock, tick } => clock.time(tick),
+            Self::PwmCenter { next, .. } => next,
+        }
+    }
+
+    fn advance(&mut self) {
+        match self {
+            Self::Periodic { tick, .. } => *tick += 1,
+            Self::PwmCenter { next, .. } => *next = f64::INFINITY,
+        }
+    }
+}
+
+fn midpoint(on: bool, duty: f64) -> f64 {
+    if on { duty / 2.0 } else { (1.0 + duty) / 2.0 }
+}
+
+struct Sampler {
+    index: usize,
+    clock: SampleClock,
+    boundary_input: Option<f64>,
 }
 
 struct Block<'a> {
     id: &'a str,
     equation: Equation,
     inputs: Vec<usize>,
-    needs_sense: bool,
+    deferred: bool,
     observed: bool,
 }
 
@@ -160,8 +278,10 @@ pub(super) struct Control<'a> {
     recorded: Vec<usize>,
     probes: Vec<(&'a str, usize)>,
     pwm_inputs: BTreeMap<&'a str, usize>,
-    period: f64,
+    clock: TickClock,
     tick: u64,
+    samplers: Vec<Sampler>,
+    captures: Vec<(usize, f64)>,
 }
 
 impl<'a> Control<'a> {
@@ -198,10 +318,12 @@ impl<'a> Control<'a> {
                 }
             }
         }
+        let clock = task_clock(document)?;
         let mut blocks = Vec::new();
+        let mut samplers = Vec::new();
         let mut recorded = Vec::new();
         let mut pwm_inputs = BTreeMap::new();
-        for (id, part) in parts {
+        for &(id, part) in &parts {
             let mut inputs = Vec::new();
             for (pin, _, _) in part
                 .pins()
@@ -216,6 +338,17 @@ impl<'a> Control<'a> {
                         format!("Unconnected signal input {terminal}: expected a signal output"),
                     )
                 })?;
+                let (sensor_id, source) = parts[*driver];
+                if part.kind != "sampler"
+                    && matches!(source.kind.as_str(), "voltageSensor" | "currentSensor")
+                {
+                    return Err(Error::invalid(
+                        sensor_id,
+                        format!(
+                            "Sensor {sensor_id} must feed a sampler before control input {terminal}"
+                        ),
+                    ));
+                }
                 inputs.push(*driver);
             }
             if part.record.output {
@@ -224,24 +357,28 @@ impl<'a> Control<'a> {
             if part.kind == "dutyPwm" {
                 pwm_inputs.insert(id.as_str(), blocks.len());
             }
+            if part.kind == "sampler" {
+                samplers.push(Sampler {
+                    index: blocks.len(),
+                    clock: SampleClock::new(document, clock, Soc::read(id, &part.parameters)?)?,
+                    boundary_input: None,
+                });
+            }
             blocks.push(Block {
                 id,
                 equation: Equation::from_part(id, part)?,
                 inputs,
-                needs_sense: false,
+                deferred: false,
                 observed: part.record.output,
             });
         }
         let order = evaluation_order(&blocks)?;
         for &index in &order {
             let block = &blocks[index];
-            blocks[index].needs_sense = matches!(block.equation, Equation::Sensor(..))
-                || block
-                    .inputs
-                    .iter()
-                    .any(|&driver| blocks[driver].needs_sense);
+            blocks[index].deferred =
+                matches!(block.equation, Equation::Sensor(..) | Equation::Sampler)
+                    || block.inputs.iter().any(|&driver| blocks[driver].deferred);
         }
-        let period = sample_period(document)?;
         // Probes share the driver's held value and recording events without
         // participating in the dependency graph.
         let probes = signal_probes
@@ -265,17 +402,27 @@ impl<'a> Control<'a> {
             recorded,
             probes,
             pwm_inputs,
-            period,
+            clock,
             tick: 0,
+            captures: Vec::with_capacity(samplers.len()),
+            samplers,
         }))
     }
 
-    pub(super) fn next_sample(&self) -> f64 {
-        self.tick as f64 * self.period
+    fn next_task(&self) -> f64 {
+        self.clock.time(self.tick)
+    }
+
+    pub(super) fn next_event(&self) -> f64 {
+        self.samplers
+            .iter()
+            .fold(self.next_task(), |next, sampler| {
+                next.min(sampler.clock.next())
+            })
     }
 
     pub(super) fn due(&self, time: f64) -> bool {
-        same_clock_time(self.next_sample(), time)
+        same_clock_time(self.next_task(), time)
     }
 
     pub(super) fn pwm_input(&self, id: &str) -> Option<usize> {
@@ -284,6 +431,91 @@ impl<'a> Control<'a> {
 
     pub(super) fn held(&self, index: usize) -> f64 {
         self.values[index]
+    }
+
+    pub(super) fn initially_known(&self, index: usize) -> bool {
+        self.due(0.0) && !self.blocks[index].deferred
+    }
+
+    pub(super) fn preserve_pwm_inputs(&mut self, id: &str) {
+        for sampler in &mut self.samplers {
+            if matches!(&sampler.clock, SampleClock::PwmCenter { pwm, .. } if pwm == id) {
+                let driver = self.blocks[sampler.index].inputs[0];
+                if !matches!(self.blocks[driver].equation, Equation::Sensor(..)) {
+                    sampler.boundary_input = Some(self.values[driver]);
+                }
+            }
+        }
+    }
+
+    pub(super) fn latch_pwm(&mut self, id: &str, cycle: u64, frequency: f64, duty: f64) {
+        for sampler in &mut self.samplers {
+            if let SampleClock::PwmCenter { pwm, on, next } = &mut sampler.clock
+                && pwm == id
+            {
+                *next = TickClock::pwm(frequency, midpoint(*on, duty)).time(cycle);
+            }
+        }
+    }
+
+    pub(super) fn capture(
+        &mut self,
+        time: f64,
+        include_unrecorded_changes: bool,
+        sense: impl FnMut(&str, RecordQuantity) -> f64,
+    ) -> Result<bool, Error> {
+        self.capture_due(time, include_unrecorded_changes, false, sense)
+    }
+
+    pub(super) fn capture_after_latch(
+        &mut self,
+        time: f64,
+        include_unrecorded_changes: bool,
+        sense: impl FnMut(&str, RecordQuantity) -> f64,
+    ) -> Result<bool, Error> {
+        self.capture_due(time, include_unrecorded_changes, true, sense)
+    }
+
+    fn capture_due(
+        &mut self,
+        time: f64,
+        include_unrecorded_changes: bool,
+        after_latch: bool,
+        mut sense: impl FnMut(&str, RecordQuantity) -> f64,
+    ) -> Result<bool, Error> {
+        // Capture simultaneously from the pre-event electrical and held signal values.
+        for sampler in &mut self.samplers {
+            // Discard the saved input after this boundary even if the SOC is later.
+            let boundary_input = if after_latch {
+                sampler.boundary_input.take()
+            } else {
+                None
+            };
+            if same_clock_time(sampler.clock.next(), time) {
+                let driver = self.blocks[sampler.index].inputs[0];
+                let source = &self.blocks[driver];
+                let value = match source.equation {
+                    Equation::Sensor(quantity, gain) => sense(source.id, quantity) * gain,
+                    _ => boundary_input.unwrap_or(self.values[driver]),
+                };
+                self.captures.push((sampler.index, value));
+                sampler.clock.advance();
+            }
+        }
+        let mut changed = false;
+        for (index, value) in self.captures.drain(..) {
+            let block = &self.blocks[index];
+            if !value.is_finite() {
+                return Err(Error::invalid(
+                    block.id,
+                    format!("Non-finite sampler output at {time} s"),
+                ));
+            }
+            changed |=
+                value != self.values[index] && (include_unrecorded_changes || block.observed);
+            self.values[index] = value;
+        }
+        Ok(changed)
     }
 
     /// Seed duties that can be determined without the initial electrical solve.
@@ -295,7 +527,7 @@ impl<'a> Control<'a> {
     }
 
     /// Evaluate direct dependencies in order, then hold all values until the next tick.
-    pub(super) fn sample(
+    pub(super) fn run_task(
         &mut self,
         initial_prepared: bool,
         include_unrecorded_changes: bool,
@@ -312,15 +544,18 @@ impl<'a> Control<'a> {
 
     fn evaluate(
         &mut self,
-        needs_sense: Option<bool>,
+        deferred: Option<bool>,
         include_unrecorded_changes: bool,
         mut sense: impl FnMut(&str, RecordQuantity) -> f64,
     ) -> Result<bool, Error> {
-        let time = self.next_sample();
+        let time = self.next_task();
         let mut changed = false;
+        let period = self.clock.period();
         for &index in &self.order {
             let block = &mut self.blocks[index];
-            if needs_sense.is_some_and(|required| block.needs_sense != required) {
+            if matches!(block.equation, Equation::Sampler)
+                || deferred.is_some_and(|required| block.deferred != required)
+            {
                 continue;
             }
             let input = |pin: usize| self.values[block.inputs[pin]];
@@ -342,7 +577,7 @@ impl<'a> Control<'a> {
                 Equation::Gain(gain) => *gain * input(0),
                 Equation::Limiter { min, max } => input(0).clamp(*min, *max),
                 Equation::Integrator { state, min, max } => {
-                    *state = (*state + input(0) * self.period).clamp(*min, *max);
+                    *state = (*state + input(0) * period).clamp(*min, *max);
                     *state
                 }
                 Equation::Pi {
@@ -353,7 +588,7 @@ impl<'a> Control<'a> {
                     max,
                 } => {
                     let error = input(0);
-                    let increment = (*ki * error) * self.period;
+                    let increment = (*ki * error) * period;
                     let integral = *state + increment;
                     let output = *kp * error + integral;
                     if !((output > *max && increment > 0.0) || (output < *min && increment < 0.0)) {
@@ -362,6 +597,7 @@ impl<'a> Control<'a> {
                     output.clamp(*min, *max)
                 }
                 Equation::DutyPwm => input(0).clamp(0.0, 1.0),
+                Equation::Sampler => unreachable!("samplers capture separately"),
             };
             if !value.is_finite() {
                 return Err(Error::invalid(
@@ -397,15 +633,26 @@ impl<'a> Control<'a> {
     }
 }
 
+fn task_inputs<'a>(block: &'a Block<'_>) -> &'a [usize] {
+    if matches!(block.equation, Equation::Sampler) {
+        &[]
+    } else {
+        &block.inputs
+    }
+}
+
 fn evaluation_order(blocks: &[Block<'_>]) -> Result<Vec<usize>, Error> {
-    let mut remaining: Vec<_> = blocks.iter().map(|block| block.inputs.len()).collect();
+    let mut remaining: Vec<_> = blocks
+        .iter()
+        .map(|block| task_inputs(block).len())
+        .collect();
     let mut consumers = vec![Vec::new(); blocks.len()];
     let mut ready = VecDeque::new();
     for (index, block) in blocks.iter().enumerate() {
-        if block.inputs.is_empty() {
+        if task_inputs(block).is_empty() {
             ready.push_back(index);
         }
-        for &driver in &block.inputs {
+        for &driver in task_inputs(block) {
             consumers[driver].push(index);
         }
     }
@@ -436,8 +683,7 @@ fn evaluation_order(blocks: &[Block<'_>]) -> Result<Vec<usize>, Error> {
                 ));
             }
             path.push(index);
-            index = *blocks[index]
-                .inputs
+            index = *task_inputs(&blocks[index])
                 .iter()
                 .find(|&&driver| remaining[driver] > 0)
                 .expect("unresolved dependency");

@@ -1,9 +1,9 @@
 {
-  "version": 1,
+  "version": 2,
   "simulation": {
     "timeStep_s": 5e-07,
     "stopTime_s": 0.01,
-    "controlSamplePeriod_s": 0.0001
+    "controlTask": {"mode": "fixed", "period_s": 0.0001, "phase": 0}
   },
   "parts": {
     "V1": {
@@ -67,6 +67,7 @@
         "gain": 1
       }
     },
+    "ZOH_V": {"type": "sampler", "parameters": {"soc": {"mode": "task", "position": 0}}},
     "ERR": {
       "type": "sum",
       "parameters": {
@@ -126,8 +127,9 @@
       "REF.out",
       "ERR.in1"
     ],
+    "voltage_sense": ["VS.out", "ZOH_V.in"],
     "feedback": [
-      "VS.out",
+      "ZOH_V.out",
       "ERR.in2"
     ],
     "error": [
@@ -181,6 +183,7 @@
       "x": -3,
       "y": 10
     },
+    "ZOH_V": {"x": 17, "y": 14, "rotation": 180},
     "VS": {
       "x": 24,
       "y": 10

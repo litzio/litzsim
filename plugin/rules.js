@@ -97,6 +97,11 @@ export function sumParameterOps(id, key, value) {
   return [{ op: "setParameter", id, key, value }];
 }
 
+export function pwmChoices(parts, dutyInputOnly = false) {
+  return Object.entries(parts).filter(([, part]) => part.type === "dutyPwm" || (!dutyInputOnly && part.type === "pwm"))
+    .map(([id]) => ({ value: id, label: id }));
+}
+
 const PREVIEW_SOURCES = new Set(["constant", "step", "ramp", "dc", "sine", "pwm", "timedSwitch"]);
 
 export function sourcePreviewRequest(document, partId) {

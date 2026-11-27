@@ -154,6 +154,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
             ],
         ),
         "sum" => (&["out"], &[]),
+        "sampler" => (&["in", "out"], &[]),
         "gain" => (&["in", "out"], &[("gain", 1.0)]),
         "limiter" => (&["in", "out"], &[("min", 0.0), ("max", 1.0)]),
         "integrator" => (
@@ -198,7 +199,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "currentSensor" => &[[-1, 0], [1, 0], [0, -1]],
         "constant" | "step" | "ramp" => &[[1, 0]],
         "sum" => &[[1, 0]],
-        "gain" | "limiter" | "integrator" | "pi" => &[[-1, 0], [1, 0]],
+        "sampler" | "gain" | "limiter" | "integrator" | "pi" => &[[-1, 0], [1, 0]],
         "dutyPwm" => &[[0, -1], [0, 1], [-1, 0]],
         _ => &[[0, -1], [0, 1]],
     };
@@ -220,6 +221,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "step" => "STEP",
         "ramp" => "RAMP",
         "sum" => "SUM",
+        "sampler" => "ZOH",
         "gain" => "GAIN",
         "limiter" => "LIM",
         "integrator" => "INT",
@@ -246,7 +248,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
             "voltageSensor" | "currentSensor" => &[Electrical, Electrical, SignalOutput],
             "constant" | "step" | "ramp" => &[SignalOutput],
             "sum" => &[SignalOutput],
-            "gain" | "limiter" | "integrator" | "pi" => &[SignalInput, SignalOutput],
+            "sampler" | "gain" | "limiter" | "integrator" | "pi" => &[SignalInput, SignalOutput],
             "dutyPwm" => &[Electrical, Electrical, SignalInput],
             _ => &[],
         },
