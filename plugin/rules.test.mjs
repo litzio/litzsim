@@ -14,8 +14,8 @@ import {
 } from "./plot.js";
 import { CATEGORIES, DUTY_UPDATE_LABELS, PARTS, RECORDING_LABELS, ROTATE_SHORTCUT, libraryCategories, partLabel, shortcutOf } from "./parts.js";
 import {
-  deleteSelection, isDirty, nearestPair, pwmChoices, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex, selectionBox,
-  sourcePreviewRequest, sumParameterOps, undoRenamed, wireStyle,
+  deleteSelection, editorNotices, errorNotice, failureText, isDirty, nearestPair, pwmChoices, renameOps, renameProblem, renamedIds,
+  selectInBox, selectedSegmentIndex, selectionBox, sourcePreviewRequest, startNotice, sumParameterOps, undoRenamed, wireStyle,
 } from "./rules.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -515,4 +515,34 @@ test("the waveform window opens the newest completed run of the circuit folder a
   } finally {
     rmSync(folder, { recursive: true, force: true });
   }
+});
+
+test("notifications: a new error replaces the card, a run warns and fails once, and no card is empty", () => {
+  assert.equal(failureText({ code: "staleRevision", message: "changed" }), "staleRevision: changed");
+  assert.equal(failureText({ message: "no code" }), "no code");
+  assert.ok(failureText({}).length > 0);
+
+  // A different refusal gets a new ID, so a dismissed card does not hide it; the same text
+  // (a repeated polling failure) keeps the dismissed card, and the next input clears it.
+  const first = errorNotice(null, "reject", 1, "a");
+  assert.deepEqual(first, { id: "reject:1", message: "a", severity: "error" });
+  assert.equal(errorNotice(first, "reject", 2, "a"), first);
+  assert.equal(errorNotice(first, "reject", 3, "b").id, "reject:3");
+  assert.equal(errorNotice(first, "reject", 4, ""), null);
+
+  assert.equal(startNotice("r1", []), null);
+  const warning = startNotice("r1", [{ partId: "LBL1", text: "VDC" }, { partId: "LBL2", text: "SW" }]);
+  assert.equal(warning.id, "start:r1");
+  assert.equal(warning.severity, "warning");
+  assert.match(warning.message, /LBL1 \(VDC\), LBL2 \(SW\)/);
+
+  const failed = { runId: "r1", state: "failed", error: { code: "singularMatrix", message: "node 3" } };
+  const cards = editorNotices(first, failed, warning);
+  assert.deepEqual(cards.map(card => card.id), ["reject:1", "start:r1", "fail:r1"]);
+  assert.equal(cards[2].message, "실행 실패 — singularMatrix: node 3");
+  // Polling the same failed run gives the same IDs; a new run drops the old run's cards.
+  assert.deepEqual(editorNotices(null, { ...failed }, warning).map(card => card.id), ["start:r1", "fail:r1"]);
+  assert.deepEqual(editorNotices(null, { runId: "r2", state: "running" }, warning), []);
+  assert.deepEqual(editorNotices(null, null, null), []);
+  assert.ok(editorNotices(first, failed, warning).every(card => card.id && card.message));
 });

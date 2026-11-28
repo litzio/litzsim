@@ -107,3 +107,37 @@ const PREVIEW_SOURCES = new Set(["constant", "step", "ramp", "dc", "sine", "pwm"
 export function sourcePreviewRequest(document, partId) {
   return PREVIEW_SOURCES.has(document.parts[partId]?.type) ? { document, partId } : null;
 }
+
+// Window notifications (`ui.Notifications`, SDK 0.23.0). The center hides a dismissed card
+// while its ID stays listed, so an ID is reused only to update the same cause.
+
+/** The text a card shows for a core or Host failure; never empty. */
+export function failureText(failure) {
+  const message = failure?.code ? `${failure.code}: ${failure.message ?? ""}` : failure?.message;
+  return message || "알 수 없는 오류가 발생했습니다.";
+}
+
+/**
+ * The one error card of a slot: a different message replaces the previous card under a new ID
+ * (`<kind>:<seq>`), the same message keeps the card (repeated polling or redraw failures stay
+ * dismissed), and an empty message clears it.
+ */
+export function errorNotice(previous, kind, seq, message) {
+  if (!message) return null;
+  if (previous?.message === message) return previous;
+  return { id: `${kind}:${seq}`, message, severity: "error" };
+}
+
+/** A run started with unpaired net labels warns once for that run; the run still goes ahead. */
+export function startNotice(runId, labelWarnings) {
+  if (!labelWarnings?.length) return null;
+  const labels = labelWarnings.map(({ partId, text }) => `${partId} (${text})`).join(", ");
+  return { id: `start:${runId}`, message: `짝 없는 네트 라벨 ${labelWarnings.length}개가 있는 채로 실행합니다: ${labels}`, severity: "warning" };
+}
+
+/** Cards of the editor: its error, then the shown run's start warning and failure (one each per run). */
+export function editorNotices(error, run, start) {
+  const failed = run?.state === "failed" && run.error
+    ? { id: `fail:${run.runId}`, message: `실행 실패 — ${failureText(run.error)}`, severity: "error" } : null;
+  return [error, run && start?.id === `start:${run.runId}` ? start : null, failed].filter(Boolean);
+}

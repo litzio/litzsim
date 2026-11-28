@@ -1,6 +1,7 @@
 {
   "id": "local.litzsim",
   "name": "LitzSim",
+  "description": "회로 편집·시뮬레이션·파형 보기. SDK 0.23.0을 포함한 Litzio가 필요합니다.",
   "icon": "ChartColumn",
   "entry": "host.mjs",
   "screen": "screen.jsx"

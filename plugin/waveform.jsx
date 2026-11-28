@@ -4,6 +4,7 @@ import {
   TRACE_COLORS, applyToAll, autoRange, axisFor, defaultRun, formatValue, keepSignals, keepView, niceStep, panRange,
   readTimeAxis, ticks, timeAxisProblem, zoomAxis, zoomRange,
 } from "./plot.js";
+import { errorNotice, failureText } from "./rules.js";
 
 // PSIM-style waveform window. Every probe of a completed run is recorded; the user
 // adds empty graphs and picks the signals of each. Graphs, axes, grids and cursors
@@ -358,7 +359,9 @@ function WaveformWindow({ ui, adapter, file, revision, completedRun, active }) {
   const [readout, setReadout] = useState(null);
   const [editing, setEditing] = useState(null);
   const [timeStep, setTimeStep] = useState(null);
-  const [error, setError] = useState("");
+  // One error card in the window notification center; a different failure replaces it.
+  const [error, setErrorNotice] = useState(null);
+  const errorSeq = useRef(0);
   const rootRef = useRef(null);
   const areaRef = useRef(null);
   const canvases = useRef(new Map());
@@ -378,7 +381,11 @@ function WaveformWindow({ ui, adapter, file, revision, completedRun, active }) {
   const preferred = live.completed;
   const channelKey = shownChannels(graphs).join("\n");
 
-  const fail = failure => setError(failure.code ? `${failure.code}: ${failure.message}` : failure.message);
+  function setError(message) {
+    const seq = ++errorSeq.current;
+    setErrorNotice(previous => errorNotice(previous, "wave", seq, message));
+  }
+  const fail = failure => setError(failureText(failure));
 
   useEffect(() => {
     live.closed = false;
@@ -779,7 +786,7 @@ function WaveformWindow({ ui, adapter, file, revision, completedRun, active }) {
 
   if (!runs || !run) {
     return <section aria-label="LitzSim 파형 창" style={styles.body}>
-      {error ? <ui.Notice tone="error">{error}</ui.Notice>
+      {error ? <ui.Notice tone="error">{error.message}</ui.Notice>
         : !runs ? <ui.Progress label="실행 기록 읽기" />
           : <ui.EmptyState title="완료된 실행이 없습니다" description="[회로] 탭에서 [실행]을 누르고 완료되면 이 탭에서 파형을 볼 수 있습니다." />}
     </section>;
@@ -799,7 +806,7 @@ function WaveformWindow({ ui, adapter, file, revision, completedRun, active }) {
       <ui.Button variant="default" onClick={addGraph}>그래프 추가</ui.Button>
     </div>
     <TimeAxis ui={ui} live={live} full={run.timeRange} step={timeStep} onApply={applyTimeAxis} onAuto={autoTimeAxis} />
-    {error && <ui.Notice tone="error">{error}</ui.Notice>}
+    <ui.Notifications items={error ? [error] : []} />
     <div ref={areaRef} style={styles.graphs}>
       {!graphs.length && <ui.EmptyState title="그래프를 추가하세요"
         description="[그래프 추가]로 빈 그래프를 만들고 그래프마다 볼 신호를 고릅니다. 한 그래프에 단위가 다른 두 신호를 넣으면 왼쪽·오른쪽 축을 나눠 씁니다." />}
