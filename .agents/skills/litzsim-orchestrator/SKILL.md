@@ -49,7 +49,7 @@ description: Orchestrate several LitzSim GitHub issues end to end by planning wa
 - 리뷰 결과를 받으면 차단 지적마다 "이 수정이 모델·상태·파일 규격을 키우는가"를 확인한다. 키운다면 구현자에게 넘기기 전에 더 단순한 대안(그 입력을 거부, 지원 범위에서 제외하고 오류로 안내, 기존 연산 재사용)을 먼저 정한다. 같은 PR에서 리뷰 두 차례 연속으로 새 상태·필드가 늘면 수정 지시를 멈추고 설계를 단순화할지 사용자에게 보고한다.
 - 리뷰어 프롬프트에는 [reviewer-prompt.md](references/reviewer-prompt.md)의 과설계 금지 절을 그대로 둔다.
 
-**인계받을 때.** 다른 오케스트레이터가 만든 작업자의 완료 알림은 새 오케스트레이터에게 오지 않는다. 진행 중인 작업자와 리뷰어마다 `send_agent_prompt`(notifyOnFinish: true)로 "현재 상태를 짧게 보고하고 하던 일을 계속하라"를 보내 알림을 넘겨받는다.
+**인계받을 때.** 다른 오케스트레이터가 만든 작업자의 완료 알림은 새 오케스트레이터에게 오지 않는다. 진행 중인 작업자와 리뷰어마다 `send_agent_prompt`(notifyOnFinish: true)로 "현재 상태를 짧게 보고하고 하던 일을 계속하라"를 보내 알림을 넘겨받는다. Paseo MCP `list_agents`는 cwd를 주지 않으면 주 checkout의 agent만 보여 준다. `git worktree list`의 worktree 경로마다 `list_agents`(cwd)로 작업자·리뷰어를 찾고, 열린 PR의 마지막 리뷰 댓글로 멈춘 단계를 확인한다(PR #104 인계에서 리뷰어의 REQUEST_CHANGES가 구현자에게 전달되지 않은 채 멈춰 있었다).
 
 ## 1. 시작 전에 사용자에게 확정받을 것
 
@@ -77,8 +77,8 @@ description: Orchestrate several LitzSim GitHub issues end to end by planning wa
 - 지시문에 적는 사실 전제(이미 되는 동작, 지원하는 결선, 검사가 쓰는 예제 파일)는 코드나 문서로 확인한 뒤 쓴다. 확인하지 않은 전제는 "확인 필요"로 표시한다.
 - 작업자는 쓰기와 네트워크가 가능한 모드로 만든다. 지시문은 파일 쓰기 도구로 파일에 쓰고, 공통 규칙은 띄울 때마다 [worker-prompt.md](references/worker-prompt.md)의 블록을 그 파일에서 읽어 그대로 붙인다. 줄이거나 고친 세션 사본을 돌려쓰지 않는다. 공통 규칙이 모자라거나 길면 worker-prompt.md를 고치는 PR을 낸다.
 - **작업자 한 명은 PR 하나만 맡는다.** PR이 병합되면 그 작업자의 일은 끝난다. 같은 작업자에게 이어서 맡기는 것은 같은 PR의 리뷰 지적 반영, 충돌 해결, 병합 검증 실패 수정, 한 이슈를 나눈 바로 다음 조각일 때만 한다. 이어서 맡기기 전에 컨텍스트 사용량(`get_agent_status`의 `contextWindowUsedTokens`)을 확인하고 절반을 넘었으면 새 작업자로 바꾼다.
-- **지시문 전달(Paseo CLI).** `paseo run`에는 지시문 파일 인자가 없고, PowerShell에서 긴 글을 명령 인자로 넘기면 큰따옴표가 사라진다. 지시문은 파일로 쓰고 실행 프롬프트는 "그 파일 전체를 UTF-8로 읽고 그대로 따르라"는 한 문장으로 준다. 후속 지시는 `paseo send <id> --prompt-file <파일>`로 보내고, 실행 중인 작업에 범위를 더할 때는 `--behavior steer`를 쓴다. Codex 작업자는 `--provider codex/<model> --thinking <effort> --mode full-access`, 새 worktree는 `--new-workspace worktree --worktree-mode branch-off --base origin/main --new-branch <branch>`로 만든다. Claude 작업자를 쓸 때는 `--mode bypassPermissions`를 준다(기본 모드는 명령마다 권한 승인을 기다리며 멈춘다). 지시문 파일이 worktree 밖(세션 임시 폴더)에 있으면 Claude 기본 모드는 그 파일을 읽는 데도 승인을 기다린다.
-- **리뷰어·후속 agent는 기존 workspace에 붙인다.** 리뷰어를 `--cwd <worktree>`로 띄우면 같은 폴더에 Paseo workspace·project가 새로 생긴다. 구현자의 workspace id(`paseo ls --json`의 `WorkspaceId`)로 `--workspace <id>`를 준다.
+- **지시문 전달(Paseo CLI).** `paseo run`에는 지시문 파일 인자가 없고, PowerShell에서 긴 글을 명령 인자로 넘기면 큰따옴표가 사라진다. 지시문은 파일로 쓰고 실행 프롬프트는 "그 파일 전체를 UTF-8로 읽고 그대로 따르라"는 한 문장으로 준다. 후속 지시는 `paseo send <id> --prompt-file <파일>`로 보내고, 실행 중인 작업에 범위를 더할 때는 `--behavior steer`를 쓴다. Codex 작업자는 `--provider codex/<model> --thinking <effort> --mode full-access`, 새 worktree는 `--new-workspace worktree --worktree-mode branch-off --base origin/main --new-branch <branch>`로 만든다. Claude 작업자를 쓸 때는 `--mode bypassPermissions`를 준다(기본 모드는 명령마다 권한 승인을 기다리며 멈춘다).
+- **리뷰어·후속 agent는 기존 workspace에 붙인다.** 리뷰어를 `--cwd <worktree>`로 띄우면 같은 폴더에 Paseo workspace·project가 새로 생긴다. 구현자의 workspace id(`paseo ls --json`의 `WorkspaceId`)로 `--workspace <id>`를 준다. Paseo MCP에서는 `create_workspace`(worktree, branch-off, `baseBranch: "origin/main"`)로 만든 뒤 `create_agent`에 그 `workspaceId`를 주고, 리뷰어도 구현자의 `workspaceId`로 붙인다.
 - **이 PC의 Rust 빌드.** MSVC `link.exe`가 없고 Git의 `link`가 먼저 잡힌다. 지시문과 `pr-verify.mjs` 실행에 `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`를 준다.
 - **커밋 trailer.** Codex 작업자가 `AI-Agent: codex`, `AI-Model: codex/gpt-6.2-sol`처럼 도구 이름을 제공사 자리에 쓰는 일이 반복됐다. 지시문에 정확한 값(`AI-Agent: Codex`, `AI-Model: openai/gpt-6.2-sol`)을 적고, `pr-gate.mjs`는 제공사를 `openai|anthropic|google`로 검사한다.
 - **완료 대기(Paseo MCP 도구가 없는 세션).** `notifyOnFinish`를 쓸 수 없으므로 작업자를 만들거나 후속 지시를 보낸 뒤 `paseo wait <id>`를 완료 알림이 오는 백그라운드 실행으로 건다. 끝나면 `paseo logs <id>`의 마지막 보고를 읽는다.
