@@ -4,8 +4,9 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 /**
- * Run requests name the circuit folder: `directory`, or the parent folder of the
- * circuit `file` (drive roots included).
+ * Requests about a run name the circuit folder: `directory`, or the parent folder
+ * of the circuit `file` (drive roots included). `start` and `runs` send the circuit
+ * `file` itself, which the core records with each run.
  */
 export function startRequest({ file, ...payload }) {
   return file === undefined ? payload : { ...payload, directory: path.dirname(file) };
@@ -108,10 +109,13 @@ export async function activate() {
         const response = await invoke("save", { ...payload, file });
         return response.ok ? { ...response, file } : response;
       },
-      start: payload => invoke("start", startRequest(payload)),
+      start: payload => invoke("start", payload),
       status: payload => invoke("status", startRequest(payload)),
       stop: payload => invoke("stop", startRequest(payload)),
-      runs: payload => invoke("runs", startRequest(payload)),
+      runs: payload => invoke("runs", payload),
+      pin: payload => invoke("pin", startRequest(payload)),
+      unpin: payload => invoke("unpin", startRequest(payload)),
+      delete: payload => invoke("delete", startRequest(payload)),
       wave: payload => invoke("wave", startRequest(payload)),
       measure: payload => invoke("measure", startRequest(payload)),
     },
