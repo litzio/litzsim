@@ -41,10 +41,10 @@ function symbolTransform(symbol) {
   return `translate(${symbol.center[0]} ${symbol.center[1]}) scale(${sx} ${sy}) rotate(${symbol.rotation})`;
 }
 
-function Symbol({ symbol }) {
+function Symbol({ symbol, unpaired }) {
   const arrow = symbol.currentArrow;
   return <g>
-    <g transform={symbolTransform(symbol)}>
+    <g transform={symbolTransform(symbol)} stroke={unpaired ? WARNING : undefined}>
       {symbol.strokes.map((stroke, index) => <Stroke key={index} stroke={stroke} />)}
     </g>
     {arrow && <g fill="none">
@@ -110,6 +110,7 @@ export function Schematic({
     return () => { live = false; };
   });
   const moving = preview ? layout.symbols.filter(symbol => preview.ids.includes(symbol.id)) : [];
+  const unpairedLabels = new Set(layout.labelWarnings?.map(warning => warning.partId));
   const sorted = [...layout.jumps].sort((a, b) => a.at[0] - b.at[0]);
   const hovered = layout.segments[hoverSegment];
   return <svg ref={svgRef} role="group" aria-label="회로도" data-revision={layout.revision}
@@ -135,7 +136,7 @@ export function Schematic({
     <g stroke={INK} strokeWidth={LINE} strokeLinecap="square" strokeLinejoin="miter" fill="none" pointerEvents="none">
       {layout.segments.map((segment, index) => <path key={index} d={wirePath(segment, sorted)}
         {...wireStyle(layout.signalNets, segment.netId)} />)}
-      {layout.symbols.map(symbol => <Symbol key={symbol.id} symbol={symbol} />)}
+      {layout.symbols.map(symbol => <Symbol key={symbol.id} symbol={symbol} unpaired={unpairedLabels.has(symbol.id)} />)}
     </g>
     <g fill={INK} stroke="none" pointerEvents="none">
       {layout.junctions.map((junction, index) => <circle key={index} cx={junction.at[0]} cy={junction.at[1]} r={3.5}
@@ -164,7 +165,9 @@ export function Schematic({
     <g fill="transparent">
       {layout.symbols.map(symbol => <rect key={symbol.id} data-part={symbol.id} data-selected={selectedIds.includes(symbol.id) || undefined}
         data-center={symbol.center.join(" ")} {...boxProps(symbol.bounds)}
-        style={{ cursor: "move" }} onPointerDown={event => onSymbolDown(symbol.id, event)} />)}
+        style={{ cursor: "move" }} onPointerDown={event => onSymbolDown(symbol.id, event)}>
+        {unpairedLabels.has(symbol.id) && <title>같은 이름의 라벨 없음</title>}
+      </rect>)}
     </g>
     <g>
       {Object.entries(layout.pins).map(([id, pin]) => <circle key={id} data-pin={id} cx={pin.at[0]} cy={pin.at[1]} r={7}
