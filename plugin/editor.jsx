@@ -5,8 +5,9 @@ import {
 } from "./parts.js";
 import { Schematic, sheetView, contentBounds } from "./schematic.jsx";
 import {
-  EMPTY_SELECTION, deleteSelection, isDirty, nearestPair, renameOps, renameProblem, renamedIds, selectInBox, selectedSegmentIndex,
-  selectionBox, pwmChoices, sourcePreviewRequest, sumParameterOps, undoRenamed,
+  EMPTY_SELECTION, deleteSelection, editorNotices, errorNotice, failureText, isDirty, nearestPair, renameOps, renameProblem,
+  renamedIds, selectInBox, selectedSegmentIndex, selectionBox, pwmChoices, sourcePreviewRequest, startNotice, sumParameterOps,
+  undoRenamed,
 } from "./rules.js";
 import { SourcePreview } from "./source-preview.jsx";
 import { Waveform } from "./waveform.jsx";
@@ -340,7 +341,11 @@ export function Editor({ ui, adapter }) {
   const [query, setQuery] = useState("");
   const [saving, setSaving] = useState(null);
   const [run, setRun] = useState(null);
-  const [error, setError] = useState("");
+  // The last refused edit, stop or status failure, and the shown run's start warning:
+  // cards of the window notification center (see `editorNotices`).
+  const [error, setErrorNotice] = useState(null);
+  const [start, setStart] = useState(null);
+  const errorSeq = useRef(0);
   const [busy, setBusy] = useState(false);
   // View controls are screen state only.
   const [zoom, setZoom] = useState(1);
@@ -369,7 +374,13 @@ export function Editor({ ui, adapter }) {
   const frame = useRef(null);
   const groups = useRef({});
 
+  function setError(message) {
+    const seq = ++errorSeq.current;
+    setErrorNotice(previous => errorNotice(previous, "reject", seq, message));
+  }
+
   // Inputs run one at a time in arrival order; none is dropped while another waits.
+  // The next input clears the previous error card; a new failure replaces it.
   function perform(task) {
     waiting.current += 1;
     setBusy(true);
@@ -378,7 +389,7 @@ export function Editor({ ui, adapter }) {
       try {
         return await task();
       } catch (failure) {
-        setError(failure.code ? `${failure.code}: ${failure.message}` : failure.message);
+        setError(failureText(failure));
         return undefined;
       } finally {
         if (--waiting.current === 0) setBusy(false);
@@ -655,7 +666,9 @@ export function Editor({ ui, adapter }) {
   function startRun() {
     perform(async () => {
       const { sheet: current } = latest.current;
-      setRun(await adapter.call("start", { file, document: current.document, expectedRevision: current.revision }));
+      const started = await adapter.call("start", { file, document: current.document, expectedRevision: current.revision });
+      setStart(startNotice(started.runId, current.layout.labelWarnings));
+      setRun(started);
     });
   }
 
@@ -663,7 +676,7 @@ export function Editor({ ui, adapter }) {
     try {
       setRun(await adapter.call("stop", { runId: run.runId }));
     } catch (failure) {
-      setError(failure.message);
+      setError(failureText(failure));
     }
   }
 
@@ -678,7 +691,7 @@ export function Editor({ ui, adapter }) {
         const status = await adapter.call("status", { runId: run.runId });
         if (live) setRun(status);
       } catch (failure) {
-        if (live) setError(failure.message);
+        if (live) setError(failureText(failure));
       } finally {
         waiting = false;
       }
@@ -945,7 +958,7 @@ export function Editor({ ui, adapter }) {
 
   if (!sheet) {
     return <ui.ScreenLayout fillHeight description="회로를 준비하는 중입니다.">
-      {error ? <ui.Notice tone="error">{error}</ui.Notice> : <ui.Progress label="회로 준비" />}
+      {error ? <ui.Notice tone="error">{error.message}</ui.Notice> : <ui.Progress label="회로 준비" />}
     </ui.ScreenLayout>;
   }
 
@@ -1022,6 +1035,7 @@ export function Editor({ ui, adapter }) {
         aria-describedby={runReason ? "litzsim-run-reason" : undefined} onClick={startRun}>실행</ui.Button>
       <ui.Button disabled={!running || run.state === "stopping"} onClick={stopRun}>중지</ui.Button>
     </>}>
+    <ui.Notifications items={editorNotices(error, run, start)} />
     <div role="tablist" aria-label="LitzSim 보기" style={styles.tabs} onKeyDown={onTabKey}>
       {TABS.map(([id, text]) => {
         const selected = shownTab === id;
@@ -1036,8 +1050,6 @@ export function Editor({ ui, adapter }) {
     <div style={styles.stack}>
       <section id="litzsim-panel-circuit" role="tabpanel" aria-label="LitzSim 회로 편집기"
         style={{ ...styles.body, ...styles.pane, ...(shownTab === "circuit" ? null : styles.hidden) }} onKeyDown={onKeyDown} onKeyUp={onKeyUp}>
-        {error && <ui.Notice tone="error">{error}</ui.Notice>}
-        {run?.state === "failed" && run.error && <ui.Notice tone="error">{`실행 실패 — ${run.error.message ?? run.error.code}`}</ui.Notice>}
         {saving && <ui.Toolbar label="새 회로 저장">
           <label style={styles.field}>
             <span>파일 이름</span>
