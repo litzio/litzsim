@@ -140,13 +140,10 @@ fn sum_strokes(sum: &Sum) -> Vec<Stroke> {
             strokes.push(line(&[[x, y - 4], [x, y + 4]]));
         }
     }
-    strokes.extend([
-        line(&[
-            [if sum.round { radius } else { 20 }, 0],
-            [column * pitch, 0],
-        ]),
-        output_tip([column, 0]),
-    ]);
+    strokes.push(line(&[
+        [if sum.round { radius } else { 20 }, 0],
+        [column * pitch, 0],
+    ]));
     strokes
 }
 
@@ -355,6 +352,7 @@ pub(super) fn ink_bounds(
     let center = scene([placement.x.into(), placement.y.into()]);
     sum.map_or_else(|| strokes(kind), sum_strokes)
         .into_iter()
+        .chain(sum.map(|sum| output_tip([sum.output_column(), 0])))
         .map(move |stroke| transform_bounds(local_bounds(&stroke), placement, center))
 }
 
@@ -430,6 +428,7 @@ fn caption<'a>(
 pub(super) fn geometry<'a>(
     part: LayoutPart<'a>,
     measurement: Option<&Measurement>,
+    connected: impl Fn(&str) -> bool,
 ) -> (Symbol<'a>, Vec<Label<'a>>) {
     let LayoutPart {
         id,
@@ -448,23 +447,34 @@ pub(super) fn geometry<'a>(
             .expect("defined terminal");
         definition.pin_offsets[index].map(|n| n * GRID_PITCH as i32)
     };
-    let strokes = if let Some(sum) = &part.sum {
-        sum_strokes(sum)
+    let (mut strokes, output_tips) = if let Some(sum) = &part.sum {
+        (
+            sum_strokes(sum),
+            vec![("out", output_tip([sum.output_column(), 0]))],
+        )
     } else {
-        let mut strokes = strokes(kind);
-        for (&pin, &pin_offset) in definition.pins.iter().zip(definition.pin_offsets) {
-            if definition.pin_kind(pin) == PinKind::SignalOutput {
-                strokes.push(output_tip(pin_offset));
-            }
-        }
-        strokes
+        let output_tips = definition
+            .pins
+            .iter()
+            .zip(definition.pin_offsets)
+            .filter(|&(&pin, _)| definition.pin_kind(pin) == PinKind::SignalOutput)
+            .map(|(&pin, &offset)| (pin, output_tip(offset)))
+            .collect();
+        (strokes(kind), output_tips)
     };
+    // Keep the full symbol footprint for routing and label placement.
     let local = strokes
         .iter()
+        .chain(output_tips.iter().map(|(_, tip)| tip))
         .map(local_bounds)
         .reduce(Rect::union)
         .unwrap();
     let bounds = transform_bounds(local, placement, center);
+    strokes.extend(
+        output_tips
+            .into_iter()
+            .filter_map(|(pin, tip)| (!connected(pin)).then_some(tip)),
+    );
 
     let mut labels = Vec::new();
     if kind == "nmos" {

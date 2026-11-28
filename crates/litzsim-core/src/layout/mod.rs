@@ -248,7 +248,9 @@ pub fn layout(document: &Document) -> Layout<'_> {
     let mut captions = Vec::new();
     for part in document.layout_parts() {
         let measurement = inspection.measurements.get(part.id);
-        let (symbol, labels) = symbols::geometry(part, measurement);
+        let id = part.id;
+        let connected = |pin: &str| inspection.pin_nets[&format!("{id}.{pin}")].is_some();
+        let (symbol, labels) = symbols::geometry(part, measurement, connected);
         for (pin, _, kind) in document.circuit().parts[symbol.id].pins() {
             let id = format!("{}.{pin}", symbol.id);
             let at = scene(inspection.pin_positions[&id]);
