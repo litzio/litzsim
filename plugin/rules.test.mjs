@@ -463,13 +463,13 @@ test("the waveform window opens the newest completed run of the circuit folder a
     const file = path.join(folder, "buck.litzsim");
     copyFileSync(`${root}examples/buck.litzsim`, file);
     const opened = await call("inspect", { file });
-    assert.deepEqual((await call("runs", startRequest({ file }))).runs, []);
+    assert.deepEqual((await call("runs", { file })).runs, []);
     const recording = { op: "setRecording", id: "L1", quantity: "current" };
     const sheet = await apply(opened, [{ ...recording, enabled: true }]);
     const disabled = await apply(sheet, [{ ...recording, enabled: false }]);
     assert.equal(disabled.document.parts.L1.record, undefined);
     assert.equal(disabled.revision, opened.revision);
-    const started = await call("start", startRequest({ file, document: sheet.document, expectedRevision: sheet.revision }));
+    const started = await call("start", { file, document: sheet.document, expectedRevision: sheet.revision });
     let status = started;
     while (["running", "stopping"].includes(status.state)) {
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -477,11 +477,13 @@ test("the waveform window opens the newest completed run of the circuit folder a
     }
     assert.equal(status.state, "completed");
 
-    const { runs } = await call("runs", startRequest({ file }));
+    const { runs } = await call("runs", { file });
     assert.equal(defaultRun(runs, null), started.runId);
     assert.equal(defaultRun([{ runId: "new", state: "failed" }, ...runs], "missing"), started.runId);
     const [run] = runs;
     assert.equal(run.revision, sheet.revision);
+    assert.equal(run.circuit, "buck.litzsim");
+    assert.equal(run.pinned, false);
     assert.deepEqual(run.channels.map(channel => channel.name), ["L1_A", "VC_V"]);
     assert.equal(run.timeRange[0], 0);
 
@@ -502,6 +504,14 @@ test("the waveform window opens the newest completed run of the circuit folder a
     assert.equal(swapped.frequency_Hz, 1 / (run.timeRange[1] - run.timeRange[0]));
     assert.equal(swapped.channels[1].delta, swapped.channels[1].to.value - swapped.channels[1].from.value);
     assert.equal(swapped.channels[1].average, measured.channels[1].average);
+
+    // The run history pins, unpins and deletes the shown run by circuit file and run ID.
+    const target = { file, runId: run.runId };
+    assert.equal((await call("pin", startRequest(target))).pinned, true);
+    assert.equal((await call("runs", { file })).runs[0].pinned, true);
+    assert.equal((await call("unpin", startRequest(target))).pinned, false);
+    assert.equal((await call("delete", startRequest(target))).runId, run.runId);
+    assert.deepEqual((await call("runs", { file })).runs, []);
   } finally {
     rmSync(folder, { recursive: true, force: true });
   }

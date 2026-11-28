@@ -1339,6 +1339,8 @@ fn long_run_snapshots_and_releases_the_directory_after_stop() {
     std::fs::write(&circuit, rc).unwrap();
     let rejected = folder.run(&["start", "source.litzsim"], false);
     assert_eq!(rejected["error"]["code"], "runInProgress");
+    let kept = folder.run(&["delete", run], false);
+    assert_eq!(kept["error"]["code"], "runInProgress");
     std::thread::sleep(Duration::from_millis(10_050));
     let t = Instant::now();
     let running = folder.run(&["status", run], true);
@@ -1576,6 +1578,11 @@ fn managed_buck_wave_matches_the_original_rows_and_failed_runs_have_no_wave() {
     );
     assert_eq!(listed[1]["channels"], json!(wave.channels()[1..]));
     assert!(listed[0]["startedAt"].as_f64() >= listed[1]["startedAt"].as_f64());
+    assert_eq!(listed[0]["circuit"], "broken.litzsim");
+    assert_eq!(listed[1]["circuit"], "buck.litzsim");
+    assert_eq!(listed[1]["pinned"], false);
+    let of_buck = folder.run(&["runs", "buck.litzsim"], true);
+    assert_eq!(of_buck["runs"], json!([listed[1]]));
     let empty = TestDirectory::new("no-runs");
     assert_eq!(empty.run(&["runs", "."], true)["runs"], json!([]));
 
@@ -1607,11 +1614,16 @@ fn serve_owns_run_lifetime_and_checks_the_working_revision() {
     working["simulation"]["stopTime_s"] = json!(100_000.0);
     working["simulation"]["outputStep_s"] = json!(1.0);
     let inspection = request(json!({ "op": "inspect", "document": working }));
+    let file = folder.0.join("rc.litzsim");
     let mut start = json!({
-        "op": "start", "directory": folder.0, "document": working, "expectedRevision": "stale",
+        "op": "start", "file": file, "document": working, "expectedRevision": "stale",
     });
     assert_eq!(request(start.clone())["error"]["code"], "revisionConflict");
     start["expectedRevision"] = inspection["revision"].clone();
+    let unsaved = request(start.clone());
+    assert_eq!(unsaved["error"]["code"], "ioError", "{unsaved}");
+    assert!(!folder.0.join("runs").exists());
+    std::fs::write(&file, include_bytes!("../../../examples/rc.litzsim")).unwrap();
     let started = request(start);
     assert_eq!(started["state"], "running", "{started}");
     let missing = request(json!({
@@ -1621,9 +1633,154 @@ fn serve_owns_run_lifetime_and_checks_the_working_revision() {
     let status = request(json!({ "op": "status", "runId": started["runId"] }));
     assert_eq!(status["stopTime"], 100_000.0);
     assert_eq!(status["revision"], inspection["revision"]);
+    assert_eq!(status["circuit"], "rc.litzsim");
     drop(input);
     assert!(serve.wait().unwrap().success());
     let run = started["runDirectory"].as_str().unwrap();
     assert_eq!(folder.run(&["status", run], true)["state"], "canceled");
     assert!(!PathBuf::from(run).join("result.pending").exists());
+}
+
+fn is_run_name(id: &str) -> bool {
+    let parts: Vec<_> = id.split('-').collect();
+    let digits =
+        |part: &str, len: usize| part.len() == len && part.bytes().all(|b| b.is_ascii_digit());
+    matches!(parts.len(), 2 | 3)
+        && digits(parts[0], 8)
+        && digits(parts[1], 6)
+        && parts
+            .get(2)
+            .is_none_or(|suffix| digits(suffix, suffix.len()) && !suffix.is_empty())
+}
+
+#[test]
+fn admission_keeps_the_ten_newest_unpinned_runs_of_each_circuit() {
+    use std::fs;
+    let folder = TestDirectory::new("retention");
+    let rc = include_bytes!("../../../examples/rc.litzsim");
+    fs::write(folder.0.join("a.litzsim"), rc).unwrap();
+    fs::write(folder.0.join("b.litzsim"), rc).unwrap();
+    let root = folder.0.join("runs");
+    // A run from before circuits were recorded, and an old run of `a` left
+    // marked running. Neither may be removed by admission.
+    let (legacy, stale) = ("1-2-0", "20000101-000000");
+    for (id, status) in [
+        (
+            legacy,
+            json!({ "runId": legacy, "revision": "old", "state": "canceled",
+                    "simulatedTime": 0, "stopTime": 1, "solverPid": null }),
+        ),
+        (
+            stale,
+            json!({ "runId": stale, "circuit": "a.litzsim", "startedAt": 0, "revision": "old",
+                    "state": "running", "simulatedTime": 0, "stopTime": 1, "solverPid": null }),
+        ),
+    ] {
+        fs::create_dir_all(root.join(id)).unwrap();
+        fs::write(root.join(id).join("status.json"), status.to_string()).unwrap();
+        fs::File::create_new(root.join(id).join("status.lock")).unwrap();
+    }
+    let start = |file: &str| {
+        let started = folder.run(&["start", file], true);
+        let id = started["runId"].as_str().unwrap();
+        assert!(is_run_name(id), "{id}");
+        let path = started["runDirectory"].as_str().unwrap();
+        assert_eq!(PathBuf::from(path).file_name().unwrap(), id);
+        let status = terminal(&folder, path, "completed");
+        assert_eq!(status["circuit"], file);
+        assert!(status["startedAt"].as_f64().unwrap() > 1.7e12);
+        started
+    };
+    let ids =
+        |runs: &[Value]| -> Vec<Value> { runs.iter().map(|run| run["runId"].clone()).collect() };
+
+    let other = start("b.litzsim");
+    let pinned = start("a.litzsim");
+    let pinned_dir = pinned["runDirectory"].as_str().unwrap();
+    assert_eq!(folder.run(&["pin", pinned_dir], true)["pinned"], true);
+    let mut unpinned: Vec<Value> = Vec::new();
+    for count in 1..=12 {
+        let started = start("a.litzsim");
+        let expected = match count {
+            11 | 12 => vec![unpinned[count - 11]["runId"].clone()],
+            _ => vec![],
+        };
+        assert_eq!(started["pruned"], json!(expected), "run {count}");
+        unpinned.push(started);
+    }
+    assert!(root.join(stale).is_dir() && root.join(legacy).is_dir());
+    for gone in &unpinned[..2] {
+        assert!(!PathBuf::from(gone["runDirectory"].as_str().unwrap()).exists());
+    }
+
+    // The circuit's runs, newest first, and runs of unknown circuit; not those of `b`.
+    let listed = folder.run(&["runs", "a.litzsim"], true);
+    let listed = listed["runs"].as_array().unwrap();
+    let mut expected = ids(&unpinned[2..]);
+    expected.reverse();
+    expected.extend([pinned["runId"].clone(), json!(stale), json!(legacy)]);
+    assert_eq!(ids(listed), expected);
+    assert_eq!(listed[10]["pinned"], true);
+    assert_eq!(listed[11]["circuit"], "a.litzsim");
+    assert_eq!(listed[12]["circuit"], Value::Null);
+    assert_eq!(listed[12]["startedAt"], 0.0);
+    // Listing settled the stale run as failed; it is now an old, finished run.
+    assert_eq!(listed[11]["state"], "failed");
+    let all = folder.run(&["runs", "."], true);
+    assert_eq!(all["runs"].as_array().unwrap().len(), 14);
+    assert!(ids(all["runs"].as_array().unwrap()).contains(&other["runId"]));
+
+    // A run whose files another program holds open stays; admission goes on.
+    let oldest = unpinned[2]["runDirectory"].as_str().unwrap().to_owned();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(PathBuf::from(&oldest).join("result.litzwave"))
+            .unwrap();
+        let next = start("a.litzsim");
+        assert_eq!(next["pruned"], json!([stale]));
+        assert!(PathBuf::from(&oldest).join("status.json").is_file());
+        let refused = folder.run(&["delete", &oldest], false);
+        assert_eq!(refused["error"]["code"], "runInUse");
+        assert!(PathBuf::from(&oldest).join("result.litzwave").is_file());
+        drop(held);
+        let after = start("a.litzsim");
+        assert_eq!(
+            after["pruned"],
+            json!([unpinned[2]["runId"], unpinned[3]["runId"]])
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        let next = start("a.litzsim");
+        assert_eq!(next["pruned"], json!([stale, unpinned[2]["runId"]]));
+    }
+    assert!(!PathBuf::from(&oldest).exists());
+    let listed = folder.run(&["runs", "a.litzsim"], true);
+    let listed = listed["runs"].as_array().unwrap();
+    let kept = listed
+        .iter()
+        .filter(|run| run["circuit"] == "a.litzsim" && run["pinned"] == false);
+    assert_eq!(kept.count(), 10);
+
+    // Unpinning and deleting by hand; deleted runs leave no folder behind.
+    assert_eq!(folder.run(&["unpin", pinned_dir], true)["pinned"], false);
+    assert_eq!(folder.run(&["unpin", pinned_dir], true)["pinned"], false);
+    let legacy_dir = root.join(legacy);
+    let deleted = folder.run(&["delete", legacy_dir.to_str().unwrap()], true);
+    assert_eq!(deleted["runId"], legacy);
+    folder.run(&["pin", pinned_dir], true);
+    folder.run(&["delete", pinned_dir], true);
+    let missing = folder.run(&["delete", pinned_dir], false);
+    assert_eq!(missing["error"]["code"], "ioError");
+    let left: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| !name.ends_with(".lock"))
+        .collect();
+    assert_eq!(left.len(), 11, "{left:?}");
+    assert!(left.iter().all(|name| is_run_name(name)), "{left:?}");
 }

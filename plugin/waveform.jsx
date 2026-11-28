@@ -372,7 +372,7 @@ function WaveformWindow({ ui, adapter, file, revision, completedRun, active }) {
     stale: false, measureStale: false, runsKey: null, completed: null, onView: null,
   }).current;
   const run = runs?.find(item => item.runId === runId) ?? null;
-  Object.assign(live, { run, graphs, cursorsOn, timeStep, active });
+  Object.assign(live, { runs, run, graphs, cursorsOn, timeStep, active });
   // The newest run this session completed; a run that starts later does not clear it.
   if (completedRun) live.completed = completedRun;
   const preferred = live.completed;
@@ -385,8 +385,9 @@ function WaveformWindow({ ui, adapter, file, revision, completedRun, active }) {
     return () => { live.closed = true; };
   }, []);
 
-  // Runs are read when the window is shown for a new circuit file or a newly completed
-  // run, which then becomes the shown run. Graphs keep their signals (see `runId`).
+  // Runs of the circuit file (and older runs of unknown circuit) are read when the window
+  // is shown for a new circuit file or a newly completed run, which then becomes the
+  // shown run. Graphs keep their signals (see `runId`).
   useEffect(() => {
     if (!active || !file) return;
     const key = `${file}\n${preferred ?? ""}`;
@@ -403,6 +404,38 @@ function WaveformWindow({ ui, adapter, file, revision, completedRun, active }) {
       fail(failure);
     });
   }, [active, file, preferred]);
+
+  /** Pinning and deleting are core operations; the window only shows their result. */
+  function togglePin() {
+    const current = live.run;
+    adapter.call(current.pinned ? "unpin" : "pin", { file, runId: current.runId }).then(response => {
+      if (live.closed) return;
+      setError("");
+      setRuns(list => list.map(item => (item.runId === response.runId ? { ...item, pinned: response.pinned } : item)));
+    }).catch(failure => {
+      if (!live.closed) fail(failure);
+    });
+  }
+
+  async function deleteRun() {
+    const current = live.run;
+    try {
+      const confirmed = await adapter.confirm({
+        title: "실행 삭제",
+        message: `${runTime(current)} 실행의 회로 스냅샷과 파형을 지웁니다. 되돌릴 수 없습니다.`,
+        confirmLabel: "삭제",
+      });
+      if (!confirmed || live.closed) return;
+      await adapter.call("delete", { file, runId: current.runId });
+      if (live.closed) return;
+      setError("");
+      const remaining = live.runs.filter(item => item.runId !== current.runId);
+      setRuns(remaining);
+      setRunId(defaultRun(remaining, live.completed));
+    } catch (failure) {
+      if (!live.closed) fail(failure);
+    }
+  }
 
   function drawAll() {
     if (!live.active) return;
@@ -732,7 +765,7 @@ function WaveformWindow({ ui, adapter, file, revision, completedRun, active }) {
   const completed = runs?.filter(item => item.state === "completed") ?? [];
   const runOptions = completed.map(item => ({
     value: item.runId,
-    label: `${runTime(item)} · ${formatValue(item.timeRange[1] - item.timeRange[0], "s", 4)}${item.revision === revision ? " · 현재 회로" : ""}`,
+    label: `${runTime(item)} · ${formatValue(item.timeRange[1] - item.timeRange[0], "s", 4)}${item.revision === revision ? " · 현재 회로" : ""}${item.circuit === null ? " · 이전 형식" : ""}${item.pinned ? " · 고정" : ""}`,
   }));
   const editingIndex = graphs.findIndex(graph => graph.id === editing);
   // The core sends A as `from`, B as `to` and their differences; the screen only formats them.
@@ -755,6 +788,9 @@ function WaveformWindow({ ui, adapter, file, revision, completedRun, active }) {
   return <section ref={rootRef} aria-label="LitzSim 파형 창" style={styles.body}>
     <div style={styles.tools}>
       <ui.Select label="실행 기록" hideLabel value={runId} options={runOptions} onValueChange={setRunId} />
+      <ui.Button aria-pressed={run.pinned} title="고정한 실행은 자동 정리에서 빠집니다. 고정하지 않은 실행은 회로마다 최근 10개만 남습니다."
+        onClick={togglePin}>{run.pinned ? "고정 해제" : "고정"}</ui.Button>
+      <ui.Button variant="destructive" title="이 실행의 폴더를 지웁니다." onClick={deleteRun}>삭제</ui.Button>
       {run.revision !== revision && <ui.Status tone="warning" label="현재 회로와 다른 실행" />}
       <span style={{ flex: 1 }} />
       <ui.Button aria-pressed={cursorsOn} onClick={toggleCursors}>{cursorsOn ? "커서 끄기" : "커서"}</ui.Button>

@@ -19,11 +19,21 @@ pub fn file_command(args: &[OsString]) -> Result<Value, Value> {
         [cmd, file] if cmd == "start" => return runs::start_file(file),
         [cmd, path] if cmd == "status" => return runs::status(Path::new(path)),
         [cmd, path] if cmd == "stop" => return runs::stop(Path::new(path)),
+        [cmd, path] if cmd == "pin" => return runs::pin(Path::new(path), true),
+        [cmd, path] if cmd == "unpin" => return runs::pin(Path::new(path), false),
+        [cmd, path] if cmd == "delete" => return runs::delete(Path::new(path)),
         [cmd, path, options @ ..] if cmd == "wave" => return wave_file(path.into(), options),
         [cmd, path, options @ ..] if cmd == "measure" => {
             return measure_file(path.into(), options);
         }
-        [cmd, directory] if cmd == "runs" => return runs::list(Path::new(directory)),
+        [cmd, path] if cmd == "runs" => {
+            let path = Path::new(path);
+            return if path.is_file() {
+                runs::list_circuit(path)
+            } else {
+                runs::list(path, None)
+            };
+        }
         [cmd, file, expect, revision, option, input]
             if cmd == "apply" && expect == "--expect" && option == "--ops" =>
         {
@@ -322,18 +332,23 @@ fn handle(runs: &mut Runs, request: Request<'_>) -> Result<Value, Value> {
             Ok(json!({ "ok": true, "diskRevision": disk_revision }))
         }
         "start" => runs.start(
-            required(request.directory, "directory")?,
+            required(request.file, "file")?,
             document(required(request.document, "document")?)?,
             required(request.expected_revision, "expectedRevision")?,
         ),
-        "runs" => runs::list(&required(request.directory, "directory")?),
-        "status" | "stop" => {
+        "runs" => match (request.file, request.directory) {
+            (Some(file), None) => runs::list_circuit(&file),
+            (None, Some(directory)) => runs::list(&directory, None),
+            _ => Err(request_error("runs requires either file or directory")),
+        },
+        "status" | "stop" | "pin" | "unpin" | "delete" => {
             let id = required(request.run_id, "runId")?;
             let path = runs.directory(id, request.directory.as_deref())?;
-            if request.op == "status" {
-                runs::status(&path)
-            } else {
-                runs::stop(&path)
+            match request.op {
+                "status" => runs::status(&path),
+                "stop" => runs::stop(&path),
+                "pin" | "unpin" => runs::pin(&path, request.op == "pin"),
+                _ => runs.delete(path),
             }
         }
         _ => Err(json!({ "code": "unknownOperation", "message": "Unknown operation" })),
@@ -400,7 +415,8 @@ fn usage() -> Value {
         " | apply FILE --expect REV --ops OPS.json",
         " | undo FILE --expect AFTER --before BEFORE --previous SNAPSHOT",
         " | run FILE OUT | start FILE | status RUN_DIR | stop RUN_DIR",
+        " | pin RUN_DIR | unpin RUN_DIR | delete RUN_DIR",
         " | wave RUN_DIR --channel NAME [--channel NAME...] --from TIME --to TIME --pixels WIDTH",
-        " | measure RUN_DIR --channel NAME [--channel NAME...] --from TIME --to TIME | runs DIR"
+        " | measure RUN_DIR --channel NAME [--channel NAME...] --from TIME --to TIME | runs DIR|FILE"
     ))
 }

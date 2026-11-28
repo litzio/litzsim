@@ -28,6 +28,10 @@ const CONTROL: &str = "status.lock";
 const ADMISSION: &str = "admission.lock";
 const ACTIVE: &str = "active.lock";
 const STARTING: &str = "starting";
+const PINNED: &str = "pinned";
+const DELETING: &str = ".deleting";
+/// Unpinned runs of one circuit file kept when a new run is admitted.
+const KEEP: usize = 10;
 const POLL: Duration = Duration::from_millis(10);
 const GRACE: Duration = Duration::from_millis(250);
 
@@ -45,6 +49,13 @@ enum State {
 #[serde(rename_all = "camelCase")]
 struct Status {
     run_id: String,
+    /// File name of the circuit the run was started from; absent in runs
+    /// made before circuits were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    circuit: Option<String>,
+    /// Admission time, Unix ms; absent in runs made before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    started_at: Option<f64>,
     revision: String,
     state: State,
     simulated_time: f64,
@@ -72,13 +83,13 @@ pub struct Runs {
 impl Runs {
     pub fn start(
         &mut self,
-        directory: PathBuf,
+        file: PathBuf,
         document: Document,
         expected_revision: &str,
     ) -> Response {
         self.supervisors
             .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
-        let (response, child) = admit(&directory, &document, expected_revision, true)?;
+        let (response, child) = admit(&file, &document, expected_revision, true)?;
         self.directories.insert(
             response["runId"].as_str().expect("run ID").into(),
             response["runDirectory"]
@@ -109,6 +120,17 @@ impl Runs {
                 "Unknown run ID. Supply the circuit directory to reopen a run.",
             )
         })
+    }
+
+    /// Deletes a run folder. The cached waveform is held in memory, not as an open
+    /// file, so a run shown in this session can be deleted.
+    pub fn delete(&mut self, path: PathBuf) -> Response {
+        if self.wave.as_ref().is_some_and(|cached| cached.0 == path) {
+            self.wave = None;
+        }
+        let response = delete(&path)?;
+        self.directories.retain(|_, directory| *directory != path);
+        Ok(response)
     }
 
     pub fn wave(
@@ -165,12 +187,7 @@ impl Drop for Runs {
 pub fn start_file(path: &OsStr) -> Response {
     let path = Path::new(path).canonicalize().map_err(io_error)?;
     let opened = circuit::open(&path).map_err(|err| json!(err))?;
-    let (response, _) = admit(
-        path.parent().expect("circuit parent"),
-        &opened.document,
-        &opened.revision,
-        false,
-    )?;
+    let (response, _) = admit(&path, &opened.document, &opened.revision, false)?;
     Ok(response)
 }
 
@@ -222,8 +239,10 @@ fn prevent_pipe_inheritance() -> io::Result<()> {
     Ok(())
 }
 
+/// Admits a run of `document`, saved as the circuit `file`, into the `runs`
+/// folder next to it, then removes the circuit's oldest unpinned runs.
 fn admit(
-    directory: &Path,
+    file: &Path,
     document: &Document,
     expected_revision: &str,
     owned: bool,
@@ -236,23 +255,28 @@ fn admit(
         }));
     }
     solver::validate_probe_reference(document).map_err(|err| json!(err))?;
-    let root = directory.canonicalize().map_err(io_error)?.join("runs");
+    let (directory, circuit) = circuit_file(file)?;
+    let root = directory.join("runs");
     if root.to_str().is_none() {
         return Err(error(
             "invalidRequest",
             "Run directory must be valid Unicode",
         ));
     }
+    let circuit = circuit.as_str();
     fs::create_dir_all(&root).map_err(io_error)?;
     let _admission = admission_lock(&root)?;
     let _active = active_lock(&root)?;
     check_reservation(&root)?;
     let mut command = child_command("_supervise")?;
-    let (path, run_id) = create_run(&root).map_err(io_error)?;
+    let started = SystemTime::now();
+    let (path, run_id) = create_run(&root, started).map_err(io_error)?;
     circuit::save(&path.join(SNAPSHOT), document, SaveMode::New).map_err(|err| json!(err))?;
     File::create_new(path.join(CONTROL)).map_err(io_error)?;
     let mut status = Status {
         run_id,
+        circuit: Some(circuit.into()),
+        started_at: Some(unix_ms(started)),
         revision,
         state: State::Running,
         simulated_time: 0.0,
@@ -287,11 +311,133 @@ fn admit(
             return Err(cause);
         }
     };
+    let pruned = prune(&root, circuit);
     let response = json!({
         "ok": true, "runId": status.run_id, "revision": status.revision,
-        "state": status.state, "runDirectory": path,
+        "state": status.state, "runDirectory": path, "pruned": pruned,
     });
     Ok((response, child))
+}
+
+/// The folder and file name of a saved circuit file.
+fn circuit_file(file: &Path) -> Result<(PathBuf, String), Value> {
+    let file = file.canonicalize().map_err(io_error)?;
+    if !file.is_file() {
+        return Err(error("invalidRequest", "Expected a saved circuit file"));
+    }
+    let directory = file.parent().expect("file parent").to_path_buf();
+    let name = file
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| error("invalidRequest", "Circuit file name must be valid Unicode"))?;
+    Ok((directory, name.into()))
+}
+
+/// Removes the circuit's unpinned runs beyond the newest [`KEEP`], oldest
+/// first, and returns their IDs. Runs in progress count but stay. A run whose
+/// folder cannot be removed (a file in it is open) stays until a later
+/// admission; earlier failures left as `*.deleting` folders are retried here.
+/// Runs without a recorded circuit are never removed here.
+fn prune(root: &Path, circuit: &str) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut runs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if id.ends_with(DELETING) {
+            let _ = fs::remove_dir_all(&path);
+            continue;
+        }
+        if !valid_run_id(&id) || path.join(PINNED).exists() {
+            continue;
+        }
+        let Ok(status) = read_json::<Status>(&path.join(STATUS)) else {
+            continue;
+        };
+        if status.circuit.as_deref() == Some(circuit) {
+            runs.push((status.started_at.unwrap_or_default(), id, status.state));
+        }
+    }
+    runs.sort_by(newest_first);
+    runs.into_iter()
+        .skip(KEEP)
+        .rev()
+        .filter(|(_, _, state)| !matches!(state, State::Running | State::Stopping))
+        .filter_map(|(_, id, _)| remove_run(root, &id).ok().map(|()| id))
+        .collect()
+}
+
+fn newest_first<T>(a: &(f64, String, T), b: &(f64, String, T)) -> std::cmp::Ordering {
+    b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1))
+}
+
+/// Moves the run out of the listing, then deletes it. On Windows the rename
+/// fails while any file in the folder is open, so nothing is deleted then.
+fn remove_run(root: &Path, id: &str) -> io::Result<()> {
+    let trash = root.join(format!("{id}{DELETING}"));
+    let _ = fs::remove_dir_all(&trash);
+    fs::rename(root.join(id), &trash)?;
+    let _ = fs::remove_dir_all(trash);
+    Ok(())
+}
+
+/// The `runs` folder and ID of a run folder; locks it against admission, which
+/// prunes runs.
+fn run_entry(path: &Path) -> Result<(PathBuf, String, File), Value> {
+    let path = path.canonicalize().map_err(io_error)?;
+    let id = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|id| valid_run_id(id))
+        .ok_or_else(|| error("invalidRequest", "Expected a run directory"))?
+        .to_owned();
+    let root = path.parent().expect("run parent").to_path_buf();
+    let admission = admission_lock(&root)?;
+    Ok((root, id, admission))
+}
+
+/// Pins a run so admission never removes it, or unpins it. The mark is an
+/// empty `pinned` file in the run folder.
+pub fn pin(path: &Path, pinned: bool) -> Response {
+    let status = read_status(path)?;
+    let (root, id, _admission) = run_entry(path)?;
+    let mark = root.join(&id).join(PINNED);
+    let result = if pinned {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(mark)
+            .map(drop)
+    } else {
+        match fs::remove_file(mark) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    };
+    result.map_err(io_error)?;
+    Ok(ok(json!({ "runId": status.run_id, "pinned": pinned })))
+}
+
+/// Deletes a finished run folder, pinned or not.
+pub fn delete(path: &Path) -> Response {
+    // Settle a run whose supervisor died before checking its state.
+    let status = recover_run(path)?;
+    let (root, id, _admission) = run_entry(path)?;
+    if matches!(read_status(path)?.state, State::Running | State::Stopping) {
+        return Err(error("runInProgress", "Stop the run before deleting it"));
+    }
+    remove_run(&root, &id).map_err(|err| {
+        error(
+            "runInUse",
+            format!("Run {id} was not deleted. Close programs using its files and retry: {err}"),
+        )
+    })?;
+    Ok(ok(json!({ "runId": status.run_id })))
 }
 
 fn check_reservation(root: &Path) -> Result<(), Value> {
@@ -483,13 +629,15 @@ fn supervise_solver(path: &Path, owner_closed: &AtomicBool) -> Result<Option<Exi
     monitor(path, &mut worker, owner_closed).map(Some)
 }
 
-fn create_run(root: &Path) -> io::Result<(PathBuf, String)> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    for sequence in 0.. {
-        let id = format!("{timestamp}-{}-{sequence}", std::process::id());
+/// Creates a run folder named by the local start time, `YYYYMMDD-HHMMSS`,
+/// with `-1`, `-2`, ... appended when that second is taken.
+fn create_run(root: &Path, started: SystemTime) -> io::Result<(PathBuf, String)> {
+    let stamp = local_stamp(started)?;
+    for sequence in 0_u32.. {
+        let id = match sequence {
+            0 => stamp.clone(),
+            _ => format!("{stamp}-{sequence}"),
+        };
         let path = root.join(&id);
         match fs::create_dir(&path) {
             Ok(()) => return Ok((path, id)),
@@ -498,6 +646,117 @@ fn create_run(root: &Path) -> io::Result<(PathBuf, String)> {
         }
     }
     unreachable!()
+}
+
+fn unix_ms(time: SystemTime) -> f64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as f64
+}
+
+#[cfg(windows)]
+fn local_stamp(time: SystemTime) -> io::Result<String> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    #[derive(Default)]
+    struct Calendar {
+        year: u16,
+        month: u16,
+        day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        milliseconds: u16,
+    }
+    #[repr(C)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn FileTimeToSystemTime(time: *const FileTime, calendar: *mut Calendar) -> i32;
+        fn SystemTimeToTzSpecificLocalTime(
+            zone: *const c_void,
+            universal: *const Calendar,
+            local: *mut Calendar,
+        ) -> i32;
+    }
+    // FILETIME counts 100 ns intervals from 1601-01-01 UTC.
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_secs();
+    let ticks = (seconds + 11_644_473_600) * 10_000_000;
+    let file_time = FileTime {
+        low: ticks as u32,
+        high: (ticks >> 32) as u32,
+    };
+    let (mut universal, mut local) = (Calendar::default(), Calendar::default());
+    // Both calls only convert the values passed in; a null zone is the current one.
+    unsafe {
+        if FileTimeToSystemTime(&file_time, &mut universal) == 0
+            || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &universal, &mut local) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    let Calendar {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        ..
+    } = local;
+    Ok(format!(
+        "{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}"
+    ))
+}
+
+#[cfg(unix)]
+fn local_stamp(time: SystemTime) -> io::Result<String> {
+    use std::ffi::{c_char, c_int, c_long};
+    #[repr(C)]
+    struct Tm {
+        second: c_int,
+        minute: c_int,
+        hour: c_int,
+        day: c_int,
+        month: c_int,
+        year: c_int,
+        weekday: c_int,
+        yearday: c_int,
+        dst: c_int,
+        offset: c_long,
+        zone: *const c_char,
+    }
+    unsafe extern "C" {
+        fn localtime_r(time: *const i64, result: *mut Tm) -> *mut Tm;
+    }
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_secs() as i64;
+    let mut tm = std::mem::MaybeUninit::<Tm>::zeroed();
+    // localtime_r fills only the caller's buffer.
+    let tm = unsafe {
+        if localtime_r(&seconds, tm.as_mut_ptr()).is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        tm.assume_init()
+    };
+    Ok(format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        tm.year + 1900,
+        tm.month + 1,
+        tm.day,
+        tm.hour,
+        tm.minute,
+        tm.second
+    ))
 }
 
 struct Worker(Child);
@@ -629,9 +888,16 @@ fn watch_eof(mut input: impl Read + Send + 'static) -> Arc<AtomicBool> {
     closed
 }
 
-/// Runs of a circuit folder, newest first. Completed runs add the rows, time
-/// range and signals of their result, read from its header.
-pub fn list(directory: &Path) -> Response {
+/// Runs of a circuit file, and runs without a recorded circuit, newest first.
+pub fn list_circuit(file: &Path) -> Response {
+    let (directory, circuit) = circuit_file(file)?;
+    list(&directory, Some(&circuit))
+}
+
+/// Runs of a circuit folder, newest first, or only those of `circuit` and those
+/// without a recorded circuit. Completed runs add the rows, time range and
+/// signals of their result, read from its header.
+pub fn list(directory: &Path, circuit: Option<&str>) -> Response {
     let root = directory.join("runs");
     let entries = match fs::read_dir(&root) {
         Ok(entries) => entries,
@@ -652,13 +918,20 @@ pub fn list(directory: &Path) -> Response {
             continue;
         }
         let status = recover_run(&path)?;
-        let started = id
-            .split('-')
-            .next()
-            .and_then(|nanos| nanos.parse::<u128>().ok())
-            .unwrap_or_default();
+        if circuit.is_some() && status.circuit.is_some() && status.circuit.as_deref() != circuit {
+            continue;
+        }
+        // Runs before recorded start times were named by Unix nanoseconds.
+        let started = status.started_at.unwrap_or_else(|| {
+            id.split('-')
+                .next()
+                .and_then(|nanos| nanos.parse::<u128>().ok())
+                .map_or(0.0, |nanos| (nanos / 1_000_000) as f64)
+        });
         let mut run = json!(status);
-        run["startedAt"] = json!((started / 1_000_000) as f64);
+        run["startedAt"] = json!(started);
+        run["circuit"] = json!(status.circuit);
+        run["pinned"] = path.join(PINNED).exists().into();
         if status.state == State::Completed {
             let summary = waves::summary(&path.join(RESULT)).map_err(io_error)?;
             run["rows"] = summary.rows.into();
@@ -667,7 +940,7 @@ pub fn list(directory: &Path) -> Response {
         }
         runs.push((started, id, run));
     }
-    runs.sort_by(|a, b| (b.0, &b.1).cmp(&(a.0, &a.1)));
+    runs.sort_by(newest_first);
     let runs: Vec<_> = runs.into_iter().map(|(_, _, run)| run).collect();
     Ok(ok(json!({ "runs": runs })))
 }
@@ -784,15 +1057,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_folders_are_named_by_local_start_time_and_never_reused() {
+        let root = std::env::temp_dir().join(format!("litzsim-run-names-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let time = SystemTime::now();
+        let stamp = local_stamp(time).unwrap();
+        let ids: Vec<_> = (0..3).map(|_| create_run(&root, time).unwrap().1).collect();
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(
+            ids,
+            [stamp.clone(), format!("{stamp}-1"), format!("{stamp}-2")]
+        );
+        assert!(valid_run_id(&ids[2]));
+        let (date, clock) = stamp.split_once('-').unwrap();
+        let field = |text: &str, range: std::ops::Range<usize>| text[range].parse::<u32>().unwrap();
+        assert!(date.len() == 8 && clock.len() == 6, "{stamp}");
+        assert!(field(date, 0..4) >= 2026);
+        assert!((1..=12).contains(&field(date, 4..6)) && (1..=31).contains(&field(date, 6..8)));
+        assert!(field(clock, 0..2) < 24 && field(clock, 2..4) < 60 && field(clock, 4..6) < 61);
+    }
+
+    #[test]
     fn admission_does_not_wait_for_supervisor_handshake() {
-        let (directory, _) = create_run(&std::env::temp_dir()).unwrap();
+        let directory =
+            std::env::temp_dir().join(format!("litzsim-admission-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let file = directory.join("rc.litzsim");
+        fs::write(&file, include_bytes!("../../../examples/rc.litzsim")).unwrap();
         let document =
             Document::from_bytes(include_bytes!("../../../examples/rc.litzsim")).unwrap();
         let revision = document.revision();
 
         // In a unit test current_exe is the test runner. The private supervisor
         // arguments make it exit without initializing a solver or replying.
-        let (first, mut child) = admit(&directory, &document, &revision, false).unwrap();
+        let (first, mut child) = admit(&file, &document, &revision, false).unwrap();
         let path = Path::new(first["runDirectory"].as_str().unwrap());
         assert_eq!(first["state"], "running");
         assert_eq!(
@@ -805,7 +1103,7 @@ mod tests {
         let failed = status(path).unwrap();
         assert_eq!(failed["state"], "failed");
         assert_eq!(failed["error"]["code"], "supervisorExited");
-        let (next, mut child) = admit(&directory, &document, &revision, false).unwrap();
+        let (next, mut child) = admit(&file, &document, &revision, false).unwrap();
         assert_ne!(first["runId"], next["runId"]);
         child.wait().unwrap();
         fs::remove_dir_all(directory).unwrap();
