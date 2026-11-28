@@ -238,6 +238,7 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename, editLabelText, 
   const pins = Object.entries(sheet.layout.pins);
   if (!part) {
     const missing = pins.filter(([, pin]) => pin.netId === null).map(([id]) => id);
+    const unpairedLabels = sheet.layout.labelWarnings ?? [];
     const { simulation } = sheet.document;
     return <>
       <h3 style={{ margin: 0 }}>회로</h3>
@@ -255,6 +256,12 @@ function Properties({ ui, sheet, selectedId, busy, edit, rename, editLabelText, 
       {missing.length > 0 && <div style={styles.group}>
         <h4 style={{ margin: 0 }}>미접속 단자 {missing.length}</h4>
         <span style={{ fontSize: "var(--font-size-sm)", color: "var(--id-color-warning)", wordBreak: "break-word" }}>{missing.join(", ")}</span>
+      </div>}
+      {unpairedLabels.length > 0 && <div style={styles.group}>
+        <h4 style={{ margin: 0 }}>짝 없는 라벨 {unpairedLabels.length}</h4>
+        <ul style={{ margin: 0, paddingInlineStart: "1.25em", fontSize: "var(--font-size-sm)", overflowWrap: "anywhere" }}>
+          {unpairedLabels.map(({ partId, text }) => <li key={partId}>{partId} ({text})</li>)}
+        </ul>
       </div>}
       <p style={{ margin: 0, fontSize: "var(--font-size-sm)", color: "var(--id-color-text-muted)" }}>
         소자를 누르면 이름·값·단자 연결을 볼 수 있습니다.</p>
@@ -1030,9 +1037,6 @@ export function Editor({ ui, adapter }) {
       <section id="litzsim-panel-circuit" role="tabpanel" aria-label="LitzSim 회로 편집기"
         style={{ ...styles.body, ...styles.pane, ...(shownTab === "circuit" ? null : styles.hidden) }} onKeyDown={onKeyDown} onKeyUp={onKeyUp}>
         {error && <ui.Notice tone="error">{error}</ui.Notice>}
-        {sheet.layout.labelWarnings?.length > 0 && <ui.Notice tone="warning">
-          {sheet.layout.labelWarnings.map(warning => `${warning.partId} (${warning.text})`).join(", ")}와 이름이 같은 라벨이 없습니다.
-        </ui.Notice>}
         {run?.state === "failed" && run.error && <ui.Notice tone="error">{`실행 실패 — ${run.error.message ?? run.error.code}`}</ui.Notice>}
         {saving && <ui.Toolbar label="새 회로 저장">
           <label style={styles.field}>
