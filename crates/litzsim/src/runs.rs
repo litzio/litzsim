@@ -917,32 +917,61 @@ pub fn list(directory: &Path, circuit: Option<&str>) -> Response {
         if !valid_run_id(&id) || !path.join(STATUS).is_file() {
             continue;
         }
-        let status = recover_run(&path)?;
-        if circuit.is_some() && status.circuit.is_some() && status.circuit.as_deref() != circuit {
-            continue;
+        if let Some(run) = list_run(&path, id, circuit)? {
+            runs.push(run);
         }
-        // Runs before recorded start times were named by Unix nanoseconds.
-        let started = status.started_at.unwrap_or_else(|| {
-            id.split('-')
-                .next()
-                .and_then(|nanos| nanos.parse::<u128>().ok())
-                .map_or(0.0, |nanos| (nanos / 1_000_000) as f64)
-        });
-        let mut run = json!(status);
-        run["startedAt"] = json!(started);
-        run["circuit"] = json!(status.circuit);
-        run["pinned"] = path.join(PINNED).exists().into();
-        if status.state == State::Completed {
-            let summary = waves::summary(&path.join(RESULT)).map_err(io_error)?;
-            run["rows"] = summary.rows.into();
-            run["timeRange"] = json!(summary.time_range);
-            run["channels"] = json!(summary.channels);
-        }
-        runs.push((started, id, run));
     }
     runs.sort_by(newest_first);
     let runs: Vec<_> = runs.into_iter().map(|(_, _, run)| run).collect();
     Ok(ok(json!({ "runs": runs })))
+}
+
+/// A listed run with its start time and ID, or none when it belongs to another
+/// circuit or its folder was removed while it was read, as another process's
+/// pruning or deletion does. Other errors fail the listing.
+fn list_run(
+    path: &Path,
+    id: String,
+    circuit: Option<&str>,
+) -> Result<Option<(f64, String, Value)>, Value> {
+    match read_listed_run(path, id, circuit) {
+        Err(_)
+            if fs::symlink_metadata(path)
+                .is_err_and(|err| err.kind() == io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        result => result,
+    }
+}
+
+fn read_listed_run(
+    path: &Path,
+    id: String,
+    circuit: Option<&str>,
+) -> Result<Option<(f64, String, Value)>, Value> {
+    let status = recover_run(path)?;
+    if circuit.is_some() && status.circuit.is_some() && status.circuit.as_deref() != circuit {
+        return Ok(None);
+    }
+    // Runs before recorded start times were named by Unix nanoseconds.
+    let started = status.started_at.unwrap_or_else(|| {
+        id.split('-')
+            .next()
+            .and_then(|nanos| nanos.parse::<u128>().ok())
+            .map_or(0.0, |nanos| (nanos / 1_000_000) as f64)
+    });
+    let mut run = json!(status);
+    run["startedAt"] = json!(started);
+    run["circuit"] = json!(status.circuit);
+    run["pinned"] = path.join(PINNED).exists().into();
+    if status.state == State::Completed {
+        let summary = waves::summary(&path.join(RESULT)).map_err(io_error)?;
+        run["rows"] = summary.rows.into();
+        run["timeRange"] = json!(summary.time_range);
+        run["channels"] = json!(summary.channels);
+    }
+    Ok(Some((started, id, run)))
 }
 
 pub fn status(path: &Path) -> Response {
@@ -1075,6 +1104,50 @@ mod tests {
         assert!(field(date, 0..4) >= 2026);
         assert!((1..=12).contains(&field(date, 4..6)) && (1..=31).contains(&field(date, 6..8)));
         assert!(field(clock, 0..2) < 24 && field(clock, 2..4) < 60 && field(clock, 4..6) < 61);
+    }
+
+    #[test]
+    fn listing_skips_runs_removed_while_reading_but_reports_other_errors() {
+        let directory = std::env::temp_dir().join(format!("litzsim-list-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let root = directory.join("runs");
+        let run = |id: &str, status: &[u8]| {
+            let path = root.join(id);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join(STATUS), status).unwrap();
+            fs::write(path.join(CONTROL), b"").unwrap();
+            path
+        };
+        let failed = |id: &str| {
+            json!({
+                "runId": id, "revision": "r", "state": "failed",
+                "simulatedTime": 0.0, "stopTime": 1.0, "solverPid": null,
+            })
+            .to_string()
+        };
+        run("20261128-100000", failed("20261128-100000").as_bytes());
+        let gone = run("20261128-110000", failed("20261128-110000").as_bytes());
+        assert_eq!(
+            list(&directory, None).unwrap()["runs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Deletion renames the folder away after the listing found its status.
+        fs::remove_dir_all(&gone).unwrap();
+        assert!(
+            list_run(&gone, "20261128-110000".into(), None)
+                .unwrap()
+                .is_none()
+        );
+
+        // A run that is still there but unreadable fails the listing.
+        run("20261128-120000", b"{");
+        let err = list(&directory, None).unwrap_err();
+        fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(err["code"], "ioError", "{err}");
     }
 
     #[test]
