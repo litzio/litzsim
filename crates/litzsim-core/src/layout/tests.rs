@@ -8,6 +8,63 @@ const RLC: &[u8] = include_bytes!("../../../../examples/rlc.litzsim");
 const BUCK: &[u8] = include_bytes!("../../../../examples/buck.litzsim");
 
 #[test]
+fn connected_signal_outputs_hide_only_the_tip() {
+    let original: Value = serde_json::from_slice(include_bytes!(
+        "../../../../examples/control-signals.litzsim"
+    ))
+    .unwrap();
+    let connected_document = document(&original);
+    let connected = layout(&connected_document);
+    for (part, net) in [("SUM2", "difference2"), ("GAIN1", "scaled")] {
+        let mut circuit = original.clone();
+        let output = format!("{part}.out");
+        circuit["nets"].as_object_mut().unwrap().remove(net);
+        let detached_document = document(&circuit);
+        let detached = layout(&detached_document);
+        assert_eq!(connected.pins[&output].net_id, Some(net));
+        assert_eq!(detached.pins[&output].net_id, None);
+        assert_eq!(connected.symbols.len(), detached.symbols.len());
+        for (wired, unwired) in connected.symbols.iter().zip(&detached.symbols) {
+            assert_eq!(wired.id, unwired.id);
+            assert_eq!(wired.bounds, unwired.bounds);
+            let mut expected = serde_json::to_value(&wired.strokes).unwrap();
+            if wired.id == part {
+                expected.as_array_mut().unwrap().push(
+                    serde_json::to_value(Stroke::Polyline {
+                        points: vec![[23, 4], [29, 0], [23, -4]],
+                    })
+                    .unwrap(),
+                );
+            }
+            assert_eq!(
+                expected,
+                serde_json::to_value(&unwired.strokes).unwrap(),
+                "{part}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(
+                connected
+                    .segments
+                    .iter()
+                    .filter(|wire| wire.net_id != net)
+                    .collect::<Vec<_>>()
+            )
+            .unwrap(),
+            serde_json::to_value(&detached.segments).unwrap(),
+        );
+        circuit["nets"][net] = json!([output]);
+        let singleton_document = document(&circuit);
+        let singleton = layout(&singleton_document);
+        assert_eq!(singleton.pins[&output].net_id, Some(net));
+        assert_eq!(
+            serde_json::to_value(&singleton.symbols).unwrap(),
+            serde_json::to_value(&connected.symbols).unwrap(),
+        );
+    }
+}
+
+#[test]
 fn sum_slots_place_inputs_in_order_on_the_grid() {
     let mut circuit = json!({
         "version": 3, "simulation": {"timeStep_s": 1, "stopTime_s": 1},
