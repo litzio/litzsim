@@ -1,0 +1,39 @@
+{
+  "version": 3,
+  "simulation": {
+    "timeStep_s": 0.25,
+    "stopTime_s": 1.5,
+    "controlTask": {"mode": "fixed", "period_s": 0.375, "phase": 0}
+  },
+  "parts": {
+    "CONST1": {"type": "constant", "parameters": {"value": 2}, "record": {"output": true}},
+    "RAMP1": {"type": "ramp", "parameters": {"startTime_s": 0.125, "slope_per_s": 4, "finalValue": 3}, "record": {"output": true}},
+    "STEP1": {"type": "step", "parameters": {"stepTime_s": 0.625, "before": 1, "after": -1}, "record": {"output": true}},
+    "SUM1": {"type": "sum", "parameters": {"inputs": "|+-", "iconShape": "round"}, "record": {"output": true}},
+    "SUM2": {"type": "sum", "parameters": {"inputs": "|+-", "iconShape": "round"}, "record": {"output": true}},
+    "GAIN1": {"type": "gain", "parameters": {"gain": -2}, "record": {"output": true}},
+    "STEP_FROM": {"type": "label", "parameters": {"text": "Step"}},
+    "STEP_TO": {"type": "label", "parameters": {"text": "STEP"}},
+    "LIM1": {"type": "limiter", "parameters": {"min": 0.25, "max": 1.25}, "record": {"output": true}}
+  },
+  "nets": {
+    "constant": ["CONST1.out", "SUM1.in1"],
+    "ramp": ["RAMP1.out", "SUM1.in2"],
+    "step": ["STEP1.out", "STEP_FROM.p"],
+    "step_receiver": ["STEP_TO.p", "SUM2.in1"],
+    "difference1": ["SUM1.out", "SUM2.in2"],
+    "difference2": ["SUM2.out", "GAIN1.in"],
+    "scaled": ["GAIN1.out", "LIM1.in"]
+  },
+  "layout": {
+    "CONST1": {"x": 0, "y": 2},
+    "RAMP1": {"x": 0, "y": 6},
+    "STEP1": {"x": 5, "y": 0},
+    "STEP_FROM": {"x": 7, "y": -1},
+    "STEP_TO": {"x": 8, "y": 0},
+    "SUM1": {"x": 5, "y": 4},
+    "SUM2": {"x": 10, "y": 2},
+    "GAIN1": {"x": 15, "y": 2},
+    "LIM1": {"x": 20, "y": 2}
+  }
+}

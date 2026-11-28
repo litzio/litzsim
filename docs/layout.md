@@ -14,6 +14,8 @@
 
 ## 라벨
 
+네트 라벨(`label`)은 깃발 기호 옆에 `parameters.text`를 소자 ID와 같은 치수로 그립니다. 기본 단자 `p`는 기호 중심 아래 1격자에 있으며, 연결 해석에서 신호 영역을 물려받으면 `signalDirection: "input"`으로 표시합니다. `signalNets`에는 같은 신호로 해석되는 파일 네트를 모두 넣고, 선분과 교차는 각 파일 네트의 단자만으로 계산합니다. 같은 이름의 짝이 없는 라벨은 `labelWarnings`에 소자 ID와 원문을 담습니다.
+
 장면 단위의 고정 치수는 각 라벨의 `metrics`로 반환한다. 줄 바꿈 없이 상자 중심에 글자를 똑바로 놓는다. 상자 너비는 `advance × 유니코드 문자 수 + 2 × padding`이고 높이는 `lineHeight + 2 × padding`이다. 글꼴을 고르는 화면은 패딩 안쪽에 잉크가 들어오도록 맞춘다.
 
 | 종류 | advance | lineHeight | fontSize | padding | bold |

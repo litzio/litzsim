@@ -33,9 +33,11 @@ fn archived_examples_keep_their_data_and_have_canonical_bytes() {
         let version_one =
             std::str::from_utf8(&saved)
                 .unwrap()
-                .replacen(r#""version": 2"#, r#""version": 1"#, 1);
+                .replacen(r#""version": 3"#, r#""version": 1"#, 1);
         assert_eq!(revision(version_one.as_bytes()), before_mirror);
         assert!(Document::from_bytes(version_one.as_bytes()).is_err());
+        let version_two = version_one.replacen(r#""version": 1"#, r#""version": 2"#, 1);
+        assert!(Document::from_bytes(version_two.as_bytes()).is_err());
         let mut source: Value = serde_json::from_slice(bytes).unwrap();
         let mut canonical: Value = serde_json::from_slice(&saved).unwrap();
         normalize_numbers(&mut source);
@@ -489,6 +491,59 @@ fn batch_is_atomic_and_receipt_tracks_net_merges_deletes_and_undo() {
 }
 
 struct SaveTestDirectory(std::path::PathBuf);
+
+#[test]
+fn label_text_changes_connections_while_part_rename_preserves_them() {
+    let original = Document::from_bytes(RC).unwrap();
+    let ops = serde_json::from_value::<Vec<Operation>>(json!([
+        {"op":"add","type":"label","grid":[2,-1]},
+        {"op":"add","type":"label","grid":[5,7]},
+        {"op":"connect","a":"LABEL1.p","b":"V1.p"},
+        {"op":"connect","a":"LABEL2.p","b":"V1.n"}
+    ]))
+    .unwrap();
+    let before = apply(&original, &original.revision(), &ops)
+        .unwrap()
+        .document;
+    assert_eq!(before.inspect().label_warnings.len(), 2);
+    let set_text = Operation::SetParameter {
+        id: "LABEL2".into(),
+        key: "text".into(),
+        value: " label1 ".into(),
+    };
+    let joined = apply(&before, &before.revision(), &[set_text]).unwrap();
+    assert_eq!(joined.receipt.shorted_sources, ["V1"]);
+    assert!(joined.receipt.nets.is_empty());
+    assert!(joined.document.inspect().label_warnings.is_empty());
+    let rename = Operation::Rename {
+        id: "LABEL2".into(),
+        new_id: "ReturnFlag".into(),
+    };
+    let renamed = apply(&joined.document, &joined.document.revision(), &[rename]).unwrap();
+    assert!(renamed.receipt.shorted_sources.is_empty());
+    assert_eq!(
+        renamed.document.0.nets["ground"].last().unwrap(),
+        "ReturnFlag.p"
+    );
+    assert_eq!(
+        renamed.document.0.parts["ReturnFlag"].parameters["text"],
+        " label1 "
+    );
+
+    let folder = SaveTestDirectory::new("net-label");
+    let path = folder.0.join("labels.litzsim");
+    save(&path, &renamed.document, SaveMode::New).unwrap();
+    let opened = open(&path).unwrap();
+    assert_eq!(opened.document.to_bytes(), renamed.document.to_bytes());
+    let restored = undo(
+        &joined.document,
+        &joined.document.revision(),
+        &before.revision(),
+        &before,
+    )
+    .unwrap();
+    assert_eq!(restored.document.to_bytes(), before.to_bytes());
+}
 
 impl SaveTestDirectory {
     fn new(name: &str) -> Self {

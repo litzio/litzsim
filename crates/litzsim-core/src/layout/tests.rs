@@ -10,7 +10,7 @@ const BUCK: &[u8] = include_bytes!("../../../../examples/buck.litzsim");
 #[test]
 fn sum_slots_place_inputs_in_order_on_the_grid() {
     let mut circuit = json!({
-        "version": 2, "simulation": {"timeStep_s": 1, "stopTime_s": 1},
+        "version": 3, "simulation": {"timeStep_s": 1, "stopTime_s": 1},
         "parts": {"SUM": {"type": "sum", "parameters": {"inputs": "|++", "iconShape": "round"}}},
         "nets": {}, "layout": {"SUM": {"x": 0, "y": 0}}
     });
@@ -402,7 +402,7 @@ fn example_voltmeters_take_manhattan_paths_to_their_rails() {
 fn crossing_has_one_horizontal_jump_and_continuous_vertical_run_in_both_net_orders() {
     for (horizontal, vertical) in [("a", "b"), ("b", "a")] {
         let mut fixture = json!({
-            "version": 2,
+            "version": 3,
             "parts": {
                 "left": {"type":"ground","parameters":{}},
                 "right": {"type":"ground","parameters":{}},
@@ -897,7 +897,7 @@ fn insert_in_branch_leaves_unrouted_terminals_on_the_original_net() {
 #[test]
 fn insert_in_branch_rejects_an_ammeter_that_would_overlap_a_symbol() {
     let doc = document(&json!({
-        "version": 2,
+        "version": 3,
         "simulation": { "timeStep_s": 1e-6, "stopTime_s": 0.001 },
         "parts": {
             "R1": {"type":"resistor","parameters":{"resistance_ohm":1}},

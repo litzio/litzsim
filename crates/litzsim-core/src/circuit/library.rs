@@ -54,6 +54,7 @@ pub(crate) enum PinKind {
     SignalInput,
     SignalOutput,
     VoltageProbe,
+    NetLabel,
 }
 
 impl PinKind {
@@ -138,7 +139,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
             &[("frequency_Hz", 10000.0), ("high_V", 10.0)],
         ),
         "voltmeter" | "ammeter" => (&["p", "n"], &[]),
-        "voltageProbe" => (&["p"], &[]),
+        "voltageProbe" | "label" => (&["p"], &[]),
         "voltageSensor" | "currentSensor" => (&["p", "n", "out"], &[("gain", 1.0)]),
         "constant" => (&["out"], &[("value", 0.0)]),
         "step" => (
@@ -190,7 +191,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
     };
     let pin_offsets: &[_] = match kind {
         "ground" => &[[0, -1]],
-        "voltageProbe" => &[[0, 1]],
+        "voltageProbe" | "label" => &[[0, 1]],
         // The body diode's anode is at S and cathode at D.
         "nmos" => &[[0, -1], [-1, 0], [0, 1]],
         "resistor" | "inductor" | "ammeter" => &[[-1, 0], [1, 0]],
@@ -215,6 +216,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         "pwm" | "dutyPwm" => "PWM",
         "voltmeter" => "VM",
         "voltageProbe" => "VP",
+        "label" => "LABEL",
         "voltageSensor" => "VS",
         "currentSensor" => "CS",
         "constant" => "CONST",
@@ -245,6 +247,7 @@ pub fn part_definition(kind: &str) -> Option<PartDefinition> {
         duty_update_timing: (kind == "dutyPwm").then_some("cycleStart"),
         pin_kinds: match kind {
             "voltageProbe" => &[PinKind::VoltageProbe],
+            "label" => &[PinKind::NetLabel],
             "voltageSensor" | "currentSensor" => &[Electrical, Electrical, SignalOutput],
             "constant" | "step" | "ramp" => &[SignalOutput],
             "sum" => &[SignalOutput],

@@ -51,6 +51,26 @@ const rc = async () => {
   return { document: opened.document, revision: opened.revision };
 };
 
+test("library labels retain separate drawn segments and classify a remote probe as signal", async () => {
+  const opened = await call("inspect", { file: `${root}examples/control-signals-labels.litzsim` });
+  const sheet = await apply(opened, []);
+  assert.ok(libraryCategories(sheet.layout).find(group => group.id === "connections").parts.includes(PARTS.label));
+  const remote = await apply(sheet, [
+    { op: "add", type: "voltageProbe", grid: [15, -3] },
+    { op: "add", type: "label", grid: [12, -3] },
+    { op: "connect", a: "LABEL1.p", b: "VP1.p" },
+  ]);
+  const net = remote.layout.pins["VP1.p"].netId;
+  assert.ok(remote.layout.labelWarnings.some(warning => warning.partId === "LABEL1"));
+  const joined = await apply(remote, [{ op: "setParameter", id: "LABEL1", key: "text", value: "sTeP" }]);
+  assert.equal(joined.layout.labelWarnings, undefined);
+  assert.equal(joined.layout.pins["VP1.p"].signalDirection, "input");
+  assert.equal(joined.layout.pins["VP1.p"].netId, net);
+  assert.ok(joined.layout.labels.some(label => label.partId === "LABEL1" && label.text === "sTeP"));
+  assert.deepEqual(joined.layout.segments, remote.layout.segments);
+  assert.equal(wireStyle(joined.layout.signalNets, net).stroke, "var(--id-color-accent-blue-paper)");
+});
+
 test("selecting one wire sends the core terminals and endpoints, even if segment indices change", async () => {
   const sheet = await apply(await rc(), []);
   const index = sheet.layout.segments.findIndex(wire => wire.netId === "input");

@@ -1,3 +1,4 @@
+mod connections;
 mod edit;
 mod file;
 mod library;
@@ -5,6 +6,8 @@ mod sum;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use connections::Connections;
+pub use connections::LabelWarning;
 pub use edit::{EditResult, MirrorAxis, NetChange, Operation, Receipt, apply, undo};
 #[cfg(windows)]
 pub use file::REPLACE_RETRY_DELAYS;
@@ -349,6 +352,8 @@ pub struct Inspection<'a> {
     pub pin_positions: BTreeMap<String, [i64; 2]>,
     pub measurements: BTreeMap<&'a str, Measurement>,
     pub missing_pins: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub label_warnings: Vec<LabelWarning<'a>>,
 }
 
 pub(crate) struct LayoutPart<'a> {
@@ -381,7 +386,7 @@ impl Document {
 
     pub fn new() -> Self {
         Self(Circuit {
-            version: 2,
+            version: 3,
             parts: BTreeMap::new(),
             nets: BTreeMap::new(),
             layout: BTreeMap::new(),
@@ -465,6 +470,13 @@ impl Document {
 
     /// Missing terminals are diagnosed separately from file/operation validation.
     pub fn inspect(&self) -> Inspection<'_> {
+        self.inspect_with_connections(self.0.connections())
+    }
+
+    pub(crate) fn inspect_with_connections<'a>(
+        &'a self,
+        connections: Connections<'a>,
+    ) -> Inspection<'a> {
         let pin_nets = self.0.pin_nets();
         let mut pin_positions = BTreeMap::new();
         let mut measurements = BTreeMap::new();
@@ -477,8 +489,8 @@ impl Document {
             }
             if let Some(mut measurement) = definition.measurement {
                 if part.kind == "voltageProbe"
-                    && let Some(net) = pin_nets[&format!("{id}.p")]
-                    && self.0.is_signal_net(&self.0.nets[net])
+                    && let Some(net) = connections.net_of(&format!("{id}.p"))
+                    && connections.nets[net].signal
                 {
                     measurement.quantity = "output";
                     measurement.unit = RecordQuantity::Output.unit();
@@ -498,6 +510,7 @@ impl Document {
             pin_positions,
             measurements,
             missing_pins,
+            label_warnings: connections.warnings,
         }
     }
 }
@@ -509,14 +522,6 @@ impl Default for Document {
 }
 
 impl Circuit {
-    pub(crate) fn is_signal_net(&self, pins: &[String]) -> bool {
-        // The fixed terminals of a validated net already agree on its domain.
-        pins.iter()
-            .map(|pin| self.require_pin(pin).expect("validated terminal"))
-            .find(|&kind| kind != PinKind::VoltageProbe)
-            .is_some_and(PinKind::is_signal)
-    }
-
     pub(crate) fn pin_nets(&self) -> BTreeMap<String, Option<&str>> {
         let mut pin_nets = BTreeMap::new();
         for (id, part) in &self.parts {
@@ -533,7 +538,7 @@ impl Circuit {
     }
 
     fn validate(&self) -> Result<(), Error> {
-        if self.version != 2 {
+        if self.version != 3 {
             return Err(Error::invalid(
                 "version",
                 format!("unsupported circuit version: {}", self.version),
@@ -570,6 +575,13 @@ impl Circuit {
             }
             if part.kind == "sum" {
                 Sum::read(id, &part.parameters)?;
+                continue;
+            }
+            if part.kind == "label" {
+                if part.parameters.len() != 1 {
+                    return Err(Error::invalid(id, "Label requires a single text parameter"));
+                }
+                connections::read_text(id, part.parameters.get("text"))?;
                 continue;
             }
             for (key, value) in &part.parameters {
@@ -614,7 +626,7 @@ impl Circuit {
                 self.require_pin(pin)?;
             }
         }
-        Ok(())
+        self.connections().validate(self)
     }
 
     fn validate_control_task(&self, task: &ControlTask) -> Result<(), Error> {
@@ -692,7 +704,7 @@ impl Circuit {
         let mut output = None;
         for terminal in terminals {
             let kind = self.require_pin(terminal)?;
-            if kind == PinKind::VoltageProbe {
+            if matches!(kind, PinKind::VoltageProbe | PinKind::NetLabel) {
                 continue;
             }
             if let Some((first, signal)) = domain
