@@ -213,6 +213,8 @@ Litzio 화면의 **측정 → 노드 전압계** 또는 `N`으로 배치한 뒤,
 
 `litzsim run examples/control-signals.litzsim control-signals.litzwave`로 지령과 연산 블록 예제를 실행할 수 있습니다.
 
+회로도에서 파일 네트에 속한 신호 출력은 화살표 없이 배선으로 이어집니다. 파일 네트에 속하지 않은 출력에는 화살표와 미접속 원이 표시됩니다.
+
 `litzsim run examples/buck-voltage-loop.litzsim buck-voltage-loop.litzwave`는 전압 센서, 샘플러, 지령 합산, PI, 듀티 입력 PWM으로 2.5 V를 추종하는 벅 예제를 실행합니다. `VC_V`, `ERR_out`, `PI_out`에 출력 전압, 전압 오차, 듀티 지령을 기록합니다.
 
 `litzsim run examples/buck-dual-loop.litzsim buck-dual-loop.litzwave`는 전압과 인덕터 전류를 각각 제어합니다. 전압은 캐리어 주기 시작에, 인덕터 전류는 켜짐 구간 중앙에 샘플합니다. `L1_A`와 `I_REF_out`을 비교하면 정상상태에서 인덕터 전류 주기 평균이 지령을 추종하는 것을 확인할 수 있습니다. [이중루프 벅 검증 기록](docs/reviews/buck-dual-loop.md)
